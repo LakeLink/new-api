@@ -347,13 +347,9 @@ func OaiStreamToNonStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 		if choice.Message.Content == nil {
 			choice.Message.SetStringContent("")
 		}
-		if choice.FinishReason == "" {
-			choice.FinishReason = constant.FinishReasonStop
-		}
-		if choice.FinishReason == constant.FinishReasonContentFilter {
-			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "openai_finish_reason=content_filter")
-		}
+		hasToolCalls := false
 		if choiceToolCalls := toolCallsByChoice[index]; len(choiceToolCalls) > 0 {
+			hasToolCalls = true
 			toolCallIndexes := make([]int, 0, len(choiceToolCalls))
 			for toolIndex := range choiceToolCalls {
 				toolCallIndexes = append(toolCallIndexes, toolIndex)
@@ -366,9 +362,22 @@ func OaiStreamToNonStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 				if toolCall == nil {
 					continue
 				}
+				if toolCall.Type == nil || strings.TrimSpace(common.Interface2String(toolCall.Type)) == "" {
+					toolCall.Type = "function"
+				}
 				toolCalls = append(toolCalls, *toolCall)
 			}
 			choice.Message.SetToolCalls(toolCalls)
+		}
+		if choice.FinishReason == "" {
+			if hasToolCalls {
+				choice.FinishReason = constant.FinishReasonToolCalls
+			} else {
+				choice.FinishReason = constant.FinishReasonStop
+			}
+		}
+		if choice.FinishReason == constant.FinishReasonContentFilter {
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "openai_finish_reason=content_filter")
 		}
 		responseChoices = append(responseChoices, *choice)
 	}

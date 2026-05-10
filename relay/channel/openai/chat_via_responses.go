@@ -116,6 +116,7 @@ func (a *responsesStreamAccumulator) Apply(ev *dto.ResponsesStreamResponse) erro
 		a.applyToolCallArgumentsDelta(ev.ItemID, ev.Delta)
 
 	case "response.function_call_arguments.done":
+		a.applyToolCallArgumentsDone(ev.ItemID, dto.ResponsesArgumentsString(ev.Arguments))
 
 	case "response.completed":
 		a.applyEventTerminalStatus(ev.Type)
@@ -162,7 +163,7 @@ func (a *responsesStreamAccumulator) Result() (messageText string, reasoningText
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		a.usage = usage
 	}
-	if a.sawToolCall && a.outputText.Len() == 0 {
+	if a.sawToolCall {
 		toolCalls = a.orderedToolCalls()
 	}
 	return a.outputText.String(), a.reasoningText.String(), usage, toolCalls, nil
@@ -289,10 +290,7 @@ func (a *responsesStreamAccumulator) applyToolCallItem(item *dto.ResponsesOutput
 }
 
 func (a *responsesStreamAccumulator) applyToolCallArgumentsDelta(itemID string, delta string) {
-	callID := a.toolCallCanonicalIDByItemID[strings.TrimSpace(itemID)]
-	if callID == "" {
-		callID = strings.TrimSpace(itemID)
-	}
+	callID := a.resolveToolCallID(itemID)
 	if callID == "" {
 		return
 	}
@@ -302,6 +300,37 @@ func (a *responsesStreamAccumulator) applyToolCallArgumentsDelta(itemID string, 
 	a.lastToolCallID = callID
 	a.lastToolCallArgsDelta = delta
 	a.sawToolCall = true
+}
+
+func (a *responsesStreamAccumulator) applyToolCallArgumentsDone(itemID string, arguments string) {
+	callID := a.resolveToolCallID(itemID)
+	if callID == "" || arguments == "" {
+		return
+	}
+	a.ensureToolCallIndex(callID)
+
+	prevArgs := a.toolCallArgsByID[callID]
+	switch {
+	case prevArgs == arguments:
+		a.lastToolCallArgsDelta = ""
+	case prevArgs == "":
+		a.lastToolCallArgsDelta = arguments
+	case strings.HasPrefix(arguments, prevArgs):
+		a.lastToolCallArgsDelta = arguments[len(prevArgs):]
+	default:
+		a.lastToolCallArgsDelta = arguments
+	}
+	a.toolCallArgsByID[callID] = arguments
+	a.lastToolCallID = callID
+	a.sawToolCall = true
+}
+
+func (a *responsesStreamAccumulator) resolveToolCallID(itemID string) string {
+	callID := a.toolCallCanonicalIDByItemID[strings.TrimSpace(itemID)]
+	if callID == "" {
+		callID = strings.TrimSpace(itemID)
+	}
+	return callID
 }
 
 func (a *responsesStreamAccumulator) ensureToolCallIndex(callID string) {
@@ -479,7 +508,6 @@ func OaiResponsesToChatStreamToNonStreamHandler(c *gin.Context, info *relaycommo
 
 	if len(toolCalls) > 0 {
 		msg.SetToolCalls(toolCalls)
-		msg.Content = ""
 	}
 
 	finishReason := acc.finishReason(len(toolCalls) > 0)
@@ -655,8 +683,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if callID == "" {
 			return true
 		}
-		if acc.outputText.Len() > 0 {
-			// Prefer streaming assistant text over tool calls to match non-stream behavior.
+		if acc.toolCallNameByID[callID] != "" {
+			name = acc.toolCallNameByID[callID]
+		}
+		if argsDelta == "" && (name == "" || toolCallNameSent[callID]) {
 			return true
 		}
 		if !sendStartIfNeeded() {
@@ -667,9 +697,6 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if !ok {
 			idx = len(acc.toolCallIndexByID)
 			acc.toolCallIndexByID[callID] = idx
-		}
-		if acc.toolCallNameByID[callID] != "" {
-			name = acc.toolCallNameByID[callID]
 		}
 
 		tool := dto.ToolCallResponse{
@@ -819,6 +846,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 
 		case "response.function_call_arguments.done":
+			if !sendToolCallDelta(acc.lastToolCallID, "", acc.lastToolCallArgsDelta) {
+				sr.Stop(streamErr)
+				return
+			}
 
 		case "response.completed", "response.incomplete":
 			messageText, reasoning, usage, toolCalls, resultErr := acc.Result()
