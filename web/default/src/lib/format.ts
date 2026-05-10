@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import dayjs from '@/lib/dayjs'
 import {
   formatCurrencyFromUSD,
@@ -61,7 +79,7 @@ export function parseQuotaFromDollars(amount: number): number {
   const { config, meta } = getCurrencyDisplay()
 
   // Tokens-only or raw quota mode
-  if (!config.displayInCurrency || meta.kind === 'tokens') {
+  if (meta.kind === 'tokens') {
     return Math.round(amount)
   }
 
@@ -80,7 +98,7 @@ export function parseQuotaFromDollars(amount: number): number {
 export function quotaUnitsToDollars(units: number): number {
   const { config, meta } = getCurrencyDisplay()
 
-  if (!config.displayInCurrency || meta.kind === 'tokens') {
+  if (meta.kind === 'tokens') {
     return units
   }
 
@@ -162,7 +180,6 @@ export function formatTokens(tokens: number): string {
  * Format use time in seconds with appropriate unit
  */
 export function formatUseTime(seconds: number): string {
-  if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`
   if (seconds < 60) return `${seconds.toFixed(1)}s`
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = seconds % 60

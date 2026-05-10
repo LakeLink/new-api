@@ -1,8 +1,27 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import * as z from 'zod'
 import type { Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { RotateCcw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { DEFAULT_CURRENCY_CONFIG } from '@/stores/system-config-store'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -17,6 +36,7 @@ import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -110,6 +130,12 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
     })
 
   const displayType = form.watch('general_setting.quota_display_type') ?? 'USD'
+  const displayInCurrencyEnabled = form.watch('DisplayInCurrencyEnabled')
+  const showTokensOnlyOption = displayType === 'TOKENS'
+  const showQuotaPerUnit =
+    displayType === 'TOKENS' ||
+    defaultValues.QuotaPerUnit !== DEFAULT_CURRENCY_CONFIG.quotaPerUnit
+  const showDisplayInCurrencyOption = displayInCurrencyEnabled === false
 
   return (
     <>
@@ -122,30 +148,32 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
         <Form {...form}>
           <form onSubmit={handleSubmit} className='space-y-6'>
             <FormDirtyIndicator isDirty={isDirty} />
-            <FormField
-              control={form.control}
-              name='QuotaPerUnit'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>{t('Quota Per Unit')}</FormLabel>
-                  <FormControl>
-                    <Input
-                      type='number'
-                      step='0.01'
-                      value={field.value as number}
-                      onChange={(e) => field.onChange(e.target.valueAsNumber)}
-                      name={field.name}
-                      onBlur={field.onBlur}
-                      ref={field.ref}
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    {t('Number of tokens per unit quota')}
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            {showQuotaPerUnit && (
+              <FormField
+                control={form.control}
+                name='QuotaPerUnit'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Quota Per Unit')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        step='0.01'
+                        value={field.value as number}
+                        disabled
+                        name={field.name}
+                        onBlur={field.onBlur}
+                        ref={field.ref}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t('Number of tokens per unit quota')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             <FormField
               control={form.control}
@@ -153,19 +181,34 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>{t('Display Mode')}</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
+                  <Select
+                    items={[
+                      { value: 'USD', label: t('USD') },
+                      { value: 'CNY', label: t('CNY') },
+                      { value: 'CUSTOM', label: t('Custom Currency') },
+                      { value: 'TOKENS', label: t('Tokens Only') },
+                    ]}
+                    value={field.value}
+                    onValueChange={field.onChange}
+                  >
                     <FormControl>
                       <SelectTrigger>
                         <SelectValue placeholder={t('Select display mode')} />
                       </SelectTrigger>
                     </FormControl>
-                    <SelectContent>
-                      <SelectItem value='USD'>{t('USD')}</SelectItem>
-                      <SelectItem value='CNY'>{t('CNY')}</SelectItem>
-                      <SelectItem value='CUSTOM'>
-                        {t('Custom Currency')}
-                      </SelectItem>
-                      <SelectItem value='TOKENS'>{t('Tokens Only')}</SelectItem>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        <SelectItem value='USD'>{t('USD')}</SelectItem>
+                        <SelectItem value='CNY'>{t('CNY')}</SelectItem>
+                        <SelectItem value='CUSTOM'>
+                          {t('Custom Currency')}
+                        </SelectItem>
+                        {showTokensOnlyOption && (
+                          <SelectItem value='TOKENS'>
+                            {t('Tokens Only')}
+                          </SelectItem>
+                        )}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                   <FormDescription>
@@ -272,32 +315,34 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
               </div>
             )}
 
-            <FormField
-              control={form.control}
-              name='DisplayInCurrencyEnabled'
-              render={({ field }) => (
-                <FormItem className='flex flex-row items-center justify-between rounded-lg border p-4'>
-                  <div className='space-y-0.5'>
-                    <FormLabel className='text-base'>
-                      {t('Display in Currency')}
-                    </FormLabel>
-                    <FormDescription>
-                      {displayType === 'TOKENS'
-                        ? t(
-                            'Tokens-only mode will show raw quota values regardless of this toggle.'
-                          )
-                        : t('Show prices in currency instead of quota.')}
-                    </FormDescription>
-                  </div>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
+            {showDisplayInCurrencyOption && (
+              <FormField
+                control={form.control}
+                name='DisplayInCurrencyEnabled'
+                render={({ field }) => (
+                  <FormItem className='flex flex-row items-center justify-between rounded-lg border p-4'>
+                    <div className='space-y-0.5'>
+                      <FormLabel className='text-base'>
+                        {t('Display in Currency')}
+                      </FormLabel>
+                      <FormDescription>
+                        {displayType === 'TOKENS'
+                          ? t(
+                              'Tokens-only mode will show raw quota values regardless of this toggle.'
+                            )
+                          : t('Show prices in currency instead of quota.')}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+            )}
 
             <FormField
               control={form.control}

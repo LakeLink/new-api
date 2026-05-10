@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { type ColumnDef } from '@tanstack/react-table'
@@ -14,6 +32,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { DataTableColumnHeader } from '@/components/data-table'
+import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { getSystemOptions } from '@/features/system-settings/api'
 import { API_KEY_STATUSES } from '../constants'
@@ -62,7 +81,7 @@ function useGroupRatios(): Record<string, number> {
       if (!res.success || !res.data) return {}
       const ratios: Record<string, number> = {}
       for (const [group, info] of Object.entries(res.data)) {
-        if (info.ratio !== undefined) {
+        if (typeof info.ratio === 'number') {
           ratios[group] = info.ratio
         }
       }
@@ -84,10 +103,8 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
       id: 'select',
       header: ({ table }) => (
         <Checkbox
-          checked={
-            table.getIsAllPageRowsSelected() ||
-            (table.getIsSomePageRowsSelected() && 'indeterminate')
-          }
+          checked={table.getIsAllPageRowsSelected()}
+          indeterminate={table.getIsSomePageRowsSelected()}
           onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
           aria-label='Select all'
           className='translate-y-[2px]'
@@ -170,21 +187,19 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
 
         return (
           <Tooltip>
-            <TooltipTrigger asChild>
-              <div className='w-[150px] space-y-1'>
-                <div className='flex justify-between text-xs'>
-                  <span className='font-medium tabular-nums'>
-                    {formatQuota(remaining)}
-                  </span>
-                  <span className='text-muted-foreground tabular-nums'>
-                    {formatQuota(total)}
-                  </span>
-                </div>
-                <Progress
-                  value={percentage}
-                  className={cn('h-1.5', getQuotaProgressColor(percentage))}
-                />
+            <TooltipTrigger render={<div className='w-[150px] space-y-1' />}>
+              <div className='flex justify-between text-xs'>
+                <span className='font-medium tabular-nums'>
+                  {formatQuota(remaining)}
+                </span>
+                <span className='text-muted-foreground tabular-nums'>
+                  {formatQuota(total)}
+                </span>
               </div>
+              <Progress
+                value={percentage}
+                className={cn('h-1.5', getQuotaProgressColor(percentage))}
+              />
             </TooltipTrigger>
             <TooltipContent>
               <div className='space-y-1 text-xs'>
@@ -218,18 +233,20 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
         if (group === 'auto') {
           return (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <span className='inline-flex items-center gap-1.5 text-xs'>
-                  <span className='text-muted-foreground'>{t('Auto')}</span>
-                  {apiKey.cross_group_retry && (
-                    <>
-                      <span className='text-muted-foreground/30'>·</span>
-                      <span className='text-muted-foreground/60'>
-                        {t('Cross-group')}
-                      </span>
-                    </>
-                  )}
-                </span>
+              <TooltipTrigger
+                render={
+                  <span className='inline-flex items-center gap-1.5 text-xs' />
+                }
+              >
+                <GroupBadge group='auto' />
+                {apiKey.cross_group_retry && (
+                  <>
+                    <span className='text-muted-foreground/30'>·</span>
+                    <span className='text-muted-foreground/60'>
+                      {t('Cross-group')}
+                    </span>
+                  </>
+                )}
               </TooltipTrigger>
               <TooltipContent>
                 <span className='text-xs'>
@@ -241,19 +258,7 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
             </Tooltip>
           )
         }
-        return (
-          <span className='inline-flex items-center gap-1.5 text-xs'>
-            <span className='font-medium'>{group || t('Default')}</span>
-            {ratio != null && (
-              <>
-                <span className='text-muted-foreground/30'>·</span>
-                <span className='text-muted-foreground/60 font-mono tabular-nums'>
-                  {ratio}x
-                </span>
-              </>
-            )}
-          </span>
-        )
+        return <GroupBadge group={group} ratio={ratio} />
       },
       meta: { label: t('Group'), mobileHidden: true },
     },
@@ -341,6 +346,7 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
       id: 'actions',
       cell: ({ row }) => <DataTableRowActions row={row} />,
       meta: { label: t('Actions') },
+      size: 88,
     },
   ]
 }

@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
@@ -17,28 +35,21 @@ import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
-  DataTablePagination,
-  DataTableToolbar,
-  TableSkeleton,
-  TableEmpty,
-  MobileCardList,
-} from '@/components/data-table'
-import { PageFooterPortal } from '@/components/layout'
-import { LOG_TYPE_FILTERS, DEFAULT_LOGS_DATA } from '../constants'
+import { TableCell, TableRow } from '@/components/ui/table'
+import { DataTablePage } from '@/components/data-table'
+import { DEFAULT_LOGS_DATA, LOG_TYPE_ENUM } from '../constants'
 import { useColumnsByCategory } from '../lib/columns'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
+import { CommonLogsFilterBar } from './common-logs-filter-bar'
+import { TaskLogsFilterBar } from './task-logs-filter-bar'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
+
+const logTypeRowTint: Record<number, string> = {
+  [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
+  [LOG_TYPE_ENUM.REFUND]: 'bg-blue-50/30 dark:bg-blue-950/15',
+}
 
 interface UsageLogsTableProps {
   logCategory: LogCategory
@@ -59,7 +70,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useTableUrlState({
     search: route.useSearch(),
     navigate: route.useNavigate(),
-    pagination: { defaultPage: 1, defaultPageSize: 20 },
+    pagination: { defaultPage: 1, defaultPageSize: isMobile ? 20 : 100 },
     globalFilter: { enabled: false },
     columnFilters: [
       { columnId: 'created_at', searchKey: 'type', type: 'array' as const },
@@ -147,91 +158,44 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ensurePageInRange(pageCount)
   }, [pageCount, ensurePageInRange])
 
-  const filters =
-    logCategory === 'common'
-      ? [
-          {
-            columnId: 'created_at',
-            title: t('Log Type'),
-            options: LOG_TYPE_FILTERS.map((opt) => ({
-              value: opt.value,
-              label: t(opt.label),
-            })),
-            singleSelect: true,
-          },
-        ]
-      : []
+  const isCommon = logCategory === 'common'
 
   return (
-    <>
-      <div className='space-y-4'>
-        <DataTableToolbar table={table} filters={filters} customSearch={null} />
-        {isMobile ? (
-          <MobileCardList
-            table={table}
-            isLoading={isLoadingData}
-            emptyTitle={t('No Logs Found')}
-            emptyDescription={t(
-              'No usage logs available. Logs will appear here once API calls are made.'
-            )}
-          />
+    <DataTablePage
+      table={table}
+      columns={columns as ColumnDef<Record<string, unknown>>[]}
+      isLoading={isLoadingData}
+      isFetching={isFetching}
+      emptyTitle={t('No Logs Found')}
+      emptyDescription={t(
+        'No usage logs available. Logs will appear here once API calls are made.'
+      )}
+      skeletonKeyPrefix='usage-log-skeleton'
+      tableHeaderClassName='bg-muted/30 sticky top-0 z-10'
+      toolbar={
+        isCommon ? (
+          <CommonLogsFilterBar table={table} />
         ) : (
-          <div
-            className={cn(
-              'overflow-hidden rounded-md border transition-opacity duration-150',
-              isFetching && !isLoadingData && 'pointer-events-none opacity-50'
-            )}
-          >
-            <Table>
-              <TableHeader>
-                {table.getHeaderGroups().map((headerGroup) => (
-                  <TableRow key={headerGroup.id}>
-                    {headerGroup.headers.map((header) => (
-                      <TableHead key={header.id} colSpan={header.colSpan}>
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(
-                              header.column.columnDef.header,
-                              header.getContext()
-                            )}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                ))}
-              </TableHeader>
-              <TableBody>
-                {isLoadingData ? (
-                  <TableSkeleton table={table} keyPrefix='usage-log-skeleton' />
-                ) : table.getRowModel().rows.length === 0 ? (
-                  <TableEmpty
-                    colSpan={columns.length}
-                    title={t('No Logs Found')}
-                    description={t(
-                      'No usage logs available. Logs will appear here once API calls are made.'
-                    )}
-                  />
-                ) : (
-                  table.getRowModel().rows.map((row) => (
-                    <TableRow key={row.id}>
-                      {row.getVisibleCells().map((cell) => (
-                        <TableCell key={cell.id} className='py-2'>
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext()
-                          )}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </div>
-      <PageFooterPortal>
-        <DataTablePagination table={table} />
-      </PageFooterPortal>
-    </>
+          <TaskLogsFilterBar table={table} logCategory={logCategory} />
+        )
+      }
+      renderRow={(row) => {
+        const logType = (row.original as Record<string, unknown>).type as
+          | number
+          | undefined
+        const tintClass =
+          isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
+
+        return (
+          <TableRow key={row.id} className={cn('transition-colors', tintClass)}>
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className={isCommon ? 'py-2' : 'py-3.5'}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        )
+      }}
+    />
   )
 }

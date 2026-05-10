@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 /**
  * ============================================================================
  * Currency Formatting Library
@@ -262,6 +280,7 @@ function formatCurrencyValue(
     const formatted = new Intl.NumberFormat(undefined, {
       style: 'currency',
       currency: meta.currencyCode,
+      currencyDisplay: 'narrowSymbol',
       minimumFractionDigits: 0,
       maximumFractionDigits: digits,
     }).format(adjustedValue)
@@ -337,11 +356,11 @@ export function formatCurrencyFromUSD(
   const { config, meta } = getCurrencyDisplay()
   const merged = mergeOptions(options)
 
-  if (!config.displayInCurrency || meta.kind === 'tokens') {
+  if (meta.kind === 'tokens') {
     const tokens = amountUSD * config.quotaPerUnit
     return formatNumberWithSuffix(
       tokens,
-      meta.kind === 'tokens' ? 0 : merged.digitsLarge,
+      0,
       merged.digitsSmall,
       merged.abbreviate
     )
@@ -463,7 +482,7 @@ export function formatQuotaWithCurrency(
 export function getCurrencyLabel(): string {
   const { config, meta } = getCurrencyDisplay()
 
-  if (!config.displayInCurrency || meta.kind === 'tokens') {
+  if (meta.kind === 'tokens') {
     return 'Tokens'
   }
 
@@ -494,8 +513,8 @@ export function getCurrencyLabel(): string {
  * Use this to conditionally show currency-specific UI elements
  */
 export function isCurrencyDisplayEnabled(): boolean {
-  const { config, meta } = getCurrencyDisplay()
-  return config.displayInCurrency && meta.kind !== 'tokens'
+  const { meta } = getCurrencyDisplay()
+  return meta.kind !== 'tokens'
 }
 
 /**
