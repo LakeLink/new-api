@@ -706,21 +706,23 @@ export const modelColorMap = {
 };
 
 export function modelToColor(modelName) {
+  const modelNameText = String(modelName || '');
+
   // 1. 如果模型在预定义的 modelColorMap 中，使用预定义颜色
-  if (modelColorMap[modelName]) {
-    return modelColorMap[modelName];
+  if (modelColorMap[modelNameText]) {
+    return modelColorMap[modelNameText];
   }
 
   // 2. 生成一个稳定的数字作为索引
   let hash = 0;
-  for (let i = 0; i < modelName.length; i++) {
-    hash = (hash << 5) - hash + modelName.charCodeAt(i);
+  for (let i = 0; i < modelNameText.length; i++) {
+    hash = (hash << 5) - hash + modelNameText.charCodeAt(i);
     hash = hash & hash; // Convert to 32-bit integer
   }
   hash = Math.abs(hash);
 
   // 3. 根据模型名称长度选择不同的色板
-  const colorPalette = modelName.length > 10 ? extendedColors : baseColors;
+  const colorPalette = modelNameText.length > 10 ? extendedColors : baseColors;
 
   // 4. 使用hash值选择颜色
   const index = hash % colorPalette.length;
@@ -728,9 +730,10 @@ export function modelToColor(modelName) {
 }
 
 export function stringToColor(str) {
+  const text = String(str || '');
   let sum = 0;
-  for (let i = 0; i < str.length; i++) {
-    sum += str.charCodeAt(i);
+  for (let i = 0; i < text.length; i++) {
+    sum += text.charCodeAt(i);
   }
   let i = sum % colors.length;
   return colors[i];

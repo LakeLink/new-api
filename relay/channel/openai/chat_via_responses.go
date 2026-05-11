@@ -503,7 +503,7 @@ func OaiResponsesToChatStreamToNonStreamHandler(c *gin.Context, info *relaycommo
 		Content: messageText,
 	}
 	if reasoning != "" {
-		msg.ReasoningContent = reasoning
+		msg.ReasoningContent = &reasoning
 	}
 
 	if len(toolCalls) > 0 {

@@ -47,6 +47,7 @@ import GroupTable from './components/GroupTable';
 import AutoGroupList from './components/AutoGroupList';
 import GroupGroupRatioRules from './components/GroupGroupRatioRules';
 import GroupSpecialUsableRules from './components/GroupSpecialUsableRules';
+import GroupFallbackRules from './components/GroupFallbackRules';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -57,6 +58,7 @@ const OPTION_KEYS = [
   'group_ratio_setting.group_special_usable_group',
   'AutoGroups',
   'DefaultUseAutoGroup',
+  'GroupFallback',
 ];
 
 function parseJSONSafe(str, fallback) {
@@ -65,6 +67,30 @@ function parseJSONSafe(str, fallback) {
     return JSON.parse(str);
   } catch {
     return fallback;
+  }
+}
+
+function validateGroupFallback(value) {
+  if (!value || !value.trim()) return true;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    for (const [sourceGroup, rule] of Object.entries(parsed)) {
+      if (typeof sourceGroup !== 'string' || !sourceGroup.trim()) return false;
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return false;
+      if (!('fallback' in rule) || !Array.isArray(rule.fallback)) return false;
+      if (!rule.fallback.every((item) => typeof item === 'string')) return false;
+      if (
+        rule.pricing_mode &&
+        rule.pricing_mode !== 'origin' &&
+        rule.pricing_mode !== 'target'
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -81,6 +107,7 @@ export default function GroupRatioSettings(props) {
     'group_ratio_setting.group_special_usable_group': '',
     AutoGroups: '',
     DefaultUseAutoGroup: false,
+    GroupFallback: '',
   });
   const refForm = useRef();
   const [inputsRow, setInputsRow] = useState(inputs);
@@ -250,6 +277,25 @@ export default function GroupRatioSettings(props) {
           onChange={handleSpecialUsableChange}
         />
       </Form.Section>
+
+      <Form.Section text={t('分组回退')}>
+        <Text type='tertiary' size='small' style={{ display: 'block', marginBottom: 12 }}>
+          {t(
+            '分组回退规则映射为 JSON：源分组到回退策略，fallback 为回退分组数组，pricing_mode 可选 origin 或 target',
+          )}
+        </Text>
+        <GroupFallbackRules
+          key={`gfr_${dv}`}
+          value={inputs.GroupFallback}
+          groupNames={groupNames}
+          onChange={(value) =>
+            setInputs((prev) => ({
+              ...prev,
+              GroupFallback: value,
+            }))
+          }
+        />
+      </Form.Section>
     </Form>
   );
 
@@ -396,6 +442,35 @@ export default function GroupRatioSettings(props) {
               ]}
               onChange={(value) =>
                 setInputs((prev) => ({ ...prev, AutoGroups: value }))
+              }
+            />
+          </Col>
+        </Row>
+        <Row gutter={16}>
+          <Col xs={24} sm={16}>
+            <Form.TextArea
+              label={t('分组回退')}
+              placeholder={t(
+                '为一个 JSON 文本，键为源分组，值为 {"fallback": [...], "pricing_mode": "origin"/"target"}',
+              )}
+              extraText={t(
+                '回退配置格式示例：{"vip": {"fallback": ["default","enterprise"], "pricing_mode": "target"}}',
+              )}
+              field={'GroupFallback'}
+              autosize={{ minRows: 6, maxRows: 12 }}
+              trigger='blur'
+              stopValidateWithError
+              rules={[
+                {
+                  validator: (rule, value) => validateGroupFallback(value),
+                  message: t('不是有效的分组回退 JSON 规则'),
+                },
+              ]}
+              onChange={(value) =>
+                setInputs((prev) => ({
+                  ...prev,
+                  GroupFallback: value,
+                }))
               }
             />
           </Col>

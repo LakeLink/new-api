@@ -157,6 +157,22 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
+		if channel == nil {
+			if fallbackRule, ok := setting.GetGroupFallback(param.TokenGroup); ok && len(fallbackRule.Fallback) > 0 {
+				for _, fbGroup := range fallbackRule.Fallback {
+					ch, fbErr := model.GetRandomSatisfiedChannel(fbGroup, param.ModelName, param.GetRetry())
+					if fbErr != nil {
+						continue
+					}
+					if ch != nil {
+						channel = ch
+						common.SetContextKey(param.Ctx, constant.ContextKeyFallbackGroup, fbGroup)
+						selectGroup = fbGroup
+						break
+					}
+				}
+			}
+		}
 	}
 	return channel, selectGroup, nil
 }

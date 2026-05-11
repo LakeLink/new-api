@@ -279,7 +279,11 @@ func OaiStreamToNonStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 				choice.Message.SetStringContent(choice.Message.StringContent() + content)
 			}
 			if reasoning := streamChoice.Delta.GetReasoningContent(); reasoning != "" {
-				choice.Message.ReasoningContent += reasoning
+				if choice.Message.ReasoningContent == nil {
+					choice.Message.ReasoningContent = &reasoning
+				} else {
+					*choice.Message.ReasoningContent += reasoning
+				}
 			}
 			if len(streamChoice.Delta.ToolCalls) > 0 {
 				choice.Message.Role = "assistant"

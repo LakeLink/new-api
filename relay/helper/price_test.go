@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/types"
@@ -59,4 +61,72 @@ func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	require.Equal(t, "stream", info.TieredBillingSnapshot.EstimatedTier)
 	require.Equal(t, billing_setting.BillingModeTieredExpr, info.TieredBillingSnapshot.BillingMode)
 	require.Equal(t, common.QuotaPerUnit, info.TieredBillingSnapshot.QuotaPerUnit)
+}
+
+func TestHandleGroupRatio_UsesFallbackGroupForTargetPricingMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{
+		"vip": {
+			"fallback": ["emergency"],
+			"pricing_mode": "target"
+		}
+	}`))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{}`))
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "emergency")
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: "vip",
+		UserGroup:  "vip",
+	}
+
+	HandleGroupRatio(ctx, info)
+	require.Equal(t, "emergency", info.UsingGroup)
+}
+
+func TestHandleGroupRatio_KeepsOriginalGroupForOriginPricingMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{
+		"vip": {
+			"fallback": ["emergency"],
+			"pricing_mode": "origin"
+		}
+	}`))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{}`))
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "emergency")
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: "vip",
+		UserGroup:  "vip",
+	}
+
+	HandleGroupRatio(ctx, info)
+	require.Equal(t, "vip", info.UsingGroup)
+}
+
+func TestHandleGroupRatio_UsesNoFallbackWhenMissingRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "emergency")
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: "vip",
+		UserGroup:  "vip",
+	}
+
+	HandleGroupRatio(ctx, info)
+	require.Equal(t, "vip", info.UsingGroup)
 }

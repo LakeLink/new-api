@@ -59,6 +59,7 @@ type GroupRatioVisualEditorProps = {
   userUsableGroups: string
   groupGroupRatio: string
   autoGroups: string
+  groupFallback: string
   onChange: (field: string, value: string) => void
 }
 
@@ -170,6 +171,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   userUsableGroups,
   groupGroupRatio,
   autoGroups,
+  groupFallback,
   onChange,
 }: GroupRatioVisualEditorProps) {
   const { t } = useTranslation()
@@ -192,6 +194,14 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   const [userGroupDialogOpen, setUserGroupDialogOpen] = useState(false)
   const [userGroupInput, setUserGroupInput] = useState('')
 
+  const [fallbackDialogOpen, setFallbackDialogOpen] = useState(false)
+  const [fallbackSourceGroup, setFallbackSourceGroup] = useState('')
+  const [fallbackGroupsInput, setFallbackGroupsInput] = useState('')
+  const [fallbackPricingMode, setFallbackPricingMode] = useState<
+    'origin' | 'target'
+  >('target')
+  const [fallbackEditKey, setFallbackEditKey] = useState<string | null>(null)
+
   // Parse topup group ratios
   const topupRatioList = useMemo(() => {
     const map = safeJsonParse<Record<string, number>>(topupGroupRatio, {
@@ -211,6 +221,52 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
       context: 'auto groups',
     })
   }, [autoGroups])
+
+  // Parse group fallback rules
+  type GroupFallbackRuleData = {
+    fallback: string[]
+    pricing_mode: 'origin' | 'target'
+  }
+  const groupFallbackMap = useMemo(() => {
+    const parsedFallback = safeJsonParse<Record<string, unknown>>(
+      groupFallback ?? '',
+      {
+        fallback: {},
+        context: 'group fallback',
+      }
+    )
+    if (
+      parsedFallback === null ||
+      typeof parsedFallback !== 'object' ||
+      Array.isArray(parsedFallback)
+    ) {
+      return {}
+    }
+
+    const normalizeRule = (rule: unknown): GroupFallbackRuleData => {
+      if (rule === null || typeof rule !== 'object' || Array.isArray(rule)) {
+        return { fallback: [], pricing_mode: 'target' }
+      }
+
+      const rawRule = rule as Record<string, unknown>
+      const rawFallback = rawRule.fallback
+      const fallback = Array.isArray(rawFallback)
+        ? rawFallback.filter(
+            (item): item is string => typeof item === 'string' && item !== ''
+          )
+        : []
+      const rawMode = rawRule.pricing_mode
+      const pricing_mode = rawMode === 'origin' ? 'origin' : 'target'
+
+      return { fallback, pricing_mode }
+    }
+
+    const result: Record<string, GroupFallbackRuleData> = {}
+    for (const [sourceGroup, rule] of Object.entries(parsedFallback)) {
+      result[sourceGroup] = normalizeRule(rule)
+    }
+    return result
+  }, [groupFallback])
 
   // Parse group-group ratios
   const groupGroupRatioList = useMemo(() => {
@@ -309,6 +365,84 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
     if (newIndex < 0 || newIndex >= list.length) return
     ;[list[index], list[newIndex]] = [list[newIndex], list[index]]
     onChange('AutoGroups', JSON.stringify(list, null, 2))
+  }
+
+  // Group fallback handlers
+  const handleFallbackAdd = () => {
+    setFallbackSourceGroup('')
+    setFallbackGroupsInput('')
+    setFallbackPricingMode('target')
+    setFallbackEditKey(null)
+    setFallbackDialogOpen(true)
+  }
+
+  const handleFallbackEdit = (sourceGroup: string) => {
+    const rule = groupFallbackMap[sourceGroup]
+    if (!rule) return
+    setFallbackSourceGroup(sourceGroup)
+    setFallbackGroupsInput(rule.fallback.join(', '))
+    setFallbackPricingMode(rule.pricing_mode)
+    setFallbackEditKey(sourceGroup)
+    setFallbackDialogOpen(true)
+  }
+
+  const handleFallbackSave = () => {
+    if (!fallbackSourceGroup.trim()) return
+    const groups = fallbackGroupsInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (groups.length === 0) return
+
+    const map = { ...groupFallbackMap }
+    if (fallbackEditKey && fallbackEditKey !== fallbackSourceGroup) {
+      delete map[fallbackEditKey]
+    }
+    map[fallbackSourceGroup.trim()] = {
+      fallback: groups,
+      pricing_mode: fallbackPricingMode,
+    }
+    onChange('GroupFallback', JSON.stringify(map, null, 2))
+    setFallbackDialogOpen(false)
+  }
+
+  const handleFallbackDelete = (sourceGroup: string) => {
+    const map = { ...groupFallbackMap }
+    delete map[sourceGroup]
+    onChange('GroupFallback', JSON.stringify(map, null, 2))
+  }
+
+  const handleFallbackGroupMove = (
+    sourceGroup: string,
+    index: number,
+    direction: 'up' | 'down'
+  ) => {
+    const rule = groupFallbackMap[sourceGroup]
+    if (!rule) return
+    const list = [...rule.fallback]
+    const newIndex = direction === 'up' ? index - 1 : index + 1
+    if (newIndex < 0 || newIndex >= list.length) return
+    ;[list[index], list[newIndex]] = [list[newIndex], list[index]]
+    const map = {
+      ...groupFallbackMap,
+      [sourceGroup]: { ...rule, fallback: list },
+    }
+    onChange('GroupFallback', JSON.stringify(map, null, 2))
+  }
+
+  const handleFallbackGroupDelete = (sourceGroup: string, index: number) => {
+    const rule = groupFallbackMap[sourceGroup]
+    if (!rule) return
+    const list = rule.fallback.filter((_, i) => i !== index)
+    if (list.length === 0) {
+      handleFallbackDelete(sourceGroup)
+    } else {
+      const map = {
+        ...groupFallbackMap,
+        [sourceGroup]: { ...rule, fallback: list },
+      }
+      onChange('GroupFallback', JSON.stringify(map, null, 2))
+    }
   }
 
   // Group-group ratio handlers
@@ -667,6 +801,132 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
         </CardContent>
       </Card>
 
+      {/* Group Fallback */}
+      <Card className={sectionCardClassName}>
+        <CardHeader className={sectionHeaderClassName}>
+          <CardTitle>{t('Group fallback')}</CardTitle>
+          <CardDescription>
+            {t(
+              'When a group has no available channel, the system tries fallback groups in order. Pricing mode determines which group ratio is used for billing.'
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className='space-y-4'>
+            <Button onClick={handleFallbackAdd} size='sm'>
+              <Plus className='mr-2 h-4 w-4' />
+              {t('Add fallback rule')}
+            </Button>
+            {Object.keys(groupFallbackMap ?? {}).length > 0 && (
+              <div className='space-y-2'>
+                {Object.entries(groupFallbackMap ?? {}).map(
+                  ([sourceGroup, rule]) => (
+                    <Collapsible key={sourceGroup}>
+                      <div className='rounded-md border'>
+                        <div className='flex items-center gap-2 p-3'>
+                          <CollapsibleTrigger
+                            render={<Button variant='ghost' size='sm' />}
+                          >
+                            <ChevronDown className='h-4 w-4' />
+                          </CollapsibleTrigger>
+                          <span className='flex-1 font-medium'>
+                            {sourceGroup}
+                          </span>
+                          <span className='text-muted-foreground text-sm'>
+                            {rule.pricing_mode === 'origin'
+                              ? t('Origin pricing')
+                              : t('Target pricing')}
+                          </span>
+                          <div className='flex gap-1'>
+                            <Button
+                              variant='ghost'
+                              size='sm'
+                              onClick={() => handleFallbackEdit(sourceGroup)}
+                            >
+                              <Pencil className='h-4 w-4' />
+                            </Button>
+                            <Button
+                              variant='ghost'
+                              size='sm'
+                              onClick={() =>
+                                handleFallbackDelete(sourceGroup)
+                              }
+                            >
+                              <Trash2 className='h-4 w-4' />
+                            </Button>
+                          </div>
+                        </div>
+                        <CollapsibleContent>
+                          <div className='border-t px-3 pb-3 pt-2'>
+                            <div className='space-y-2'>
+                              {rule.fallback.map((fbGroup, index) => (
+                                <div
+                                  key={index}
+                                  className='flex items-center gap-2 rounded-md border p-2'
+                                >
+                                  <GripVertical className='text-muted-foreground h-4 w-4' />
+                                  <span className='flex-1 text-sm'>
+                                    {fbGroup}
+                                  </span>
+                                  <div className='flex gap-1'>
+                                    <Button
+                                      variant='ghost'
+                                      size='sm'
+                                      disabled={index === 0}
+                                      onClick={() =>
+                                        handleFallbackGroupMove(
+                                          sourceGroup,
+                                          index,
+                                          'up'
+                                        )
+                                      }
+                                    >
+                                      ↑
+                                    </Button>
+                                    <Button
+                                      variant='ghost'
+                                      size='sm'
+                                      disabled={
+                                        index === rule.fallback.length - 1
+                                      }
+                                      onClick={() =>
+                                        handleFallbackGroupMove(
+                                          sourceGroup,
+                                          index,
+                                          'down'
+                                        )
+                                      }
+                                    >
+                                      ↓
+                                    </Button>
+                                    <Button
+                                      variant='ghost'
+                                      size='sm'
+                                      onClick={() =>
+                                        handleFallbackGroupDelete(
+                                          sourceGroup,
+                                          index
+                                        )
+                                      }
+                                    >
+                                      <Trash2 className='h-4 w-4' />
+                                    </Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </CollapsibleContent>
+                      </div>
+                    </Collapsible>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Simple Group Dialog */}
       <SimpleGroupDialog
         open={simpleDialogOpen}
@@ -703,6 +963,81 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
               {t('Cancel')}
             </Button>
             <Button onClick={handleAutoGroupSave}>{t('Add')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Fallback Rule Dialog */}
+      <Dialog open={fallbackDialogOpen} onOpenChange={setFallbackDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {fallbackEditKey
+                ? t('Edit fallback rule')
+                : t('Add fallback rule')}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                'Configure which groups to fall back to when the source group has no available channel.'
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className='space-y-4 py-4'>
+            <div className='space-y-2'>
+              <Label>{t('Source group')}</Label>
+              <Input
+                value={fallbackSourceGroup}
+                onChange={(e) => setFallbackSourceGroup(e.target.value)}
+                placeholder={t('e.g. premium')}
+                disabled={!!fallbackEditKey}
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>{t('Fallback groups (comma-separated, in order)')}</Label>
+              <Input
+                value={fallbackGroupsInput}
+                onChange={(e) => setFallbackGroupsInput(e.target.value)}
+                placeholder={t('e.g. default, vip')}
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>{t('Pricing mode')}</Label>
+              <div className='flex gap-4'>
+                <label className='flex items-center gap-2'>
+                  <input
+                    type='radio'
+                    name='pricing_mode'
+                    value='origin'
+                    checked={fallbackPricingMode === 'origin'}
+                    onChange={() => setFallbackPricingMode('origin')}
+                  />
+                  <span className='text-sm'>
+                    {t('Origin')} — {t('Bill at source group rate')}
+                  </span>
+                </label>
+                <label className='flex items-center gap-2'>
+                  <input
+                    type='radio'
+                    name='pricing_mode'
+                    value='target'
+                    checked={fallbackPricingMode === 'target'}
+                    onChange={() => setFallbackPricingMode('target')}
+                  />
+                  <span className='text-sm'>
+                    {t('Target')} — {t('Bill at serving group rate')}
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant='outline'
+              onClick={() => setFallbackDialogOpen(false)}
+            >
+              {t('Cancel')}
+            </Button>
+            <Button onClick={handleFallbackSave}>{t('Save')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

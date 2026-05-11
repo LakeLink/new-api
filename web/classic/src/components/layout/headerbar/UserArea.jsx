@@ -52,6 +52,12 @@ const UserArea = ({
   }
 
   if (userState.user) {
+    const username = String(
+      userState.user.username || userState.user.email || userState.user.id || ''
+    );
+    const displayName = username || t('用户');
+    const avatarInitial = displayName.charAt(0).toUpperCase();
+
     return (
       <div className='relative' ref={dropdownRef}>
         <Dropdown
@@ -123,14 +129,14 @@ const UserArea = ({
           >
             <Avatar
               size='extra-small'
-              color={stringToColor(userState.user.username)}
+              color={stringToColor(displayName)}
               className='mr-1'
             >
-              {userState.user.username[0].toUpperCase()}
+              {avatarInitial}
             </Avatar>
             <span className='hidden md:inline'>
               <Typography.Text className='!text-xs !font-medium !text-semi-color-text-1 dark:!text-gray-300 mr-1'>
-                {userState.user.username}
+                {displayName}
               </Typography.Text>
             </span>
             <ChevronDown
