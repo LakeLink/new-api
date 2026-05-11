@@ -104,5 +104,7 @@
   "When a group has no available channel, the system tries fallback groups in order. Pricing mode determines which group ratio is used for billing.": "When a group has no available channel, the system tries fallback groups in order. Pricing mode determines which group ratio is used for billing.",
   "whsec_xxx": "whsec_xxx",
   "Xinference": "Xinference",
-  "Xunfei": "Xunfei"
+  "Xunfei": "Xunfei",
+  "Alipay": "Alipay",
+  "WeChat Pay": "WeChat Pay"
 }
