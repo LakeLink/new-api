@@ -43,6 +43,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+import { Switch } from '@/components/ui/switch'
 import {
   Table,
   TableBody,
@@ -79,6 +81,50 @@ type GroupPricingRow = {
 type GroupOverride = {
   targetGroup: string
   ratio: number
+}
+
+type FallbackPricingMode = 'origin' | 'target'
+type FallbackTargetPricingRatioMode =
+  | 'origin_special'
+  | 'target_special'
+  | 'normal_only'
+  | 'prefer_origin_special'
+  | 'prefer_target_special'
+
+const FALLBACK_TARGET_PRICING_RATIO_MODE_OPTIONS: Array<{
+  value: FallbackTargetPricingRatioMode
+  labelKey: string
+}> = [
+  {
+    value: 'origin_special',
+    labelKey: 'Use source special ratio only',
+  },
+  {
+    value: 'target_special',
+    labelKey: 'Use target special ratio only',
+  },
+  {
+    value: 'normal_only',
+    labelKey: 'Use normal target ratio only',
+  },
+  {
+    value: 'prefer_origin_special',
+    labelKey: 'Prefer source special ratio',
+  },
+  {
+    value: 'prefer_target_special',
+    labelKey: 'Prefer target special ratio',
+  },
+]
+
+function normalizeFallbackTargetPricingRatioMode(
+  value: unknown
+): FallbackTargetPricingRatioMode {
+  return FALLBACK_TARGET_PRICING_RATIO_MODE_OPTIONS.some(
+    (option) => option.value === value
+  )
+    ? (value as FallbackTargetPricingRatioMode)
+    : 'target_special'
 }
 
 const sectionCardClassName =
@@ -197,9 +243,14 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   const [fallbackDialogOpen, setFallbackDialogOpen] = useState(false)
   const [fallbackSourceGroup, setFallbackSourceGroup] = useState('')
   const [fallbackGroupsInput, setFallbackGroupsInput] = useState('')
-  const [fallbackPricingMode, setFallbackPricingMode] = useState<
-    'origin' | 'target'
-  >('target')
+  const [fallbackPricingMode, setFallbackPricingMode] =
+    useState<FallbackPricingMode>('target')
+  const [
+    fallbackOriginPricingUseSpecialRatio,
+    setFallbackOriginPricingUseSpecialRatio,
+  ] = useState(true)
+  const [fallbackTargetPricingRatioMode, setFallbackTargetPricingRatioMode] =
+    useState<FallbackTargetPricingRatioMode>('target_special')
   const [fallbackEditKey, setFallbackEditKey] = useState<string | null>(null)
 
   // Parse topup group ratios
@@ -225,7 +276,9 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   // Parse group fallback rules
   type GroupFallbackRuleData = {
     fallback: string[]
-    pricing_mode: 'origin' | 'target'
+    pricing_mode: FallbackPricingMode
+    origin_pricing_use_special_ratio?: boolean
+    target_pricing_ratio_mode?: FallbackTargetPricingRatioMode
   }
   const groupFallbackMap = useMemo(() => {
     const parsedFallback = safeJsonParse<Record<string, unknown>>(
@@ -257,8 +310,22 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
         : []
       const rawMode = rawRule.pricing_mode
       const pricing_mode = rawMode === 'origin' ? 'origin' : 'target'
+      const rawOriginPricingUseSpecialRatio =
+        rawRule.origin_pricing_use_special_ratio
+      const origin_pricing_use_special_ratio =
+        typeof rawOriginPricingUseSpecialRatio === 'boolean'
+          ? rawOriginPricingUseSpecialRatio
+          : undefined
+      const target_pricing_ratio_mode = normalizeFallbackTargetPricingRatioMode(
+        rawRule.target_pricing_ratio_mode
+      )
 
-      return { fallback, pricing_mode }
+      return {
+        fallback,
+        pricing_mode,
+        origin_pricing_use_special_ratio,
+        target_pricing_ratio_mode,
+      }
     }
 
     const result: Record<string, GroupFallbackRuleData> = {}
@@ -372,6 +439,8 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
     setFallbackSourceGroup('')
     setFallbackGroupsInput('')
     setFallbackPricingMode('target')
+    setFallbackOriginPricingUseSpecialRatio(true)
+    setFallbackTargetPricingRatioMode('target_special')
     setFallbackEditKey(null)
     setFallbackDialogOpen(true)
   }
@@ -382,6 +451,12 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
     setFallbackSourceGroup(sourceGroup)
     setFallbackGroupsInput(rule.fallback.join(', '))
     setFallbackPricingMode(rule.pricing_mode)
+    setFallbackOriginPricingUseSpecialRatio(
+      rule.origin_pricing_use_special_ratio ?? true
+    )
+    setFallbackTargetPricingRatioMode(
+      rule.target_pricing_ratio_mode ?? 'target_special'
+    )
     setFallbackEditKey(sourceGroup)
     setFallbackDialogOpen(true)
   }
@@ -401,9 +476,21 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
     map[fallbackSourceGroup.trim()] = {
       fallback: groups,
       pricing_mode: fallbackPricingMode,
+      origin_pricing_use_special_ratio: fallbackOriginPricingUseSpecialRatio,
+      target_pricing_ratio_mode: fallbackTargetPricingRatioMode,
     }
     onChange('GroupFallback', JSON.stringify(map, null, 2))
     setFallbackDialogOpen(false)
+  }
+
+  const getTargetPricingRatioModeLabel = (
+    mode?: FallbackTargetPricingRatioMode
+  ) => {
+    const normalized = normalizeFallbackTargetPricingRatioMode(mode)
+    const option = FALLBACK_TARGET_PRICING_RATIO_MODE_OPTIONS.find(
+      (item) => item.value === normalized
+    )
+    return t(option?.labelKey ?? 'Use target special ratio only')
   }
 
   const handleFallbackDelete = (sourceGroup: string) => {
@@ -837,6 +924,15 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
                               ? t('Origin pricing')
                               : t('Target pricing')}
                           </span>
+                          <span className='text-muted-foreground hidden text-sm md:inline'>
+                            {rule.pricing_mode === 'origin'
+                              ? rule.origin_pricing_use_special_ratio === false
+                                ? t('Normal source ratio only')
+                                : t('Use source special ratio')
+                              : getTargetPricingRatioModeLabel(
+                                  rule.target_pricing_ratio_mode
+                                )}
+                          </span>
                           <div className='flex gap-1'>
                             <Button
                               variant='ghost'
@@ -848,16 +944,33 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
                             <Button
                               variant='ghost'
                               size='sm'
-                              onClick={() =>
-                                handleFallbackDelete(sourceGroup)
-                              }
+                              onClick={() => handleFallbackDelete(sourceGroup)}
                             >
                               <Trash2 className='h-4 w-4' />
                             </Button>
                           </div>
                         </div>
                         <CollapsibleContent>
-                          <div className='border-t px-3 pb-3 pt-2'>
+                          <div className='border-t px-3 pt-2 pb-3'>
+                            <div className='text-muted-foreground mb-3 grid gap-1 text-xs sm:grid-cols-2'>
+                              <div>
+                                {t('Pricing mode')}:{' '}
+                                {rule.pricing_mode === 'origin'
+                                  ? t('Origin pricing')
+                                  : t('Target pricing')}
+                              </div>
+                              <div>
+                                {t('Special ratio handling')}:{' '}
+                                {rule.pricing_mode === 'origin'
+                                  ? rule.origin_pricing_use_special_ratio ===
+                                    false
+                                    ? t('Normal source ratio only')
+                                    : t('Use source special ratio')
+                                  : getTargetPricingRatioModeLabel(
+                                      rule.target_pricing_ratio_mode
+                                    )}
+                              </div>
+                            </div>
                             <div className='space-y-2'>
                               {rule.fallback.map((fbGroup, index) => (
                                 <div
@@ -1029,6 +1142,50 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
                 </label>
               </div>
             </div>
+            {fallbackPricingMode === 'origin' ? (
+              <div className='flex items-center justify-between gap-4 rounded-lg border p-3'>
+                <div className='space-y-1'>
+                  <Label>{t('Use special ratio for origin pricing')}</Label>
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'When enabled, source-group pricing uses the user special ratio for the source group if configured; otherwise it uses the source normal ratio.'
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  checked={fallbackOriginPricingUseSpecialRatio}
+                  onCheckedChange={(checked) =>
+                    setFallbackOriginPricingUseSpecialRatio(checked === true)
+                  }
+                />
+              </div>
+            ) : (
+              <div className='space-y-2'>
+                <Label>{t('Target pricing ratio mode')}</Label>
+                <NativeSelect
+                  className='w-full'
+                  value={fallbackTargetPricingRatioMode}
+                  onChange={(event) =>
+                    setFallbackTargetPricingRatioMode(
+                      normalizeFallbackTargetPricingRatioMode(
+                        event.target.value
+                      )
+                    )
+                  }
+                >
+                  {FALLBACK_TARGET_PRICING_RATIO_MODE_OPTIONS.map((option) => (
+                    <NativeSelectOption key={option.value} value={option.value}>
+                      {t(option.labelKey)}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                <p className='text-muted-foreground text-xs'>
+                  {t(
+                    'Choose how user special ratios are applied after fallback when target-group pricing is used.'
+                  )}
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button

@@ -206,6 +206,14 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "LogExportPermission":
+		if option.Value != fmt.Sprintf("%d", common.RoleAdminUser) && option.Value != fmt.Sprintf("%d", common.RoleRootUser) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "无效的日志导出权限，可选值：admin 或 root",
+			})
+			return
+		}
 	case "GroupRatio":
 		err = ratio_setting.CheckGroupRatio(option.Value.(string))
 		if err != nil {

@@ -35,6 +35,7 @@ func InitOptionMap() {
 	common.OptionMap["FileDownloadPermission"] = strconv.Itoa(common.FileDownloadPermission)
 	common.OptionMap["ImageUploadPermission"] = strconv.Itoa(common.ImageUploadPermission)
 	common.OptionMap["ImageDownloadPermission"] = strconv.Itoa(common.ImageDownloadPermission)
+	common.OptionMap["LogExportPermission"] = strconv.Itoa(common.LogExportPermission)
 	common.OptionMap["PasswordLoginEnabled"] = strconv.FormatBool(common.PasswordLoginEnabled)
 	common.OptionMap["PasswordRegisterEnabled"] = strconv.FormatBool(common.PasswordRegisterEnabled)
 	common.OptionMap["EmailVerificationEnabled"] = strconv.FormatBool(common.EmailVerificationEnabled)
@@ -245,6 +246,12 @@ func updateOptionMap(key string, value string) (err error) {
 			common.ImageUploadPermission = intValue
 		case "ImageDownloadPermission":
 			common.ImageDownloadPermission = intValue
+		case "LogExportPermission":
+			if intValue != common.RoleAdminUser && intValue != common.RoleRootUser {
+				intValue = common.RoleAdminUser
+				common.OptionMap[key] = strconv.Itoa(intValue)
+			}
+			common.LogExportPermission = intValue
 		}
 	}
 	if strings.HasSuffix(key, "Enabled") || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" {

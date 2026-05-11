@@ -24,6 +24,7 @@ import {
   API,
   getTodayStartTimestamp,
   isAdmin,
+  isRoot,
   showError,
   showSuccess,
   timestamp2string,
@@ -70,13 +71,22 @@ export const useLogsData = () => {
   const [showStat, setShowStat] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingStat, setLoadingStat] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState(null);
   const [activePage, setActivePage] = useState(1);
   const [logCount, setLogCount] = useState(0);
   const [pageSize, setPageSize] = useState(ITEMS_PER_PAGE);
   const [logType, setLogType] = useState(0);
+  const [exprMode, setExprMode] = useState(false);
 
   // User and admin
   const isAdminUser = isAdmin();
+  const parsedLogExportPermission = Number(
+    localStorage.getItem('log_export_permission') || 10,
+  );
+  const logExportPermission = Number.isFinite(parsedLogExportPermission)
+    ? parsedLogExportPermission
+    : 10;
+  const canExportLogs = isAdminUser && (logExportPermission <= 10 || isRoot());
   // Role-specific storage key to prevent different roles from overwriting each other
   const STORAGE_KEY = isAdminUser
     ? 'logs-table-columns-admin'
@@ -101,6 +111,7 @@ export const useLogsData = () => {
     channel: '',
     group: '',
     request_id: '',
+    expr_search: '',
     dateRange: [
       timestamp2string(getTodayStartTimestamp()),
       timestamp2string(now.getTime() / 1000 + 3600),
@@ -164,7 +175,9 @@ export const useLogsData = () => {
   };
 
   // Column visibility state
-  const [visibleColumns, setVisibleColumns] = useState(getInitialVisibleColumns);
+  const [visibleColumns, setVisibleColumns] = useState(
+    getInitialVisibleColumns,
+  );
   const [showColumnSelector, setShowColumnSelector] = useState(false);
   const [billingDisplayMode, setBillingDisplayMode] = useState(
     getInitialBillingDisplayMode,
@@ -257,6 +270,7 @@ export const useLogsData = () => {
       channel: formValues.channel || '',
       group: formValues.group || '',
       request_id: formValues.request_id || '',
+      expr_search: formValues.expr_search || '',
       logType: formValues.logType ? parseInt(formValues.logType) : 0,
     };
   };
@@ -269,13 +283,26 @@ export const useLogsData = () => {
       start_timestamp,
       end_timestamp,
       group,
+      request_id,
+      expr_search,
       logType: formLogType,
     } = getFormValues();
     const currentLogType = formLogType !== undefined ? formLogType : logType;
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    let url = `/api/log/self/stat?type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}`;
-    url = encodeURI(url);
+    const params = new URLSearchParams();
+    if (exprMode) {
+      if (expr_search) params.set('expr', expr_search);
+    } else {
+      params.set('start_timestamp', String(localStartTimestamp));
+      params.set('end_timestamp', String(localEndTimestamp));
+      params.set('type', String(currentLogType));
+      if (token_name) params.set('token_name', token_name);
+      if (model_name) params.set('model_name', model_name);
+      if (group) params.set('group', group);
+      if (request_id) params.set('request_id', request_id);
+    }
+    let url = `/api/log/self/stat?${params.toString()}`;
     let res = await API.get(url);
     const { success, message, data } = res.data;
     if (success) {
@@ -294,13 +321,28 @@ export const useLogsData = () => {
       end_timestamp,
       channel,
       group,
+      request_id,
+      expr_search,
       logType: formLogType,
     } = getFormValues();
     const currentLogType = formLogType !== undefined ? formLogType : logType;
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    let url = `/api/log/stat?type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}`;
-    url = encodeURI(url);
+    const params = new URLSearchParams();
+    if (exprMode) {
+      if (expr_search) params.set('expr', expr_search);
+    } else {
+      params.set('start_timestamp', String(localStartTimestamp));
+      params.set('end_timestamp', String(localEndTimestamp));
+      params.set('type', String(currentLogType));
+      if (username) params.set('username', username);
+      if (token_name) params.set('token_name', token_name);
+      if (model_name) params.set('model_name', model_name);
+      if (channel) params.set('channel', channel);
+      if (group) params.set('group', group);
+      if (request_id) params.set('request_id', request_id);
+    }
+    let url = `/api/log/stat?${params.toString()}`;
     let res = await API.get(url);
     const { success, message, data } = res.data;
     if (success) {
@@ -383,7 +425,10 @@ export const useLogsData = () => {
       let other = getLogOther(logs[i].other);
       let expandDataLocal = [];
 
-      if (isAdminUser && (logs[i].type === 0 || logs[i].type === 2 || logs[i].type === 6)) {
+      if (
+        isAdminUser &&
+        (logs[i].type === 0 || logs[i].type === 2 || logs[i].type === 6)
+      ) {
         expandDataLocal.push({
           key: t('渠道信息'),
           value: `${logs[i].channel} - ${logs[i].channel_name || '[未知]'}`,
@@ -430,7 +475,10 @@ export const useLogsData = () => {
           expandDataLocal.push({
             key: t('日志详情'),
             value: other?.claude
-              ? renderClaudeLogContent({ ...other, displayMode: billingDisplayMode })
+              ? renderClaudeLogContent({
+                  ...other,
+                  displayMode: billingDisplayMode,
+                })
               : renderLogContent({ ...other, displayMode: billingDisplayMode }),
           });
         }
@@ -520,7 +568,14 @@ export const useLogsData = () => {
           expandDataLocal.push({
             key: t('失败原因'),
             value: (
-              <div style={{ maxWidth: 600, whiteSpace: 'normal', wordBreak: 'break-word', lineHeight: 1.6 }}>
+              <div
+                style={{
+                  maxWidth: 600,
+                  whiteSpace: 'normal',
+                  wordBreak: 'break-word',
+                  lineHeight: 1.6,
+                }}
+              >
                 {other.reason}
               </div>
             ),
@@ -537,7 +592,8 @@ export const useLogsData = () => {
         const ss = other.stream_status;
         const isOk = ss.status === 'ok';
         const statusLabel = isOk ? '✓ ' + t('正常') : '✗ ' + t('异常');
-        let streamValue = statusLabel + ' (' + (ss.end_reason || 'unknown') + ')';
+        let streamValue =
+          statusLabel + ' (' + (ss.end_reason || 'unknown') + ')';
         if (ss.error_count > 0) {
           streamValue += ` [${t('软错误')}: ${ss.error_count}]`;
         }
@@ -552,7 +608,14 @@ export const useLogsData = () => {
           expandDataLocal.push({
             key: t('流错误详情'),
             value: (
-              <div style={{ maxWidth: 600, whiteSpace: 'pre-line', wordBreak: 'break-word', lineHeight: 1.6 }}>
+              <div
+                style={{
+                  maxWidth: 600,
+                  whiteSpace: 'pre-line',
+                  wordBreak: 'break-word',
+                  lineHeight: 1.6,
+                }}
+              >
                 {ss.errors.join('\n')}
               </div>
             ),
@@ -739,6 +802,7 @@ export const useLogsData = () => {
       channel,
       group,
       request_id,
+      expr_search,
       logType: formLogType,
     } = getFormValues();
 
@@ -751,12 +815,30 @@ export const useLogsData = () => {
 
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    if (isAdminUser) {
-      url = `/api/log/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}`;
+    const params = new URLSearchParams({
+      p: String(startIdx),
+      page_size: String(pageSize),
+    });
+    if (exprMode) {
+      if (expr_search) params.set('expr', expr_search);
     } else {
-      url = `/api/log/self/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}&request_id=${request_id}`;
+      params.set('start_timestamp', String(localStartTimestamp));
+      params.set('end_timestamp', String(localEndTimestamp));
+      params.set('type', String(currentLogType));
+      if (token_name) params.set('token_name', token_name);
+      if (model_name) params.set('model_name', model_name);
+      if (group) params.set('group', group);
+      if (request_id) params.set('request_id', request_id);
+      if (isAdminUser) {
+        if (username) params.set('username', username);
+        if (channel) params.set('channel', channel);
+      }
     }
-    url = encodeURI(url);
+    if (isAdminUser) {
+      url = `/api/log/?${params.toString()}`;
+    } else {
+      url = `/api/log/self/?${params.toString()}`;
+    }
     const res = await API.get(url);
     const { success, message, data } = res.data;
     if (success) {
@@ -770,6 +852,70 @@ export const useLogsData = () => {
       showError(message);
     }
     setLoading(false);
+  };
+
+  const exportLogs = async (format) => {
+    if (exportingFormat) {
+      return;
+    }
+    if (!canExportLogs) {
+      showError(t('无权导出日志'));
+      return;
+    }
+    setExportingFormat(format);
+    try {
+      const {
+        username,
+        token_name,
+        model_name,
+        start_timestamp,
+        end_timestamp,
+        channel,
+        group,
+        request_id,
+        expr_search,
+        logType: formLogType,
+      } = getFormValues();
+      const currentLogType = formLogType !== undefined ? formLogType : logType;
+      const localStartTimestamp = Date.parse(start_timestamp) / 1000;
+      const localEndTimestamp = Date.parse(end_timestamp) / 1000;
+      const params = new URLSearchParams({ format });
+
+      if (exprMode) {
+        if (expr_search) params.set('expr', expr_search);
+      } else {
+        params.set('start_timestamp', String(localStartTimestamp));
+        params.set('end_timestamp', String(localEndTimestamp));
+        params.set('type', String(currentLogType));
+        if (token_name) params.set('token_name', token_name);
+        if (model_name) params.set('model_name', model_name);
+        if (group) params.set('group', group);
+        if (request_id) params.set('request_id', request_id);
+        if (isAdminUser) {
+          if (username) params.set('username', username);
+          if (channel) params.set('channel', channel);
+        }
+      }
+
+      const url = isAdminUser
+        ? `/api/log/export?${params.toString()}`
+        : `/api/log/self/export?${params.toString()}`;
+      const res = await API.get(url, {
+        responseType: 'blob',
+        disableDuplicate: true,
+        skipErrorHandler: true,
+      });
+      const filename =
+        getFilenameFromContentDisposition(
+          res.headers?.['content-disposition'],
+        ) || `call-logs.${format}`;
+      downloadBlob(res.data, filename);
+      showSuccess(t('导出完成'));
+    } catch (error) {
+      showError(error?.response?.data?.message || t('导出失败'));
+    } finally {
+      setExportingFormat(null);
+    }
   };
 
   // Page handlers
@@ -839,10 +985,13 @@ export const useLogsData = () => {
     showStat,
     loading,
     loadingStat,
+    exportingFormat,
+    canExportLogs,
     activePage,
     logCount,
     pageSize,
     logType,
+    exprMode,
     stat,
     isAdminUser,
 
@@ -887,14 +1036,43 @@ export const useLogsData = () => {
     handlePageChange,
     handlePageSizeChange,
     refresh,
+    exportLogs,
     copyText,
     handleEyeClick,
     setLogsFormat,
     hasExpandableRows,
     setLogType,
+    setExprMode,
     openParamOverrideModal,
 
     // Translation
     t,
   };
 };
+
+function getFilenameFromContentDisposition(header) {
+  if (typeof header !== 'string') return undefined;
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const quotedMatch = header.match(/filename="([^"]+)"/i);
+  if (quotedMatch?.[1]) return quotedMatch[1];
+  const plainMatch = header.match(/filename=([^;]+)/i);
+  return plainMatch?.[1]?.trim();
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}

@@ -1,3 +1,6 @@
 {
-  "Each tier supports up to 2 conditions. The last tier without conditions is the fallback.": "Each tier supports up to 2 conditions. The last tier without conditions is the fallback."
+  "Configure which groups to fall back to when the source group has no available channel.": "Configure which groups to fall back to when the source group has no available channel.",
+  "Each tier supports up to 2 conditions. The last tier without conditions is the fallback.": "Each tier supports up to 2 conditions. The last tier without conditions is the fallback.",
+  "JSON map of group name to fallback config. When a group has no available channel, the system tries fallback groups in order. Use pricing_mode \"origin\" to bill at source group rate, or \"target\" to bill at serving group rate.": "JSON map of group name to fallback config. When a group has no available channel, the system tries fallback groups in order. Use pricing_mode \"origin\" to bill at source group rate, or \"target\" to bill at serving group rate.",
+  "When a group has no available channel, the system tries fallback groups in order. Pricing mode determines which group ratio is used for billing.": "When a group has no available channel, the system tries fallback groups in order. Pricing mode determines which group ratio is used for billing."
 }

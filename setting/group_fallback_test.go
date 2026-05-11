@@ -15,7 +15,9 @@ func TestUpdateGroupFallbackByJsonString_StoresRulesAndRoundTrips(t *testing.T) 
 	err := UpdateGroupFallbackByJsonString(`{
 		"vip": {
 			"fallback": ["default", "enterprise"],
-			"pricing_mode": "origin"
+			"pricing_mode": "origin",
+			"origin_pricing_use_special_ratio": false,
+			"target_pricing_ratio_mode": "prefer_origin_special"
 		},
 		"guest": {
 			"fallback": ["standard"],
@@ -28,11 +30,16 @@ func TestUpdateGroupFallbackByJsonString_StoresRulesAndRoundTrips(t *testing.T) 
 	require.True(t, ok)
 	require.Equal(t, []string{"default", "enterprise"}, rule.Fallback)
 	require.Equal(t, "origin", rule.PricingMode)
+	require.NotNil(t, rule.OriginPricingUseSpecialRatio)
+	require.False(t, *rule.OriginPricingUseSpecialRatio)
+	require.Equal(t, GroupFallbackTargetRatioModePreferOriginSpecial, rule.TargetPricingRatioMode)
 
 	other, ok := GetGroupFallback("guest")
 	require.True(t, ok)
 	require.Equal(t, []string{"standard"}, other.Fallback)
 	require.Equal(t, "target", other.PricingMode)
+	require.Nil(t, other.OriginPricingUseSpecialRatio)
+	require.Empty(t, other.TargetPricingRatioMode)
 
 	got := GroupFallback2JSONString()
 	var parsed map[string]GroupFallbackRule
@@ -41,8 +48,29 @@ func TestUpdateGroupFallbackByJsonString_StoresRulesAndRoundTrips(t *testing.T) 
 	require.Len(t, parsed, 2)
 	require.Equal(t, []string{"default", "enterprise"}, parsed["vip"].Fallback)
 	require.Equal(t, "origin", parsed["vip"].PricingMode)
+	require.NotNil(t, parsed["vip"].OriginPricingUseSpecialRatio)
+	require.False(t, *parsed["vip"].OriginPricingUseSpecialRatio)
+	require.Equal(t, GroupFallbackTargetRatioModePreferOriginSpecial, parsed["vip"].TargetPricingRatioMode)
 	require.Equal(t, []string{"standard"}, parsed["guest"].Fallback)
 	require.Equal(t, "target", parsed["guest"].PricingMode)
+	require.Nil(t, parsed["guest"].OriginPricingUseSpecialRatio)
+	require.Empty(t, parsed["guest"].TargetPricingRatioMode)
+}
+
+func TestGroupFallbackRule_DefaultSpecialRatioSwitches(t *testing.T) {
+	rule := GroupFallbackRule{}
+	require.True(t, rule.ShouldUseOriginPricingSpecialRatio())
+	require.Equal(t, GroupFallbackTargetRatioModeTargetSpecial, rule.EffectiveTargetPricingRatioMode())
+
+	useOriginSpecial := false
+	rule.OriginPricingUseSpecialRatio = &useOriginSpecial
+	require.False(t, rule.ShouldUseOriginPricingSpecialRatio())
+
+	rule.TargetPricingRatioMode = "unknown"
+	require.Equal(t, GroupFallbackTargetRatioModeTargetSpecial, rule.EffectiveTargetPricingRatioMode())
+
+	rule.TargetPricingRatioMode = GroupFallbackTargetRatioModePreferTargetSpecial
+	require.Equal(t, GroupFallbackTargetRatioModePreferTargetSpecial, rule.EffectiveTargetPricingRatioMode())
 }
 
 func TestUpdateGroupFallbackByJsonString_ResetsStateOnInvalidJSON(t *testing.T) {

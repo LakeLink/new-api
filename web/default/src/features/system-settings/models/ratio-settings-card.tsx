@@ -201,10 +201,28 @@ const groupSchema = z.object({
             typeof (v as Record<string, unknown>).pricing_mode === 'string' &&
             ['origin', 'target'].includes(
               (v as Record<string, unknown>).pricing_mode as string
-            )
+            ) &&
+            (typeof (v as Record<string, unknown>)
+              .origin_pricing_use_special_ratio === 'undefined' ||
+              typeof (v as Record<string, unknown>)
+                .origin_pricing_use_special_ratio === 'boolean') &&
+            (typeof (v as Record<string, unknown>).target_pricing_ratio_mode ===
+              'undefined' ||
+              (typeof (v as Record<string, unknown>)
+                .target_pricing_ratio_mode === 'string' &&
+                [
+                  'origin_special',
+                  'target_special',
+                  'normal_only',
+                  'prefer_origin_special',
+                  'prefer_target_special',
+                ].includes(
+                  (v as Record<string, unknown>)
+                    .target_pricing_ratio_mode as string
+                )))
         ),
       predicateMessage:
-        'Expected a JSON object mapping group names to { fallback: string[], pricing_mode: "origin" | "target" }',
+        'Expected a JSON object mapping group names to fallback rules with fallback, pricing_mode, origin_pricing_use_special_ratio, and target_pricing_ratio_mode',
     })
     if (!result.valid) {
       ctx.addIssue({

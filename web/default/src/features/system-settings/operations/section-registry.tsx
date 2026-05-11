@@ -104,7 +104,10 @@ const OPERATIONS_SECTIONS = [
     descriptionKey: 'Configure log consumption settings',
     build: (settings: OperationsSettings) => (
       <LogSettingsSection
-        defaultEnabled={Boolean(settings.LogConsumeEnabled)}
+        defaultValues={{
+          LogConsumeEnabled: Boolean(settings.LogConsumeEnabled),
+          LogExportPermission: settings.LogExportPermission ?? '10',
+        }}
       />
     ),
   },

@@ -25,6 +25,7 @@ import type {
   GetLogStatsResponse,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
+  LogExportFormat,
   UserInfo,
 } from './types'
 
@@ -82,6 +83,45 @@ export const getLogStats = (params: GetLogStatsParams = {}) =>
 export const getUserLogStats = (
   params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
 ) => fetchLogStats('/api/log', params, false)
+
+export async function exportLogs(
+  format: LogExportFormat,
+  params: GetLogsParams,
+  isAdmin: boolean
+): Promise<{ blob: Blob; filename?: string }> {
+  const queryParams = buildQueryParams({ ...params, format })
+  const path = isAdmin ? '/api/log/export' : '/api/log/self/export'
+  const res = await api.get(`${path}?${queryParams}`, {
+    responseType: 'blob',
+    disableDuplicate: true,
+    skipBusinessError: true,
+  } as Record<string, unknown>)
+
+  return {
+    blob: res.data,
+    filename: getFilenameFromContentDisposition(
+      res.headers?.['content-disposition']
+    ),
+  }
+}
+
+function getFilenameFromContentDisposition(
+  header: unknown
+): string | undefined {
+  if (typeof header !== 'string') return undefined
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const quotedMatch = header.match(/filename="([^"]+)"/i)
+  if (quotedMatch?.[1]) return quotedMatch[1]
+  const plainMatch = header.match(/filename=([^;]+)/i)
+  return plainMatch?.[1]?.trim()
+}
 
 export async function getUserInfo(
   userId: number

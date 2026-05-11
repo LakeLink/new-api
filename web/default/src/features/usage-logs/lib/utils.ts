@@ -115,10 +115,12 @@ export function buildQueryParams(
  */
 function buildTimeRangeParams(
   searchParams: Record<string, unknown>,
-  useMilliseconds: boolean
+  useMilliseconds: boolean,
+  useDefaultRange = true
 ): { start_timestamp?: number; end_timestamp?: number } {
   const hasTimeParams = searchParams.startTime ?? searchParams.endTime
-  const defaultTimeRange = !hasTimeParams ? getDefaultTimeRange() : null
+  const defaultTimeRange =
+    useDefaultRange && !hasTimeParams ? getDefaultTimeRange() : null
 
   const convertTimestamp = (timestamp: number) =>
     useMilliseconds ? timestamp : timestampToSeconds(timestamp)
@@ -178,6 +180,10 @@ export function buildApiParams(config: {
   isAdmin: boolean
 }): GetLogsParams {
   const { page, pageSize, searchParams, columnFilters = [], isAdmin } = config
+  const expr =
+    typeof searchParams.expr === 'string' && searchParams.expr.trim() !== ''
+      ? searchParams.expr
+      : undefined
 
   // Helper to process type parameter (single value from array)
   const processType = (value: unknown) => {
@@ -185,6 +191,15 @@ export function buildApiParams(config: {
       return Number(value[0])
     }
     return undefined
+  }
+
+  if (expr) {
+    return {
+      p: page,
+      page_size: pageSize,
+      expr,
+      ...buildTimeRangeParams(searchParams, false, false),
+    }
   }
 
   // Build base params from search params

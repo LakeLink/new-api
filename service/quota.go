@@ -459,13 +459,9 @@ func checkAndSendQuotaNotify(relayInfo *relaycommon.RelayInfo, quota int, preCon
 			threshold = int(userSetting.QuotaWarningThreshold)
 		}
 
-		//noMoreQuota := userCache.Quota-(quota+preConsumedQuota) <= 0
-		quotaTooLow := false
 		consumeQuota := quota + preConsumedQuota
-		if relayInfo.UserQuota-consumeQuota < threshold {
-			quotaTooLow = true
-		}
-		if quotaTooLow {
+		shouldNotify, remainingQuota := shouldSendWalletQuotaNotify(relayInfo.UserQuota, consumeQuota, threshold)
+		if shouldNotify {
 			prompt := "您的额度即将用尽"
 			topUpLink := fmt.Sprintf("%s/console/topup", system_setting.ServerAddress)
 
@@ -481,14 +477,14 @@ func checkAndSendQuotaNotify(relayInfo *relaycommon.RelayInfo, quota int, preCon
 			if notifyType == dto.NotifyTypeBark {
 				// Bark推送使用简短文本，不支持HTML
 				content = "{{value}}，剩余额度：{{value}}，请及时充值"
-				values = []interface{}{prompt, logger.FormatQuota(relayInfo.UserQuota)}
+				values = []interface{}{prompt, logger.FormatQuota(remainingQuota)}
 			} else if notifyType == dto.NotifyTypeGotify {
 				content = "{{value}}，当前剩余额度为 {{value}}，请及时充值。"
-				values = []interface{}{prompt, logger.FormatQuota(relayInfo.UserQuota)}
+				values = []interface{}{prompt, logger.FormatQuota(remainingQuota)}
 			} else {
 				// 默认内容格式，适用于Email和Webhook（支持HTML）
 				content = "{{value}}，当前剩余额度为 {{value}}，为了不影响您的使用，请及时充值。<br/>充值链接：<a href='{{value}}'>{{value}}</a>"
-				values = []interface{}{prompt, logger.FormatQuota(relayInfo.UserQuota), topUpLink, topUpLink}
+				values = []interface{}{prompt, logger.FormatQuota(remainingQuota), topUpLink, topUpLink}
 			}
 
 			err := NotifyUser(relayInfo.UserId, relayInfo.UserEmail, relayInfo.UserSetting, dto.NewNotify(dto.NotifyTypeQuotaExceed, prompt, content, values))
@@ -497,6 +493,14 @@ func checkAndSendQuotaNotify(relayInfo *relaycommon.RelayInfo, quota int, preCon
 			}
 		}
 	})
+}
+
+func shouldSendWalletQuotaNotify(userQuota int, consumeQuota int, threshold int) (bool, int) {
+	remainingQuota := userQuota - consumeQuota
+	if consumeQuota <= 0 {
+		return false, remainingQuota
+	}
+	return userQuota >= threshold && remainingQuota < threshold, remainingQuota
 }
 
 func checkAndSendSubscriptionQuotaNotify(relayInfo *relaycommon.RelayInfo) {

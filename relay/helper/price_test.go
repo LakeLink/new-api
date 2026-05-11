@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,10 +13,72 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+const (
+	fallbackRatioTestSourceGroup = "fallback-origin-test"
+	fallbackRatioTestTargetGroup = "fallback-target-test"
+	fallbackRatioTestUserGroup   = "fallback-user-test"
+	fallbackRatioTestSourceRatio = 1.25
+	fallbackRatioTestTargetRatio = 2.5
+	fallbackRatioTestSourceSpec  = 0.75
+	fallbackRatioTestTargetSpec  = 0.9
+)
+
+func setupFallbackRatioTest(t *testing.T, groupGroupRatio map[string]map[string]float64) (*gin.Context, *relaycommon.RelayInfo) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	savedGroupRatio := ratio_setting.GroupRatio2JSONString()
+	savedGroupGroupRatio := ratio_setting.GroupGroupRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(savedGroupRatio))
+		require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(savedGroupGroupRatio))
+		require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{}`))
+	})
+
+	groupRatioBytes, err := common.Marshal(map[string]float64{
+		fallbackRatioTestSourceGroup: fallbackRatioTestSourceRatio,
+		fallbackRatioTestTargetGroup: fallbackRatioTestTargetRatio,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(string(groupRatioBytes)))
+
+	if groupGroupRatio == nil {
+		groupGroupRatio = map[string]map[string]float64{}
+	}
+	groupGroupRatioBytes, err := common.Marshal(groupGroupRatio)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(string(groupGroupRatioBytes)))
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackSourceGroup, fallbackRatioTestSourceGroup)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, fallbackRatioTestTargetGroup)
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: fallbackRatioTestSourceGroup,
+		UserGroup:  fallbackRatioTestUserGroup,
+	}
+	return ctx, info
+}
+
+func updateFallbackRuleForRatioTest(t *testing.T, pricingMode string, fields string) {
+	t.Helper()
+	if fields != "" {
+		fields = "," + fields
+	}
+	require.NoError(t, setting.UpdateGroupFallbackByJsonString(fmt.Sprintf(`{
+		%q: {
+			"fallback": [%q],
+			"pricing_mode": %q%s
+		}
+	}`, fallbackRatioTestSourceGroup, fallbackRatioTestTargetGroup, pricingMode, fields)))
+}
 
 func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -157,4 +220,177 @@ func TestHandleGroupRatio_UsesNoFallbackWhenMissingRule(t *testing.T) {
 
 	HandleGroupRatio(ctx, info)
 	require.Equal(t, "vip", info.UsingGroup)
+}
+
+func TestHandleGroupRatio_FallbackOriginPricingSpecialRatioSwitch(t *testing.T) {
+	groupGroupRatio := map[string]map[string]float64{
+		fallbackRatioTestUserGroup: {
+			fallbackRatioTestSourceGroup: fallbackRatioTestSourceSpec,
+			fallbackRatioTestTargetGroup: fallbackRatioTestTargetSpec,
+		},
+	}
+
+	t.Run("default uses source special ratio", func(t *testing.T) {
+		ctx, info := setupFallbackRatioTest(t, groupGroupRatio)
+		updateFallbackRuleForRatioTest(t, setting.GroupFallbackPricingModeOrigin, "")
+
+		got := HandleGroupRatio(ctx, info)
+
+		require.Equal(t, fallbackRatioTestSourceGroup, info.UsingGroup)
+		require.True(t, got.HasSpecialRatio)
+		require.Equal(t, fallbackRatioTestSourceSpec, got.GroupSpecialRatio)
+		require.Equal(t, fallbackRatioTestSourceSpec, got.GroupRatio)
+	})
+
+	t.Run("disabled uses source normal ratio", func(t *testing.T) {
+		ctx, info := setupFallbackRatioTest(t, groupGroupRatio)
+		updateFallbackRuleForRatioTest(t, setting.GroupFallbackPricingModeOrigin, `"origin_pricing_use_special_ratio": false`)
+
+		got := HandleGroupRatio(ctx, info)
+
+		require.Equal(t, fallbackRatioTestSourceGroup, info.UsingGroup)
+		require.False(t, got.HasSpecialRatio)
+		require.Equal(t, -1.0, got.GroupSpecialRatio)
+		require.Equal(t, fallbackRatioTestSourceRatio, got.GroupRatio)
+	})
+}
+
+func TestHandleGroupRatio_FallbackTargetPricingRatioModes(t *testing.T) {
+	bothSpecialRatios := map[string]map[string]float64{
+		fallbackRatioTestUserGroup: {
+			fallbackRatioTestSourceGroup: fallbackRatioTestSourceSpec,
+			fallbackRatioTestTargetGroup: fallbackRatioTestTargetSpec,
+		},
+	}
+	sourceSpecialOnly := map[string]map[string]float64{
+		fallbackRatioTestUserGroup: {
+			fallbackRatioTestSourceGroup: fallbackRatioTestSourceSpec,
+		},
+	}
+	targetSpecialOnly := map[string]map[string]float64{
+		fallbackRatioTestUserGroup: {
+			fallbackRatioTestTargetGroup: fallbackRatioTestTargetSpec,
+		},
+	}
+	noSpecialRatios := map[string]map[string]float64{}
+
+	tests := []struct {
+		name            string
+		mode            string
+		groupGroupRatio map[string]map[string]float64
+		wantRatio       float64
+		wantSpecial     bool
+		wantSpecialVal  float64
+	}{
+		{
+			name:            "default target_special uses target special",
+			mode:            "",
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestTargetSpec,
+		},
+		{
+			name:            "origin_special uses source special",
+			mode:            setting.GroupFallbackTargetRatioModeOriginSpecial,
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestSourceSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestSourceSpec,
+		},
+		{
+			name:            "origin_special falls back to target normal when source special missing",
+			mode:            setting.GroupFallbackTargetRatioModeOriginSpecial,
+			groupGroupRatio: targetSpecialOnly,
+			wantRatio:       fallbackRatioTestTargetRatio,
+		},
+		{
+			name:            "target_special uses target special",
+			mode:            setting.GroupFallbackTargetRatioModeTargetSpecial,
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestTargetSpec,
+		},
+		{
+			name:            "target_special falls back to target normal when target special missing",
+			mode:            setting.GroupFallbackTargetRatioModeTargetSpecial,
+			groupGroupRatio: sourceSpecialOnly,
+			wantRatio:       fallbackRatioTestTargetRatio,
+		},
+		{
+			name:            "normal_only ignores both special ratios",
+			mode:            setting.GroupFallbackTargetRatioModeNormalOnly,
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetRatio,
+		},
+		{
+			name:            "prefer_origin_special prefers source special",
+			mode:            setting.GroupFallbackTargetRatioModePreferOriginSpecial,
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestSourceSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestSourceSpec,
+		},
+		{
+			name:            "prefer_origin_special uses target special when source missing",
+			mode:            setting.GroupFallbackTargetRatioModePreferOriginSpecial,
+			groupGroupRatio: targetSpecialOnly,
+			wantRatio:       fallbackRatioTestTargetSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestTargetSpec,
+		},
+		{
+			name:            "prefer_origin_special falls back to target normal when no special",
+			mode:            setting.GroupFallbackTargetRatioModePreferOriginSpecial,
+			groupGroupRatio: noSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetRatio,
+		},
+		{
+			name:            "prefer_target_special prefers target special",
+			mode:            setting.GroupFallbackTargetRatioModePreferTargetSpecial,
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestTargetSpec,
+		},
+		{
+			name:            "prefer_target_special uses source special when target missing",
+			mode:            setting.GroupFallbackTargetRatioModePreferTargetSpecial,
+			groupGroupRatio: sourceSpecialOnly,
+			wantRatio:       fallbackRatioTestSourceSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestSourceSpec,
+		},
+		{
+			name:            "unknown mode keeps default target_special behavior",
+			mode:            "unknown",
+			groupGroupRatio: bothSpecialRatios,
+			wantRatio:       fallbackRatioTestTargetSpec,
+			wantSpecial:     true,
+			wantSpecialVal:  fallbackRatioTestTargetSpec,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, info := setupFallbackRatioTest(t, tt.groupGroupRatio)
+			fields := ""
+			if tt.mode != "" {
+				fields = fmt.Sprintf(`"target_pricing_ratio_mode": %q`, tt.mode)
+			}
+			updateFallbackRuleForRatioTest(t, setting.GroupFallbackPricingModeTarget, fields)
+
+			got := HandleGroupRatio(ctx, info)
+
+			require.Equal(t, fallbackRatioTestTargetGroup, info.UsingGroup)
+			require.Equal(t, tt.wantRatio, got.GroupRatio)
+			require.Equal(t, tt.wantSpecial, got.HasSpecialRatio)
+			if tt.wantSpecial {
+				require.Equal(t, tt.wantSpecialVal, got.GroupSpecialRatio)
+			} else {
+				require.Equal(t, -1.0, got.GroupSpecialRatio)
+			}
+		})
+	}
 }

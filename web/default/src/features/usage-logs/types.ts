@@ -52,6 +52,7 @@ export interface CommonLogFilters extends CommonFilters {
   group?: string
   username?: string
   requestId?: string
+  expr?: string
 }
 
 /**
@@ -267,7 +268,11 @@ export interface GetLogsParams {
   channel?: number
   group?: string
   request_id?: string
+  expr?: string
+  limit?: number
 }
+
+export type LogExportFormat = 'jsonl' | 'json' | 'csv'
 
 export interface GetLogsResponse {
   success: boolean
@@ -290,6 +295,7 @@ export interface GetLogStatsParams {
   channel?: number
   group?: string
   request_id?: string
+  expr?: string
 }
 
 export interface GetLogStatsResponse {

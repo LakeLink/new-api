@@ -7,9 +7,39 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
+const (
+	GroupFallbackPricingModeOrigin = "origin"
+	GroupFallbackPricingModeTarget = "target"
+
+	GroupFallbackTargetRatioModeOriginSpecial       = "origin_special"
+	GroupFallbackTargetRatioModeTargetSpecial       = "target_special"
+	GroupFallbackTargetRatioModeNormalOnly          = "normal_only"
+	GroupFallbackTargetRatioModePreferOriginSpecial = "prefer_origin_special"
+	GroupFallbackTargetRatioModePreferTargetSpecial = "prefer_target_special"
+)
+
 type GroupFallbackRule struct {
-	Fallback    []string `json:"fallback"`
-	PricingMode string   `json:"pricing_mode"` // "origin" or "target"
+	Fallback                     []string `json:"fallback"`
+	PricingMode                  string   `json:"pricing_mode"` // "origin" or "target"
+	OriginPricingUseSpecialRatio *bool    `json:"origin_pricing_use_special_ratio,omitempty"`
+	TargetPricingRatioMode       string   `json:"target_pricing_ratio_mode,omitempty"`
+}
+
+func (r GroupFallbackRule) ShouldUseOriginPricingSpecialRatio() bool {
+	return r.OriginPricingUseSpecialRatio == nil || *r.OriginPricingUseSpecialRatio
+}
+
+func (r GroupFallbackRule) EffectiveTargetPricingRatioMode() string {
+	switch r.TargetPricingRatioMode {
+	case GroupFallbackTargetRatioModeOriginSpecial,
+		GroupFallbackTargetRatioModeTargetSpecial,
+		GroupFallbackTargetRatioModeNormalOnly,
+		GroupFallbackTargetRatioModePreferOriginSpecial,
+		GroupFallbackTargetRatioModePreferTargetSpecial:
+		return r.TargetPricingRatioMode
+	default:
+		return GroupFallbackTargetRatioModeTargetSpecial
+	}
 }
 
 var groupFallback = map[string]GroupFallbackRule{}

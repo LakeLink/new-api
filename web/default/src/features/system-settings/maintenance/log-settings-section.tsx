@@ -43,6 +43,14 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { DateTimePicker } from '@/components/datetime-picker'
 import { deleteLogsBefore } from '../api'
@@ -51,12 +59,13 @@ import { useUpdateOption } from '../hooks/use-update-option'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
+  LogExportPermission: z.enum(['10', '100']),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
 type LogSettingsSectionProps = {
-  defaultEnabled: boolean
+  defaultValues: LogSettingsFormValues
 }
 
 const HOURS_IN_DAY = 24
@@ -84,16 +93,12 @@ const quickSelectOptions = [
   },
 ]
 
-export function LogSettingsSection({
-  defaultEnabled,
-}: LogSettingsSectionProps) {
+export function LogSettingsSection({ defaultValues }: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
-    defaultValues: {
-      LogConsumeEnabled: defaultEnabled,
-    },
+    defaultValues,
   })
 
   const [purgeDate, setPurgeDate] = useState<Date | undefined>(() =>
@@ -103,8 +108,8 @@ export function LogSettingsSection({
   const [showConfirmDialog, setShowConfirmDialog] = useState(false)
 
   useEffect(() => {
-    form.reset({ LogConsumeEnabled: defaultEnabled })
-  }, [defaultEnabled, form])
+    form.reset(defaultValues)
+  }, [defaultValues.LogConsumeEnabled, defaultValues.LogExportPermission, form])
 
   const purgeTimestamp = useMemo(() => {
     if (!purgeDate) return null
@@ -117,11 +122,14 @@ export function LogSettingsSection({
   }, [purgeDate])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
-    if (values.LogConsumeEnabled === defaultEnabled) return
-    await updateOption.mutateAsync({
-      key: 'LogConsumeEnabled',
-      value: values.LogConsumeEnabled,
-    })
+    const updates = Object.entries(values).filter(
+      ([key, value]) =>
+        value !== defaultValues[key as keyof LogSettingsFormValues]
+    )
+
+    for (const [key, value] of updates) {
+      await updateOption.mutateAsync({ key, value })
+    }
   }
 
   const handleRequestCleanLogs = () => {
@@ -188,6 +196,52 @@ export function LogSettingsSection({
                     onCheckedChange={field.onChange}
                   />
                 </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='LogExportPermission'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Call log export permission')}</FormLabel>
+                <Select
+                  items={[
+                    {
+                      value: '10',
+                      label: t('Admins and super admins'),
+                    },
+                    {
+                      value: '100',
+                      label: t('Super admins only'),
+                    },
+                  ]}
+                  onValueChange={field.onChange}
+                  value={field.value}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue
+                        placeholder={t('Select export permission')}
+                      />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectGroup>
+                      <SelectItem value='10'>
+                        {t('Admins and super admins')}
+                      </SelectItem>
+                      <SelectItem value='100'>
+                        {t('Super admins only')}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  {t('Choose which administrator roles can export call logs.')}
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}

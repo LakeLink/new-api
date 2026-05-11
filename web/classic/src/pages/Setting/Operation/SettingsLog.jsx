@@ -46,10 +46,23 @@ export default function SettingsLog(props) {
   const [loadingCleanHistoryLog, setLoadingCleanHistoryLog] = useState(false);
   const [inputs, setInputs] = useState({
     LogConsumeEnabled: false,
+    LogExportPermission: '10',
     historyTimestamp: dayjs().subtract(1, 'month').toDate(),
   });
   const refForm = useRef();
   const [inputsRow, setInputsRow] = useState(inputs);
+  const logExportPermissionOptions = [
+    {
+      key: 'admin',
+      label: t('管理员和超级管理员'),
+      value: '10',
+    },
+    {
+      key: 'root',
+      label: t('仅超级管理员'),
+      value: '100',
+    },
+  ];
 
   function onSubmit() {
     const updateArray = compareObjects(inputs, inputsRow).filter(
@@ -245,6 +258,21 @@ export default function SettingsLog(props) {
                     {t('清除历史日志')}
                   </Button>
                 </Spin>
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={8} xl={8}>
+                <Form.Select
+                  field={'LogExportPermission'}
+                  label={t('调用日志导出权限')}
+                  optionList={logExportPermissionOptions}
+                  extraText={t('选择哪些管理员角色可以导出调用日志')}
+                  style={{ width: 220 }}
+                  onChange={(value) => {
+                    setInputs({
+                      ...inputs,
+                      LogExportPermission: String(value),
+                    });
+                  }}
+                />
               </Col>
             </Row>
 

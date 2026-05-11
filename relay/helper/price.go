@@ -37,6 +37,67 @@ func modelPriceNotConfiguredError(modelName string, userId int) error {
 // https://docs.claude.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
 const claudeCacheCreation1hMultiplier = 6 / 3.75
 
+func applyGroupRatio(groupRatioInfo *types.GroupRatioInfo, group string) {
+	groupRatioInfo.GroupRatio = ratio_setting.GetGroupRatio(group)
+}
+
+func applySpecialGroupRatio(groupRatioInfo *types.GroupRatioInfo, userGroup, group string) bool {
+	userGroupRatio, ok := ratio_setting.GetGroupGroupRatio(userGroup, group)
+	if !ok {
+		return false
+	}
+	groupRatioInfo.GroupSpecialRatio = userGroupRatio
+	groupRatioInfo.GroupRatio = userGroupRatio
+	groupRatioInfo.HasSpecialRatio = true
+	return true
+}
+
+func applyNormalGroupRatio(groupRatioInfo *types.GroupRatioInfo, group string) {
+	groupRatioInfo.GroupRatio = ratio_setting.GetGroupRatio(group)
+	groupRatioInfo.GroupSpecialRatio = -1
+	groupRatioInfo.HasSpecialRatio = false
+}
+
+func applyStandardGroupRatio(groupRatioInfo *types.GroupRatioInfo, userGroup, usingGroup string) {
+	if !applySpecialGroupRatio(groupRatioInfo, userGroup, usingGroup) {
+		applyGroupRatio(groupRatioInfo, usingGroup)
+	}
+}
+
+func applyFallbackOriginGroupRatio(groupRatioInfo *types.GroupRatioInfo, relayInfo *relaycommon.RelayInfo, rule setting.GroupFallbackRule, sourceGroup string) {
+	relayInfo.UsingGroup = sourceGroup
+	if rule.ShouldUseOriginPricingSpecialRatio() {
+		applyStandardGroupRatio(groupRatioInfo, relayInfo.UserGroup, sourceGroup)
+		return
+	}
+	applyNormalGroupRatio(groupRatioInfo, sourceGroup)
+}
+
+func applyFallbackTargetGroupRatio(groupRatioInfo *types.GroupRatioInfo, relayInfo *relaycommon.RelayInfo, rule setting.GroupFallbackRule, sourceGroup, targetGroup string) {
+	relayInfo.UsingGroup = targetGroup
+	switch rule.EffectiveTargetPricingRatioMode() {
+	case setting.GroupFallbackTargetRatioModeOriginSpecial:
+		if applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, sourceGroup) {
+			return
+		}
+	case setting.GroupFallbackTargetRatioModeTargetSpecial:
+		if applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, targetGroup) {
+			return
+		}
+	case setting.GroupFallbackTargetRatioModePreferOriginSpecial:
+		if applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, sourceGroup) || applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, targetGroup) {
+			return
+		}
+	case setting.GroupFallbackTargetRatioModePreferTargetSpecial:
+		if applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, targetGroup) || applySpecialGroupRatio(groupRatioInfo, relayInfo.UserGroup, sourceGroup) {
+			return
+		}
+	case setting.GroupFallbackTargetRatioModeNormalOnly:
+		// Intentionally ignore all special ratios during target fallback pricing.
+	}
+	applyNormalGroupRatio(groupRatioInfo, targetGroup)
+}
+
 // HandleGroupRatio checks for "auto_group" in the context and updates the group ratio and relayInfo.UsingGroup if present
 func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.GroupRatioInfo {
 	groupRatioInfo := types.GroupRatioInfo{
@@ -53,29 +114,25 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 
 	// check fallback group
 	if !exists {
-		if fallbackGroup, fbExists := ctx.Get(string(constant.ContextKeyFallbackGroup)); fbExists {
-			fbGroupName := fallbackGroup.(string)
+		if fbGroupName := common.GetContextKeyString(ctx, constant.ContextKeyFallbackGroup); fbGroupName != "" {
 			sourceGroup := common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup)
 			if sourceGroup == "" {
 				sourceGroup = relayInfo.UsingGroup
 			}
-			if rule, ruleOk := setting.GetGroupFallback(sourceGroup); ruleOk && rule.PricingMode == "target" {
-				relayInfo.UsingGroup = fbGroupName
+			if rule, ruleOk := setting.GetGroupFallback(sourceGroup); ruleOk {
+				switch rule.PricingMode {
+				case setting.GroupFallbackPricingModeTarget:
+					applyFallbackTargetGroupRatio(&groupRatioInfo, relayInfo, rule, sourceGroup, fbGroupName)
+				default:
+					applyFallbackOriginGroupRatio(&groupRatioInfo, relayInfo, rule, sourceGroup)
+				}
+				return groupRatioInfo
 			}
 		}
 	}
 
 	// check user group special ratio
-	userGroupRatio, ok := ratio_setting.GetGroupGroupRatio(relayInfo.UserGroup, relayInfo.UsingGroup)
-	if ok {
-		// user group special ratio
-		groupRatioInfo.GroupSpecialRatio = userGroupRatio
-		groupRatioInfo.GroupRatio = userGroupRatio
-		groupRatioInfo.HasSpecialRatio = true
-	} else {
-		// normal group ratio
-		groupRatioInfo.GroupRatio = ratio_setting.GetGroupRatio(relayInfo.UsingGroup)
-	}
+	applyStandardGroupRatio(&groupRatioInfo, relayInfo.UserGroup, relayInfo.UsingGroup)
 
 	return groupRatioInfo
 }

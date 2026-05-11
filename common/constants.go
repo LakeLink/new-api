@@ -177,6 +177,7 @@ var (
 	FileDownloadPermission  = RoleGuestUser
 	ImageUploadPermission   = RoleGuestUser
 	ImageDownloadPermission = RoleGuestUser
+	LogExportPermission     = RoleAdminUser
 )
 
 // All duration's unit is seconds
