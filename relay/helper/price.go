@@ -55,7 +55,11 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 	if !exists {
 		if fallbackGroup, fbExists := ctx.Get(string(constant.ContextKeyFallbackGroup)); fbExists {
 			fbGroupName := fallbackGroup.(string)
-			if rule, ruleOk := setting.GetGroupFallback(relayInfo.UsingGroup); ruleOk && rule.PricingMode == "target" {
+			sourceGroup := common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup)
+			if sourceGroup == "" {
+				sourceGroup = relayInfo.UsingGroup
+			}
+			if rule, ruleOk := setting.GetGroupFallback(sourceGroup); ruleOk && rule.PricingMode == "target" {
 				relayInfo.UsingGroup = fbGroupName
 			}
 		}

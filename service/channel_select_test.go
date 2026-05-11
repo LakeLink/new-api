@@ -57,6 +57,8 @@ func TestCacheGetRandomSatisfiedChannel_UsesFallbackGroup(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "stale")
+	common.SetContextKey(ctx, constant.ContextKeyFallbackSourceGroup, "stale")
 
 	ch, selected, err := CacheGetRandomSatisfiedChannel(&RetryParam{
 		Ctx:        ctx,
@@ -67,6 +69,7 @@ func TestCacheGetRandomSatisfiedChannel_UsesFallbackGroup(t *testing.T) {
 	require.NotNil(t, ch)
 	require.Equal(t, "default", selected)
 	require.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyFallbackGroup))
+	require.Equal(t, "vip", common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup))
 }
 
 func TestCacheGetRandomSatisfiedChannel_FollowsFallbackChainOrder(t *testing.T) {
@@ -77,6 +80,8 @@ func TestCacheGetRandomSatisfiedChannel_FollowsFallbackChainOrder(t *testing.T) 
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "stale")
+	common.SetContextKey(ctx, constant.ContextKeyFallbackSourceGroup, "stale")
 
 	ch, selected, err := CacheGetRandomSatisfiedChannel(&RetryParam{
 		Ctx:        ctx,
@@ -87,6 +92,30 @@ func TestCacheGetRandomSatisfiedChannel_FollowsFallbackChainOrder(t *testing.T) 
 	require.NotNil(t, ch)
 	require.Equal(t, "enterprise", selected)
 	require.Equal(t, "enterprise", common.GetContextKeyString(ctx, constant.ContextKeyFallbackGroup))
+	require.Equal(t, "vip", common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup))
+}
+
+func TestCacheGetRandomSatisfiedChannel_RetryStillUsesFallbackWhenPrimaryHasNoAbilities(t *testing.T) {
+	setupFallbackTestChannels(t,
+		newChannelForSelection(8251, "enterprise", "gpt-4"),
+	)
+	require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{"vip":{"fallback":["default", "enterprise"],"pricing_mode":"target"}}`))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	retry := 1
+
+	ch, selected, err := CacheGetRandomSatisfiedChannel(&RetryParam{
+		Ctx:        ctx,
+		TokenGroup: "vip",
+		ModelName:  "gpt-4",
+		Retry:      &retry,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	require.Equal(t, "enterprise", selected)
+	require.Equal(t, "enterprise", common.GetContextKeyString(ctx, constant.ContextKeyFallbackGroup))
+	require.Equal(t, "vip", common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup))
 }
 
 func TestCacheGetRandomSatisfiedChannel_PrefersConfiguredGroupWhenAvailable(t *testing.T) {
@@ -108,6 +137,7 @@ func TestCacheGetRandomSatisfiedChannel_PrefersConfiguredGroupWhenAvailable(t *t
 	require.NotNil(t, ch)
 	require.Equal(t, "vip", selected)
 	require.Equal(t, "", common.GetContextKeyString(ctx, constant.ContextKeyFallbackGroup))
+	require.Equal(t, "", common.GetContextKeyString(ctx, constant.ContextKeyFallbackSourceGroup))
 	require.Equal(t, 8301, ch.Id)
 }
 

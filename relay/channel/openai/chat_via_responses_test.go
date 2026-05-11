@@ -343,6 +343,89 @@ func TestOaiResponsesToChatStreamToNonStreamHandlerMapsIncompleteFinishReason(t 
 	}
 }
 
+func buildChunkedStreamBody(id string, chunks []string) string {
+	const model = "gpt-test"
+
+	var lines []string
+	lines = append(lines, `data: {"id":"`+id+`","object":"chat.completion.chunk","created":123,"model":"`+model+`","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`)
+
+	for _, chunk := range chunks {
+		escaped := strings.ReplaceAll(chunk, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+		escaped = strings.ReplaceAll(escaped, "\t", `\t`)
+		lines = append(lines, `data: {"id":"`+id+`","object":"chat.completion.chunk","created":123,"model":"`+model+`","choices":[{"index":0,"delta":{"content":"`+escaped+`"},"finish_reason":null}]}`)
+	}
+
+	lines = append(lines, `data: {"id":"`+id+`","object":"chat.completion.chunk","created":123,"model":"`+model+`","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`)
+	lines = append(lines, "data: [DONE]")
+	lines = append(lines, "")
+
+	return strings.Join(lines, "\n\n")
+}
+
+func buildCharByCharStreamBody(text string) string {
+	chunks := make([]string, len([]rune(text)))
+	for i, ch := range text {
+		chunks[i] = string(ch)
+	}
+	return buildChunkedStreamBody("chatcmpl_charbychar", chunks)
+}
+
+func assertStreamToNonStreamContent(t *testing.T, respBody, wantContent, wantID string) {
+	t.Helper()
+	if got := gjson.Get(respBody, "choices.0.message.content").String(); got != wantContent {
+		t.Fatalf("expected content %q, got %q", wantContent, got)
+	}
+	if got := gjson.Get(respBody, "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("expected finish_reason stop, got %q", got)
+	}
+	if got := gjson.Get(respBody, "choices.0.message.role").String(); got != "assistant" {
+		t.Fatalf("expected role assistant, got %q", got)
+	}
+	if got := gjson.Get(respBody, "object").String(); got != "chat.completion" {
+		t.Fatalf("expected object chat.completion, got %q", got)
+	}
+	if got := gjson.Get(respBody, "id").String(); got != wantID {
+		t.Fatalf("expected id %q, got %q", wantID, got)
+	}
+}
+
+func TestOaiStreamToNonStreamHandlerCharByCharText(t *testing.T) {
+	wantContent := "a\n\nb\n\nc\n"
+	body := buildCharByCharStreamBody(wantContent)
+	c, recorder, resp, info := setupResponsesChatTest(t, body)
+	info.RelayMode = relayconstant.RelayModeChatCompletions
+
+	usage, err := OaiStreamToNonStreamHandler(c, info, resp)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if usage == nil || usage.TotalTokens != 12 {
+		t.Fatalf("expected total usage 12, got %#v", usage)
+	}
+	assertStreamToNonStreamContent(t, recorder.Body.String(), wantContent, "chatcmpl_charbychar")
+}
+
+func TestOaiStreamToNonStreamHandlerMultiCharChunksWithNewlines(t *testing.T) {
+	wantContent := "a\n\nb\n\nc\n"
+	chunks := []string{"a", "\n\nb", "\n\nc", "\n"}
+	body := buildChunkedStreamBody("chatcmpl_multichunk", chunks)
+	c, recorder, resp, info := setupResponsesChatTest(t, body)
+	info.RelayMode = relayconstant.RelayModeChatCompletions
+
+	usage, err := OaiStreamToNonStreamHandler(c, info, resp)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if usage == nil || usage.TotalTokens != 12 {
+		t.Fatalf("expected total usage 12, got %#v", usage)
+	}
+	assertStreamToNonStreamContent(t, recorder.Body.String(), wantContent, "chatcmpl_multichunk")
+}
+
 func TestOaiResponsesToChatStreamHandlerMapsIncompleteFinishReason(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"response.output_text.delta","delta":"hello"}`,

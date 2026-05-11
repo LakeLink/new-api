@@ -102,3 +102,17 @@ func TestUpdateGroupFallbackByJsonString_ReplacesEntireMap(t *testing.T) {
 	require.Equal(t, []string{"guest"}, standardRule.Fallback)
 	require.Equal(t, "origin", standardRule.PricingMode)
 }
+
+func TestUpdateGroupFallbackByJsonString_BlankInputClearsRules(t *testing.T) {
+	t.Cleanup(func() {
+		require.NoError(t, UpdateGroupFallbackByJsonString(`{}`))
+	})
+
+	require.NoError(t, UpdateGroupFallbackByJsonString(`{"vip":{"fallback":["default"],"pricing_mode":"target"}}`))
+
+	require.NoError(t, UpdateGroupFallbackByJsonString(`   `))
+
+	_, ok := GetGroupFallback("vip")
+	require.False(t, ok)
+	require.Equal(t, `{}`, GroupFallback2JSONString())
+}

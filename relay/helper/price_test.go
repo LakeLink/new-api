@@ -78,6 +78,7 @@ func TestHandleGroupRatio_UsesFallbackGroupForTargetPricingMode(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackSourceGroup, "vip")
 	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "emergency")
 
 	info := &relaycommon.RelayInfo{
@@ -87,6 +88,33 @@ func TestHandleGroupRatio_UsesFallbackGroupForTargetPricingMode(t *testing.T) {
 
 	HandleGroupRatio(ctx, info)
 	require.Equal(t, "emergency", info.UsingGroup)
+}
+
+func TestHandleGroupRatio_UsesFallbackSourceGroupAfterPreviousTargetMutation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{
+		"vip": {
+			"fallback": ["first", "second"],
+			"pricing_mode": "target"
+		}
+	}`))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateGroupFallbackByJsonString(`{}`))
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyFallbackSourceGroup, "vip")
+	common.SetContextKey(ctx, constant.ContextKeyFallbackGroup, "second")
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: "first",
+		UserGroup:  "vip",
+	}
+
+	HandleGroupRatio(ctx, info)
+	require.Equal(t, "second", info.UsingGroup)
 }
 
 func TestHandleGroupRatio_KeepsOriginalGroupForOriginPricingMode(t *testing.T) {

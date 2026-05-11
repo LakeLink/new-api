@@ -1,6 +1,7 @@
 package setting
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +23,10 @@ func GetGroupFallback(group string) (GroupFallbackRule, bool) {
 }
 
 func UpdateGroupFallbackByJsonString(jsonStr string) error {
+	if strings.TrimSpace(jsonStr) == "" {
+		jsonStr = "{}"
+	}
+
 	var parsed map[string]GroupFallbackRule
 	if err := common.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		return err
