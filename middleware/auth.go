@@ -152,6 +152,10 @@ func authHelper(c *gin.Context, minRole int) {
 	c.Set("group", session.Get("group"))
 	c.Set("user_group", session.Get("group"))
 	c.Set("use_access_token", useAccessToken)
+	if group, ok := session.Get("group").(string); ok {
+		common.SetContextKey(c, constant.ContextKeyUserGroup, group)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+	}
 
 	c.Next()
 }
