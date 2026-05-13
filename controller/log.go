@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -59,12 +59,7 @@ func ExportAllLogs(c *gin.Context) {
 	}
 	opts := getLogQueryOptions(c)
 	opts.IncludeAdminFields = true
-	logs, err := model.ExportAllLogsWithOptions(opts)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	writeLogExport(c, logs)
+	streamLogExport(c, opts, true)
 }
 
 func GetUserLogs(c *gin.Context) {
@@ -109,12 +104,7 @@ func ExportUserLogs(c *gin.Context) {
 	opts.UserId = c.GetInt("id")
 	opts.Username = ""
 	opts.Channel = 0
-	logs, err := model.ExportUserLogsWithOptions(opts)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	writeLogExport(c, logs)
+	streamLogExport(c, opts, false)
 }
 
 // Deprecated: SearchAllLogs 已废弃，前端未使用该接口。
@@ -266,8 +256,10 @@ func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	channel, _ := strconv.Atoi(c.Query("channel"))
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	if limit <= 0 || limit > model.LogExportLimit {
+	limitParam := strings.ToLower(strings.TrimSpace(c.Query("limit")))
+	exportAll := limitParam == "all"
+	limit, _ := strconv.Atoi(limitParam)
+	if !exportAll && (limit <= 0 || limit > model.LogExportLimit) {
 		limit = model.LogExportLimit
 	}
 	return model.LogQueryOptions{
@@ -282,6 +274,7 @@ func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 		RequestId:      c.Query("request_id"),
 		Expr:           c.Query("expr"),
 		Num:            limit,
+		NoLimit:        exportAll,
 	}
 }
 
@@ -293,61 +286,156 @@ func checkLogExportPermission(c *gin.Context) bool {
 	return true
 }
 
-func writeLogExport(c *gin.Context, logs []*model.Log) {
-	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "jsonl")))
-	var (
-		data        []byte
-		contentType string
-		extension   string
-		err         error
-	)
+type logExportFormat struct {
+	name        string
+	contentType string
+	extension   string
+}
 
+func getLogExportFormat(c *gin.Context) (logExportFormat, error) {
+	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "jsonl")))
 	switch format {
 	case "jsonl", "ndjson":
-		data, err = marshalLogsJSONL(logs)
-		contentType = "application/x-ndjson; charset=utf-8"
-		extension = "jsonl"
+		return logExportFormat{
+			name:        "jsonl",
+			contentType: "application/x-ndjson; charset=utf-8",
+			extension:   "jsonl",
+		}, nil
 	case "json":
-		data, err = common.Marshal(logs)
-		contentType = "application/json; charset=utf-8"
-		extension = "json"
+		return logExportFormat{
+			name:        "json",
+			contentType: "application/json; charset=utf-8",
+			extension:   "json",
+		}, nil
 	case "csv":
-		data, err = marshalLogsCSV(logs)
-		contentType = "text/csv; charset=utf-8"
-		extension = "csv"
+		return logExportFormat{
+			name:        "csv",
+			contentType: "text/csv; charset=utf-8",
+			extension:   "csv",
+		}, nil
 	default:
-		common.ApiError(c, errors.New("unsupported export format"))
-		return
+		return logExportFormat{}, errors.New("unsupported export format")
 	}
+}
+
+func streamLogExport(c *gin.Context, opts model.LogQueryOptions, isAdmin bool) {
+	format, err := getLogExportFormat(c)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="call-logs-%s.%s"`, time.Now().UTC().Format("20060102-150405"), extension))
-	c.Header("Cache-Control", "no-store")
-	c.Header("X-Content-Type-Options", "nosniff")
-	c.Data(http.StatusOK, contentType, data)
+	bufferedWriter := bufio.NewWriterSize(c.Writer, 32*1024)
+	var csvWriter *csv.Writer
+	rowCount := 0
+	jsonArrayStarted := false
+	streamStarted := false
+
+	onReady := func() error {
+		streamStarted = true
+		c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="call-logs-%s.%s"`, time.Now().UTC().Format("20060102-150405"), format.extension))
+		c.Header("Content-Type", format.contentType)
+		c.Header("Cache-Control", "no-store")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Status(http.StatusOK)
+
+		switch format.name {
+		case "json":
+			jsonArrayStarted = true
+			return bufferedWriter.WriteByte('[')
+		case "csv":
+			if _, err := bufferedWriter.WriteString("\xEF\xBB\xBF"); err != nil {
+				return err
+			}
+			csvWriter = csv.NewWriter(bufferedWriter)
+			return writeLogCSVHeader(csvWriter)
+		default:
+			return nil
+		}
+	}
+
+	onRow := func(log *model.Log) error {
+		rowCount++
+		if err := writeLogExportRow(bufferedWriter, csvWriter, format.name, log, rowCount); err != nil {
+			return err
+		}
+		if rowCount%1000 == 0 {
+			return flushLogExport(bufferedWriter, csvWriter, c)
+		}
+		return nil
+	}
+
+	if isAdmin {
+		err = model.StreamExportAllLogsWithOptions(opts, onReady, onRow)
+	} else {
+		err = model.StreamExportUserLogsWithOptions(opts, onReady, onRow)
+	}
+	if err != nil {
+		if streamStarted || c.Writer.Written() {
+			common.SysError("failed to stream log export: " + err.Error())
+		} else {
+			common.ApiError(c, err)
+		}
+		return
+	}
+
+	if format.name == "json" && jsonArrayStarted {
+		if err = bufferedWriter.WriteByte(']'); err != nil {
+			common.SysError("failed to finish log export: " + err.Error())
+			return
+		}
+	}
+	if err = flushLogExport(bufferedWriter, csvWriter, c); err != nil {
+		common.SysError("failed to flush log export: " + err.Error())
+	}
 }
 
-func marshalLogsJSONL(logs []*model.Log) ([]byte, error) {
-	var buf bytes.Buffer
-	for _, log := range logs {
+func writeLogExportRow(bufferedWriter *bufio.Writer, csvWriter *csv.Writer, format string, log *model.Log, rowCount int) error {
+	switch format {
+	case "jsonl":
 		line, err := common.Marshal(log)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		buf.Write(line)
-		buf.WriteByte('\n')
+		if _, err = bufferedWriter.Write(line); err != nil {
+			return err
+		}
+		return bufferedWriter.WriteByte('\n')
+	case "json":
+		if rowCount > 1 {
+			if err := bufferedWriter.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		data, err := common.Marshal(log)
+		if err != nil {
+			return err
+		}
+		_, err = bufferedWriter.Write(data)
+		return err
+	case "csv":
+		return writeLogCSVRow(csvWriter, log)
+	default:
+		return errors.New("unsupported export format")
 	}
-	return buf.Bytes(), nil
 }
 
-func marshalLogsCSV(logs []*model.Log) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteString("\xEF\xBB\xBF")
-	writer := csv.NewWriter(&buf)
-	if err := writer.Write([]string{
+func flushLogExport(bufferedWriter *bufio.Writer, csvWriter *csv.Writer, c *gin.Context) error {
+	if csvWriter != nil {
+		csvWriter.Flush()
+		if err := csvWriter.Error(); err != nil {
+			return err
+		}
+	}
+	if err := bufferedWriter.Flush(); err != nil {
+		return err
+	}
+	c.Writer.Flush()
+	return nil
+}
+
+func writeLogCSVHeader(writer *csv.Writer) error {
+	return writer.Write([]string{
 		"id",
 		"user_id",
 		"created_at",
@@ -368,40 +456,32 @@ func marshalLogsCSV(logs []*model.Log) ([]byte, error) {
 		"request_id",
 		"content",
 		"other",
-	}); err != nil {
-		return nil, err
-	}
-	for _, log := range logs {
-		if err := writer.Write([]string{
-			strconv.Itoa(log.Id),
-			strconv.Itoa(log.UserId),
-			strconv.FormatInt(log.CreatedAt, 10),
-			strconv.Itoa(log.Type),
-			csvSafeCell(log.Username),
-			csvSafeCell(log.TokenName),
-			csvSafeCell(log.ModelName),
-			strconv.Itoa(log.Quota),
-			strconv.Itoa(log.PromptTokens),
-			strconv.Itoa(log.CompletionTokens),
-			strconv.Itoa(log.UseTime),
-			strconv.FormatBool(log.IsStream),
-			strconv.Itoa(log.ChannelId),
-			csvSafeCell(log.ChannelName),
-			strconv.Itoa(log.TokenId),
-			csvSafeCell(log.Group),
-			csvSafeCell(log.Ip),
-			csvSafeCell(log.RequestId),
-			csvSafeCell(log.Content),
-			csvSafeCell(log.Other),
-		}); err != nil {
-			return nil, err
-		}
-	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	})
+}
+
+func writeLogCSVRow(writer *csv.Writer, log *model.Log) error {
+	return writer.Write([]string{
+		strconv.Itoa(log.Id),
+		strconv.Itoa(log.UserId),
+		strconv.FormatInt(log.CreatedAt, 10),
+		strconv.Itoa(log.Type),
+		csvSafeCell(log.Username),
+		csvSafeCell(log.TokenName),
+		csvSafeCell(log.ModelName),
+		strconv.Itoa(log.Quota),
+		strconv.Itoa(log.PromptTokens),
+		strconv.Itoa(log.CompletionTokens),
+		strconv.Itoa(log.UseTime),
+		strconv.FormatBool(log.IsStream),
+		strconv.Itoa(log.ChannelId),
+		csvSafeCell(log.ChannelName),
+		strconv.Itoa(log.TokenId),
+		csvSafeCell(log.Group),
+		csvSafeCell(log.Ip),
+		csvSafeCell(log.RequestId),
+		csvSafeCell(log.Content),
+		csvSafeCell(log.Other),
+	})
 }
 
 func csvSafeCell(value string) string {

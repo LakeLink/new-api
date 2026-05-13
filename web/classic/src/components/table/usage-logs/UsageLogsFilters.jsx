@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useState } from 'react';
-import { Button, Dropdown, Form, Modal, Tooltip } from '@douyinfe/semi-ui';
+import { Button, Form, Modal, Select, Tooltip } from '@douyinfe/semi-ui';
 import { IconDownload, IconHelpCircle, IconSearch } from '@douyinfe/semi-icons';
 
 import { DATE_RANGE_PRESETS } from '../../../constants/console.constants';
@@ -243,6 +243,22 @@ const exprExamples = [
   },
 ];
 
+const exportFormatOptions = [
+  { value: 'jsonl', label: '导出 JSONL' },
+  { value: 'json', label: '导出 JSON' },
+  { value: 'csv', label: '导出 CSV' },
+];
+
+const exportRowOptions = [
+  '100',
+  '1000',
+  '2000',
+  '5000',
+  '10000',
+  '20000',
+  'all',
+];
+
 const LogsFilters = ({
   formInitValues,
   setFormApi,
@@ -260,6 +276,16 @@ const LogsFilters = ({
   t,
 }) => {
   const [exprHelpVisible, setExprHelpVisible] = useState(false);
+  const [exportDialogVisible, setExportDialogVisible] = useState(false);
+  const [exportFormat, setExportFormat] = useState('jsonl');
+  const [exportRowLimit, setExportRowLimit] = useState('10000');
+
+  const handleExportConfirm = async () => {
+    const success = await exportLogs(exportFormat, exportRowLimit);
+    if (success) {
+      setExportDialogVisible(false);
+    }
+  };
 
   return (
     <>
@@ -421,32 +447,15 @@ const LogsFilters = ({
                 />
               </Tooltip>
               {canExportLogs && (
-                <Dropdown
-                  trigger='click'
-                  position='bottomRight'
-                  render={
-                    <Dropdown.Menu>
-                      <Dropdown.Item onClick={() => exportLogs('jsonl')}>
-                        {t('导出 JSONL')}
-                      </Dropdown.Item>
-                      <Dropdown.Item onClick={() => exportLogs('json')}>
-                        {t('导出 JSON')}
-                      </Dropdown.Item>
-                      <Dropdown.Item onClick={() => exportLogs('csv')}>
-                        {t('导出 CSV')}
-                      </Dropdown.Item>
-                    </Dropdown.Menu>
-                  }
+                <Button
+                  type='tertiary'
+                  icon={<IconDownload />}
+                  loading={!!exportingFormat}
+                  onClick={() => setExportDialogVisible(true)}
+                  size='small'
                 >
-                  <Button
-                    type='tertiary'
-                    icon={<IconDownload />}
-                    loading={!!exportingFormat}
-                    size='small'
-                  >
-                    {t('导出')}
-                  </Button>
-                </Dropdown>
+                  {t('导出')}
+                </Button>
               )}
               <Button
                 type='tertiary'
@@ -489,6 +498,63 @@ const LogsFilters = ({
         onCancel={() => setExprHelpVisible(false)}
         t={t}
       />
+
+      <Modal
+        title={t('导出调用日志')}
+        visible={exportDialogVisible}
+        onCancel={() => setExportDialogVisible(false)}
+        footer={
+          <div className='flex justify-end gap-2'>
+            <Button
+              onClick={() => setExportDialogVisible(false)}
+              disabled={!!exportingFormat}
+            >
+              {t('取消')}
+            </Button>
+            <Button
+              type='primary'
+              icon={<IconDownload />}
+              loading={!!exportingFormat}
+              onClick={handleExportConfirm}
+            >
+              {t('导出')}
+            </Button>
+          </div>
+        }
+      >
+        <div className='space-y-4'>
+          <div className='space-y-2'>
+            <div className='text-sm font-medium'>{t('导出格式')}</div>
+            <Select
+              className='w-full'
+              value={exportFormat}
+              disabled={!!exportingFormat}
+              onChange={(value) => setExportFormat(value)}
+            >
+              {exportFormatOptions.map((option) => (
+                <Select.Option key={option.value} value={option.value}>
+                  {t(option.label)}
+                </Select.Option>
+              ))}
+            </Select>
+          </div>
+          <div className='space-y-2'>
+            <div className='text-sm font-medium'>{t('导出行数')}</div>
+            <Select
+              className='w-full'
+              value={exportRowLimit}
+              disabled={!!exportingFormat}
+              onChange={(value) => setExportRowLimit(value)}
+            >
+              {exportRowOptions.map((option) => (
+                <Select.Option key={option} value={option}>
+                  {option === 'all' ? t('全部') : option}
+                </Select.Option>
+              ))}
+            </Select>
+          </div>
+        </div>
+      </Modal>
     </>
   );
 };

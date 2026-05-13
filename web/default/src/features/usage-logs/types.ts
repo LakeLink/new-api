@@ -269,7 +269,7 @@ export interface GetLogsParams {
   group?: string
   request_id?: string
   expr?: string
-  limit?: number
+  limit?: number | 'all'
 }
 
 export type LogExportFormat = 'jsonl' | 'json' | 'csv'

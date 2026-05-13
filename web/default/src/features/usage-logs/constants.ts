@@ -43,6 +43,18 @@ export const DEFAULT_LOGS_DATA = {
   total: 0,
 }
 
+export const LOG_EXPORT_ROW_OPTIONS = [
+  '100',
+  '1000',
+  '2000',
+  '5000',
+  '10000',
+  '20000',
+  'all',
+] as const
+
+export const DEFAULT_LOG_EXPORT_ROW_LIMIT = '10000'
+
 // ============================================================================
 // Log Type Enum
 // ============================================================================

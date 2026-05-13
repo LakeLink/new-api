@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/bytedance/gopkg/util/gopool"
+	"gorm.io/gorm"
 )
 
 type Log struct {
@@ -51,18 +52,22 @@ const (
 
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
-		logs[i].ChannelName = ""
-		var otherMap map[string]interface{}
-		otherMap, _ = common.StrToMap(logs[i].Other)
-		if otherMap != nil {
-			// Remove admin-only debug fields.
-			delete(otherMap, "admin_info")
-			// delete(otherMap, "reject_reason")
-			delete(otherMap, "stream_status")
-		}
-		logs[i].Other = common.MapToJsonStr(otherMap)
-		logs[i].Id = startIdx + i + 1
+		formatUserLog(logs[i], startIdx+i+1)
 	}
+}
+
+func formatUserLog(log *Log, displayId int) {
+	log.ChannelName = ""
+	var otherMap map[string]interface{}
+	otherMap, _ = common.StrToMap(log.Other)
+	if otherMap != nil {
+		// Remove admin-only debug fields.
+		delete(otherMap, "admin_info")
+		// delete(otherMap, "reject_reason")
+		delete(otherMap, "stream_status")
+	}
+	log.Other = common.MapToJsonStr(otherMap)
+	log.Id = displayId
 }
 
 func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
@@ -309,6 +314,7 @@ type LogQueryOptions struct {
 	Expr               string
 	UserId             int
 	IncludeAdminFields bool
+	NoLimit            bool
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string) (logs []*Log, total int64, err error) {
@@ -399,7 +405,10 @@ func fillLogChannelNames(logs []*Log) error {
 }
 
 const logSearchCountLimit = 10000
-const LogExportLimit = 10000
+const LogExportLimit = 20000
+
+type LogExportRowHandler func(log *Log) error
+type LogExportReadyHandler func() error
 
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string) (logs []*Log, total int64, err error) {
 	return GetUserLogsWithOptions(LogQueryOptions{
@@ -442,9 +451,7 @@ func GetUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, total int64, err
 
 func ExportAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	opts.StartIdx = 0
-	if opts.Num <= 0 || opts.Num > LogExportLimit {
-		opts.Num = LogExportLimit
-	}
+	normalizeLogExportLimit(&opts)
 
 	tx := LOG_DB.Model(&Log{})
 	if opts.LogType != LogTypeUnknown {
@@ -454,7 +461,11 @@ func ExportAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = tx.Order("logs.id desc").Limit(opts.Num).Find(&logs).Error; err != nil {
+	tx = tx.Order("logs.id desc")
+	if !opts.NoLimit {
+		tx = tx.Limit(opts.Num)
+	}
+	if err = tx.Find(&logs).Error; err != nil {
 		return nil, err
 	}
 	if err = fillLogChannelNames(logs); err != nil {
@@ -465,9 +476,7 @@ func ExportAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 
 func ExportUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	opts.StartIdx = 0
-	if opts.Num <= 0 || opts.Num > LogExportLimit {
-		opts.Num = LogExportLimit
-	}
+	normalizeLogExportLimit(&opts)
 
 	tx := LOG_DB.Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
 	if opts.LogType != LogTypeUnknown {
@@ -477,13 +486,127 @@ func ExportUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = tx.Order("logs.id desc").Limit(opts.Num).Find(&logs).Error; err != nil {
+	tx = tx.Order("logs.id desc")
+	if !opts.NoLimit {
+		tx = tx.Limit(opts.Num)
+	}
+	if err = tx.Find(&logs).Error; err != nil {
 		common.SysError("failed to export user logs: " + err.Error())
 		return nil, errors.New("导出日志失败")
 	}
 
 	formatUserLogs(logs, 0)
 	return logs, nil
+}
+
+func StreamExportAllLogsWithOptions(opts LogQueryOptions, onReady LogExportReadyHandler, handle LogExportRowHandler) error {
+	opts.StartIdx = 0
+	normalizeLogExportLimit(&opts)
+
+	tx := LOG_DB.Model(&Log{})
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx, err := applyLogFilters(tx, opts)
+	if err != nil {
+		return err
+	}
+
+	channelNames, err := newLogChannelNameResolver()
+	if err != nil {
+		return err
+	}
+	return streamExportLogs(tx, opts, onReady, func(index int, log *Log) error {
+		channelNames.Fill(log)
+		return handle(log)
+	})
+}
+
+func StreamExportUserLogsWithOptions(opts LogQueryOptions, onReady LogExportReadyHandler, handle LogExportRowHandler) error {
+	opts.StartIdx = 0
+	normalizeLogExportLimit(&opts)
+
+	tx := LOG_DB.Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx, err := applyLogFilters(tx, opts)
+	if err != nil {
+		return err
+	}
+
+	return streamExportLogs(tx, opts, onReady, func(index int, log *Log) error {
+		formatUserLog(log, index)
+		return handle(log)
+	})
+}
+
+func normalizeLogExportLimit(opts *LogQueryOptions) {
+	if !opts.NoLimit && (opts.Num <= 0 || opts.Num > LogExportLimit) {
+		opts.Num = LogExportLimit
+	}
+}
+
+func streamExportLogs(tx *gorm.DB, opts LogQueryOptions, onReady LogExportReadyHandler, handle func(index int, log *Log) error) error {
+	tx = tx.Select("logs.*").Order("logs.id desc")
+	if !opts.NoLimit {
+		tx = tx.Limit(opts.Num)
+	}
+
+	rows, err := tx.Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	if onReady != nil {
+		if err := onReady(); err != nil {
+			return err
+		}
+	}
+
+	index := 0
+	for rows.Next() {
+		var log Log
+		if err := LOG_DB.ScanRows(rows, &log); err != nil {
+			return err
+		}
+		index++
+		if err := handle(index, &log); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+type logChannelNameResolver struct {
+	names map[int]string
+}
+
+func newLogChannelNameResolver() (*logChannelNameResolver, error) {
+	resolver := &logChannelNameResolver{
+		names: make(map[int]string),
+	}
+	var channels []struct {
+		Id   int    `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if err := DB.Table("channels").Select("id, name").Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	for _, channel := range channels {
+		resolver.names[channel.Id] = channel.Name
+	}
+	return resolver, nil
+}
+
+func (r *logChannelNameResolver) Fill(log *Log) {
+	if log.ChannelId == 0 {
+		return
+	}
+	if name, ok := r.names[log.ChannelId]; ok {
+		log.ChannelName = name
+	}
 }
 
 type Stat struct {

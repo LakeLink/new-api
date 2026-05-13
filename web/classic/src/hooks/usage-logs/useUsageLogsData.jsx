@@ -854,13 +854,13 @@ export const useLogsData = () => {
     setLoading(false);
   };
 
-  const exportLogs = async (format) => {
+  const exportLogs = async (format, exportLimit = '10000') => {
     if (exportingFormat) {
-      return;
+      return false;
     }
     if (!canExportLogs) {
       showError(t('无权导出日志'));
-      return;
+      return false;
     }
     setExportingFormat(format);
     try {
@@ -880,6 +880,9 @@ export const useLogsData = () => {
       const localStartTimestamp = Date.parse(start_timestamp) / 1000;
       const localEndTimestamp = Date.parse(end_timestamp) / 1000;
       const params = new URLSearchParams({ format });
+      if (exportLimit) {
+        params.set('limit', exportLimit);
+      }
 
       if (exprMode) {
         if (expr_search) params.set('expr', expr_search);
@@ -911,8 +914,10 @@ export const useLogsData = () => {
         ) || `call-logs.${format}`;
       downloadBlob(res.data, filename);
       showSuccess(t('导出完成'));
+      return true;
     } catch (error) {
       showError(error?.response?.data?.message || t('导出失败'));
+      return false;
     } finally {
       setExportingFormat(null);
     }

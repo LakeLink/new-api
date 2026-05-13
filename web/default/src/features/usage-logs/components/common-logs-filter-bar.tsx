@@ -38,16 +38,13 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -63,7 +60,11 @@ import {
 } from '@/components/ui/tooltip'
 import { DataTableToolbar } from '@/components/data-table'
 import { exportLogs } from '../api'
-import { LOG_TYPES } from '../constants'
+import {
+  DEFAULT_LOG_EXPORT_ROW_LIMIT,
+  LOG_EXPORT_ROW_OPTIONS,
+  LOG_TYPES,
+} from '../constants'
 import { buildSearchParams } from '../lib/filter'
 import { buildApiParams, getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters, LogExportFormat } from '../types'
@@ -75,6 +76,16 @@ const route = getRouteApi('/_authenticated/usage-logs/$section')
 const logTypeValues = ['0', '1', '2', '3', '4', '5', '6'] as const
 
 type LogTypeValue = (typeof logTypeValues)[number]
+type LogExportRowLimit = (typeof LOG_EXPORT_ROW_OPTIONS)[number]
+
+const exportFormatOptions: Array<{
+  value: LogExportFormat
+  label: string
+}> = [
+  { value: 'jsonl', label: 'Export JSONL' },
+  { value: 'json', label: 'Export JSON' },
+  { value: 'csv', label: 'Export CSV' },
+]
 
 const exprFieldRows = [
   {
@@ -329,6 +340,11 @@ export function CommonLogsFilterBar<TData>(
   const [exprHelpOpen, setExprHelpOpen] = useState(false)
   const [exportingFormat, setExportingFormat] =
     useState<LogExportFormat | null>(null)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [exportFormat, setExportFormat] = useState<LogExportFormat>('jsonl')
+  const [exportRowLimit, setExportRowLimit] = useState<LogExportRowLimit>(
+    DEFAULT_LOG_EXPORT_ROW_LIMIT
+  )
   const parsedLogExportPermission = Number(
     status?.log_export_permission ?? ROLE.ADMIN
   )
@@ -513,7 +529,7 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const handleExport = useCallback(
-    async (format: LogExportFormat) => {
+    async (format: LogExportFormat, rowLimit: LogExportRowLimit) => {
       if (exportingFormat) return
       setExportingFormat(format)
       try {
@@ -524,8 +540,12 @@ export function CommonLogsFilterBar<TData>(
           columnFilters: [],
           isAdmin,
         })
+        delete params.p
+        delete params.page_size
+        params.limit = rowLimit === 'all' ? 'all' : Number(rowLimit)
         const { blob, filename } = await exportLogs(format, params, isAdmin)
         downloadBlob(blob, filename || `call-logs.${format}`)
+        setExportDialogOpen(false)
         toast.success(t('Export downloaded'))
       } catch {
         toast.error(t('Export failed'))
@@ -536,33 +556,99 @@ export function CommonLogsFilterBar<TData>(
     [exportingFormat, isAdmin, searchParams, t]
   )
 
-  const exportMenu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger
+  const exportDialog = (
+    <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+      <DialogTrigger
         render={<Button variant='outline' disabled={!!exportingFormat} />}
       >
         <Download />
         {t('Export')}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align='end' className='w-36'>
-        <DropdownMenuItem onClick={() => handleExport('jsonl')}>
-          {t('Export JSONL')}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => handleExport('json')}>
-          {t('Export JSON')}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => handleExport('csv')}>
-          {t('Export CSV')}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </DialogTrigger>
+      <DialogContent className='sm:max-w-md'>
+        <DialogHeader>
+          <DialogTitle>{t('Export Call Logs')}</DialogTitle>
+        </DialogHeader>
+        <div className='grid gap-4 py-1'>
+          <div className='grid gap-2'>
+            <Label htmlFor='log-export-format'>{t('Format')}</Label>
+            <Select
+              items={exportFormatOptions.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
+              value={exportFormat}
+              onValueChange={(value) => {
+                if (value) setExportFormat(value as LogExportFormat)
+              }}
+              disabled={!!exportingFormat}
+            >
+              <SelectTrigger id='log-export-format' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                <SelectGroup>
+                  {exportFormatOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {t(option.label)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='log-export-row-limit'>{t('Rows to export')}</Label>
+            <Select
+              items={LOG_EXPORT_ROW_OPTIONS.map((option) => ({
+                value: option,
+                label: option === 'all' ? t('All') : option,
+              }))}
+              value={exportRowLimit}
+              onValueChange={(value) => {
+                if (value) setExportRowLimit(value as LogExportRowLimit)
+              }}
+              disabled={!!exportingFormat}
+            >
+              <SelectTrigger id='log-export-row-limit' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                <SelectGroup>
+                  {LOG_EXPORT_ROW_OPTIONS.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option === 'all' ? t('All') : option}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant='outline'
+            onClick={() => setExportDialogOpen(false)}
+            disabled={!!exportingFormat}
+          >
+            {t('Cancel')}
+          </Button>
+          <Button
+            onClick={() => handleExport(exportFormat, exportRowLimit)}
+            disabled={!!exportingFormat}
+          >
+            <Download />
+            {exportingFormat ? t('Exporting...') : t('Export')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 
   const preActions = (
     <>
       {modeToggle}
       {exprHelpButton}
-      {canExportLogs ? exportMenu : null}
+      {canExportLogs ? exportDialog : null}
     </>
   )
 
