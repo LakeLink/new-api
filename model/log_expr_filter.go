@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/expr-lang/expr/ast"
@@ -24,27 +25,30 @@ const (
 	logExprFieldString logExprFieldKind = iota
 	logExprFieldInt
 	logExprFieldBool
+	logExprFieldDate
 )
 
 type logExprField struct {
-	Column string
-	Kind   logExprFieldKind
+	Column    string
+	Kind      logExprFieldKind
+	Timestamp bool
 }
 
 type logExprCompiler struct {
-	fields map[string]logExprField
+	fields    map[string]logExprField
+	variables map[string]logExprSQL
 }
 
 // newLogExprCompiler builds the allow-list for call-log expr search. Only
 // identifiers listed here can be translated into SQL, keeping expr parsing
 // AST-only and avoiding runtime evaluation of user input.
-func newLogExprCompiler(includeAdminFields bool) logExprCompiler {
+func newLogExprCompiler(includeAdminFields bool, variables map[string]logExprSQL) logExprCompiler {
 	fields := map[string]logExprField{
 		"id":                {Column: "logs.id", Kind: logExprFieldInt},
 		"user_id":           {Column: "logs.user_id", Kind: logExprFieldInt},
-		"created_at":        {Column: "logs.created_at", Kind: logExprFieldInt},
-		"createdAt":         {Column: "logs.created_at", Kind: logExprFieldInt},
-		"timestamp":         {Column: "logs.created_at", Kind: logExprFieldInt},
+		"created_at":        {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
+		"createdAt":         {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
+		"timestamp":         {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
 		"type":              {Column: "logs.type", Kind: logExprFieldInt},
 		"log_type":          {Column: "logs.type", Kind: logExprFieldInt},
 		"content":           {Column: "logs.content", Kind: logExprFieldString},
@@ -72,7 +76,7 @@ func newLogExprCompiler(includeAdminFields bool) logExprCompiler {
 		fields["channel_name"] = logExprField{Column: "channels.name", Kind: logExprFieldString}
 		fields["channelName"] = logExprField{Column: "channels.name", Kind: logExprFieldString}
 	}
-	return logExprCompiler{fields: fields}
+	return logExprCompiler{fields: fields, variables: variables}
 }
 
 func applyLogExprFilter(tx *gorm.DB, exprStr string, includeAdminFields bool) (*gorm.DB, error) {
@@ -94,6 +98,10 @@ func applyLogExprFilter(tx *gorm.DB, exprStr string, includeAdminFields bool) (*
 }
 
 func buildLogExprSQL(exprStr string, includeAdminFields bool) (where string, args []any, needsChannelJoin bool, err error) {
+	return buildLogExprSQLAt(exprStr, includeAdminFields, time.Now())
+}
+
+func buildLogExprSQLAt(exprStr string, includeAdminFields bool, now time.Time) (where string, args []any, needsChannelJoin bool, err error) {
 	if len(exprStr) > maxLogExprLength {
 		return "", nil, false, fmt.Errorf("表达式过长，最多允许 %d 个字符", maxLogExprLength)
 	}
@@ -108,7 +116,8 @@ func buildLogExprSQL(exprStr string, includeAdminFields bool) (where string, arg
 		return "", nil, false, errors.New("表达式不能为空")
 	}
 
-	compiler := newLogExprCompiler(includeAdminFields)
+	variables := buildLogExprVariables(tree.Node, now)
+	compiler := newLogExprCompiler(includeAdminFields, variables)
 	compiled, err := compiler.compileBool(tree.Node)
 	if err != nil {
 		return "", nil, false, err
@@ -150,6 +159,9 @@ func (c logExprCompiler) compileBool(node ast.Node) (logExprSQL, error) {
 		inner.sql = fmt.Sprintf("NOT (%s)", inner.sql)
 		return inner, nil
 	case *ast.IdentifierNode:
+		if variable, ok := c.variables[n.Value]; ok {
+			return cloneLogExprSQL(variable), nil
+		}
 		field, ok := c.fields[n.Value]
 		if !ok {
 			return logExprSQL{}, fmt.Errorf("不支持的日志字段 %q", n.Value)
@@ -350,6 +362,7 @@ func (c logExprCompiler) resolveField(node ast.Node) (logExprResolvedField, erro
 		Name:             identifier.Value,
 		Column:           field.Column,
 		Kind:             field.Kind,
+		Timestamp:        field.Timestamp,
 		needsChannelJoin: logExprFieldNeedsChannelJoin(field),
 	}, nil
 }
@@ -372,16 +385,102 @@ func literalFromLogExprNode(node ast.Node) (logExprLiteral, error) {
 		return logExprLiteral{kind: logExprFieldBool, value: n.Value}, nil
 	case *ast.NilNode:
 		return logExprLiteral{isNil: true}, nil
+	case *ast.BuiltinNode:
+		if n.Name != "date" {
+			return logExprLiteral{}, fmt.Errorf("不支持的函数调用 %q", n.Name)
+		}
+		value, err := parseLogExprDateCall(n.Arguments)
+		if err != nil {
+			return logExprLiteral{}, err
+		}
+		return logExprLiteral{kind: logExprFieldDate, value: value}, nil
 	default:
-		return logExprLiteral{}, errors.New("只支持字符串、数字、布尔值、nil 和字面量数组")
+		return logExprLiteral{}, errors.New("只支持字符串、数字、布尔值、nil、date(...) 和字面量数组")
 	}
 }
 
 func coerceLogExprLiteral(field logExprResolvedField, literal logExprLiteral) (any, error) {
+	if field.Timestamp && literal.kind == logExprFieldDate {
+		return literal.value.(time.Time).Unix(), nil
+	}
 	if field.Kind != literal.kind {
 		return nil, fmt.Errorf("字段 %q 的值类型不匹配", field.Name)
 	}
 	return literal.value, nil
+}
+
+func parseLogExprDateCall(args []ast.Node) (time.Time, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return time.Time{}, errors.New("date(...) 需要 1 到 3 个字符串参数")
+	}
+
+	dateValue, err := logExprStringArg(args[0])
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	loc := time.Local
+	layout := ""
+	if len(args) == 2 {
+		secondArg, err := logExprStringArg(args[1])
+		if err != nil {
+			return time.Time{}, err
+		}
+		if timezoneLoc, err := time.LoadLocation(secondArg); err == nil {
+			loc = timezoneLoc
+		} else {
+			layout = secondArg
+		}
+	} else if len(args) == 3 {
+		layout, err = logExprStringArg(args[1])
+		if err != nil {
+			return time.Time{}, err
+		}
+		timezone, err := logExprStringArg(args[2])
+		if err != nil {
+			return time.Time{}, err
+		}
+		loc, err = time.LoadLocation(timezone)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("date(...) 时区无效: %w", err)
+		}
+	}
+
+	if layout != "" {
+		t, err := time.ParseInLocation(layout, dateValue, loc)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("date(...) 解析失败: %w", err)
+		}
+		return t, nil
+	}
+
+	layouts := []string{
+		"2006-01-02",
+		"15:04:05",
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		time.RFC822,
+		time.RFC850,
+		time.RFC1123,
+	}
+	for _, layout := range layouts {
+		t, err := time.ParseInLocation(layout, dateValue, loc)
+		if err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("date(...) 无法解析日期 %q", dateValue)
+}
+
+func logExprStringArg(node ast.Node) (string, error) {
+	stringNode, ok := node.(*ast.StringNode)
+	if !ok {
+		return "", errors.New("date(...) 参数必须是字符串字面量")
+	}
+	if len(stringNode.Value) > maxLogExprStringLength {
+		return "", fmt.Errorf("字符串字面量最多允许 %d 个字符", maxLogExprStringLength)
+	}
+	return stringNode.Value, nil
 }
 
 func combineLogExprSQL(joiner string, left logExprSQL, right logExprSQL) logExprSQL {
@@ -393,6 +492,131 @@ func combineLogExprSQL(joiner string, left logExprSQL, right logExprSQL) logExpr
 		args:             args,
 		needsChannelJoin: left.needsChannelJoin || right.needsChannelJoin,
 	}
+}
+
+func buildLogExprVariables(node ast.Node, now time.Time) map[string]logExprSQL {
+	refs := collectLogExprVariableRefs(node)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	variables := make(map[string]logExprSQL, len(refs))
+	for name := range refs {
+		if variable, ok := compileLogExprDateShortcut(name, now); ok {
+			variables[name] = variable
+		}
+	}
+	return variables
+}
+
+func collectLogExprVariableRefs(node ast.Node) map[string]struct{} {
+	refs := map[string]struct{}{}
+	visitLogExprVariableRefs(node, refs)
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+func visitLogExprVariableRefs(node ast.Node, refs map[string]struct{}) {
+	switch n := node.(type) {
+	case nil:
+		return
+	case *ast.IdentifierNode:
+		if _, ok := logExprDateShortcutOffset(n.Value); ok {
+			refs[n.Value] = struct{}{}
+		}
+	case *ast.BinaryNode:
+		visitLogExprVariableRefs(n.Left, refs)
+		visitLogExprVariableRefs(n.Right, refs)
+	case *ast.UnaryNode:
+		visitLogExprVariableRefs(n.Node, refs)
+	case *ast.ChainNode:
+		visitLogExprVariableRefs(n.Node, refs)
+	case *ast.MemberNode:
+		visitLogExprVariableRefs(n.Node, refs)
+		visitLogExprVariableRefs(n.Property, refs)
+	case *ast.SliceNode:
+		visitLogExprVariableRefs(n.Node, refs)
+		visitLogExprVariableRefs(n.From, refs)
+		visitLogExprVariableRefs(n.To, refs)
+	case *ast.CallNode:
+		visitLogExprVariableRefs(n.Callee, refs)
+		for _, arg := range n.Arguments {
+			visitLogExprVariableRefs(arg, refs)
+		}
+	case *ast.BuiltinNode:
+		for _, arg := range n.Arguments {
+			visitLogExprVariableRefs(arg, refs)
+		}
+		visitLogExprVariableRefs(n.Map, refs)
+	case *ast.PredicateNode:
+		visitLogExprVariableRefs(n.Node, refs)
+	case *ast.ConditionalNode:
+		visitLogExprVariableRefs(n.Cond, refs)
+		visitLogExprVariableRefs(n.Exp1, refs)
+		visitLogExprVariableRefs(n.Exp2, refs)
+	case *ast.VariableDeclaratorNode:
+		visitLogExprVariableRefs(n.Value, refs)
+		visitLogExprVariableRefs(n.Expr, refs)
+	case *ast.SequenceNode:
+		for _, item := range n.Nodes {
+			visitLogExprVariableRefs(item, refs)
+		}
+	case *ast.ArrayNode:
+		for _, item := range n.Nodes {
+			visitLogExprVariableRefs(item, refs)
+		}
+	case *ast.MapNode:
+		for _, pair := range n.Pairs {
+			visitLogExprVariableRefs(pair, refs)
+		}
+	case *ast.PairNode:
+		visitLogExprVariableRefs(n.Key, refs)
+		visitLogExprVariableRefs(n.Value, refs)
+	}
+}
+
+func cloneLogExprSQL(value logExprSQL) logExprSQL {
+	if len(value.args) > 0 {
+		value.args = append([]any(nil), value.args...)
+	}
+	return value
+}
+
+func compileLogExprDateShortcut(name string, now time.Time) (logExprSQL, bool) {
+	dayOffset, ok := logExprDateShortcutOffset(name)
+	if !ok {
+		return logExprSQL{}, false
+	}
+
+	start, end := logExprDayBounds(now, dayOffset)
+	return logExprSQL{
+		sql:  "(logs.created_at >= ? AND logs.created_at < ?)",
+		args: []any{start, end},
+	}, true
+}
+
+func logExprDateShortcutOffset(name string) (int, bool) {
+	switch name {
+	case "today":
+		return 0, true
+	case "yesterday":
+		return -1, true
+	default:
+		return 0, false
+	}
+}
+
+func logExprDayBounds(now time.Time, dayOffset int) (int64, int64) {
+	loc := time.Local
+	if loc == nil {
+		loc = time.UTC
+	}
+	localNow := now.In(loc)
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, dayOffset)
+	end := start.AddDate(0, 0, 1)
+	return start.Unix(), end.Unix()
 }
 
 func normalizeLogExprOperator(op string) string {
@@ -526,6 +750,7 @@ type logExprResolvedField struct {
 	Name             string
 	Column           string
 	Kind             logExprFieldKind
+	Timestamp        bool
 	needsChannelJoin bool
 }
 

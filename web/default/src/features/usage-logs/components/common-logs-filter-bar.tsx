@@ -104,7 +104,8 @@ const exprFieldRows = [
     fields: 'created_at, createdAt, timestamp',
     type: 'Number',
     scope: 'All users',
-    description: 'Creation time as a Unix timestamp in seconds.',
+    description:
+      'Creation time as Unix seconds; date(...) is also accepted.',
   },
   {
     fields: 'type, log_type',
@@ -160,6 +161,13 @@ const exprFieldRows = [
     type: 'Boolean',
     scope: 'All users',
     description: 'Whether the request used streaming.',
+  },
+  {
+    fields: 'today, yesterday',
+    type: 'Boolean',
+    scope: 'All users',
+    description:
+      'Shortcut filters for the current or previous local day.',
   },
   {
     fields: 'token_id',
@@ -219,7 +227,7 @@ const exprOperatorRows = [
   {
     syntax: '==, !=, >, >=, <, <=',
     description:
-      'Compare a field with a string, integer, boolean, or nil literal.',
+      'Compare a field with a string, integer, boolean, nil, or date(...) literal.',
   },
   {
     syntax: 'contains, startsWith, endsWith',
@@ -242,9 +250,16 @@ const exprExamples = [
     description: 'Find consumption records for GPT-family models.',
   },
   {
-    title: 'One day by timestamp',
-    expression: 'created_at >= 1735689600 && created_at <= 1735775999',
-    description: 'Replace the timestamps with the start and end of your day.',
+    title: 'GPT logs today',
+    expression: 'model_name contains "gpt-5.5" and today',
+    description: 'Find matching model logs from the current local day.',
+  },
+  {
+    title: 'One day by date',
+    expression:
+      'created_at >= date("2025-01-01") && created_at < date("2025-01-02")',
+    description:
+      'Use date(...) for readable day boundaries; add a timezone argument when needed.',
   },
   {
     title: 'High quota usage',
@@ -290,8 +305,8 @@ const exprExamples = [
   },
   {
     title: 'Named tokens after a time',
-    expression: 'token_name != "" && created_at >= 1735689600',
-    description: 'Find logs that have a token name after a timestamp.',
+    expression: 'token_name != "" && created_at >= date("2025-01-01")',
+    description: 'Find logs that have a token name after a readable date.',
   },
   {
     title: 'One client IP',
@@ -923,7 +938,7 @@ function ExpressionSearchHelpDialog({
               </li>
               <li>
                 {t(
-                  'Regex matches, arithmetic, function calls, and field-to-field comparisons are not supported.'
+                  'Regex matches, arithmetic, unsupported function calls, and field-to-field comparisons are not supported.'
                 )}
               </li>
             </ul>

@@ -40,7 +40,7 @@ const exprFieldRows = [
     fields: 'created_at, createdAt, timestamp',
     type: '数字',
     scope: '所有用户',
-    description: '创建时间，Unix 秒级时间戳。',
+    description: '创建时间，支持 Unix 秒级时间戳或 date(...)。',
   },
   {
     fields: 'type, log_type',
@@ -95,6 +95,12 @@ const exprFieldRows = [
     type: '布尔值',
     scope: '所有用户',
     description: '请求是否使用流式响应。',
+  },
+  {
+    fields: 'today, yesterday',
+    type: '布尔值',
+    scope: '所有用户',
+    description: '当前或上一个本地自然日的快捷筛选条件。',
   },
   {
     fields: 'token_id',
@@ -153,7 +159,7 @@ const exprOperatorRows = [
   },
   {
     syntax: '==, !=, >, >=, <, <=',
-    description: '将字段与字符串、整数、布尔值或 nil 字面量比较。',
+    description: '将字段与字符串、整数、布尔值、nil 或 date(...) 字面量比较。',
   },
   {
     syntax: 'contains, startsWith, endsWith',
@@ -176,9 +182,15 @@ const exprExamples = [
     description: '查找 GPT 系列模型的消费记录。',
   },
   {
-    title: '按一天时间戳筛选',
-    expression: 'created_at >= 1735689600 && created_at <= 1735775999',
-    description: '将时间戳替换为目标日期的开始和结束秒数。',
+    title: '今日 GPT 日志',
+    expression: 'model_name contains "gpt-5.5" and today',
+    description: '查找当前本地自然日内匹配该模型的日志。',
+  },
+  {
+    title: '按一天日期筛选',
+    expression:
+      'created_at >= date("2025-01-01") && created_at < date("2025-01-02")',
+    description: '使用 date(...) 写可读日期；需要时可添加时区参数。',
   },
   {
     title: '高额度消费',
@@ -223,8 +235,8 @@ const exprExamples = [
   },
   {
     title: '某时间后的具名令牌',
-    expression: 'token_name != "" && created_at >= 1735689600',
-    description: '查找某个时间戳之后带令牌名称的日志。',
+    expression: 'token_name != "" && created_at >= date("2025-01-01")',
+    description: '查找某个可读日期之后带令牌名称的日志。',
   },
   {
     title: '单个客户端 IP',
@@ -742,7 +754,9 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
               )}
             </li>
             <li>
-              {t('不支持正则 matches、算术运算、函数调用和字段之间的比较。')}
+              {t(
+                '不支持正则 matches、算术运算、未支持的函数调用和字段之间的比较。'
+              )}
             </li>
           </ul>
         </section>

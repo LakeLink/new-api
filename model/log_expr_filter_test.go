@@ -3,6 +3,7 @@ package model
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,17 @@ func useTestLogGroupCol(t *testing.T) {
 	t.Cleanup(func() {
 		logGroupCol = old
 	})
+}
+
+func useTestLocalTimeZone(t *testing.T) *time.Location {
+	t.Helper()
+	oldLocal := time.Local
+	loc := time.FixedZone("TEST", 8*60*60)
+	time.Local = loc
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+	return loc
 }
 
 func TestBuildLogExprSQLCoversCurrentSearchFields(t *testing.T) {
@@ -91,6 +103,85 @@ func TestBuildLogExprSQLOperators(t *testing.T) {
 	assert.Equal(t, []any{[]any{"gpt-4o", "claude"}, true, []any{1, 2}}, args)
 }
 
+func TestBuildLogExprSQLDateLiteralsForTimestampFields(t *testing.T) {
+	where, args, needsJoin, err := buildLogExprSQL(
+		`created_at >= date("2025-01-01", "2006-01-02", "UTC") && timestamp < date("2025-01-02T00:00:00Z")`,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.False(t, needsJoin)
+	assert.Contains(t, where, "logs.created_at >= ?")
+	assert.Contains(t, where, "logs.created_at < ?")
+	assert.Equal(t, []any{int64(1735689600), int64(1735776000)}, args)
+}
+
+func TestBuildLogExprSQLDateLiteralSupportsTimezone(t *testing.T) {
+	where, args, _, err := buildLogExprSQL(
+		`date("2025-01-01", "2006-01-02", "Asia/Shanghai") <= created_at`,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "logs.created_at >= ?", where)
+	assert.Equal(t, []any{int64(1735660800)}, args)
+}
+
+func TestBuildLogExprSQLDateLiteralSupportsTimezoneSecondArgument(t *testing.T) {
+	where, args, _, err := buildLogExprSQL(
+		`date("2025-01-01", "Asia/Shanghai") <= created_at`,
+		false,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "logs.created_at >= ?", where)
+	assert.Equal(t, []any{int64(1735660800)}, args)
+}
+
+func TestBuildLogExprSQLDateShortcuts(t *testing.T) {
+	loc := useTestLocalTimeZone(t)
+	fixedNow := time.Date(2025, 1, 2, 12, 30, 0, 0, loc)
+	expectedTodayStart, expectedTodayEnd := logExprDayBounds(fixedNow, 0)
+	expectedYesterdayStart, expectedYesterdayEnd := logExprDayBounds(fixedNow, -1)
+
+	where, args, needsJoin, err := buildLogExprSQLAt(
+		`model_name contains "gpt-5.5" and today and yesterday`,
+		false,
+		fixedNow,
+	)
+
+	require.NoError(t, err)
+	assert.False(t, needsJoin)
+	assert.Contains(t, where, "logs.model_name LIKE ? ESCAPE '!'")
+	assert.Contains(t, where, "logs.created_at >= ? AND logs.created_at < ?")
+	assert.Equal(t, "%gpt-5.5%", args[0])
+	assert.Equal(t, expectedTodayStart, args[1])
+	assert.Equal(t, expectedTodayEnd, args[2])
+	assert.Equal(t, expectedYesterdayStart, args[3])
+	assert.Equal(t, expectedYesterdayEnd, args[4])
+}
+
+func TestBuildLogExprSQLDateVariablesArePrecomputedForWholeExpression(t *testing.T) {
+	loc := useTestLocalTimeZone(t)
+	fixedNow := time.Date(2025, 1, 2, 12, 30, 0, 0, loc)
+	expectedTodayStart, expectedTodayEnd := logExprDayBounds(fixedNow, 0)
+
+	_, args, _, err := buildLogExprSQLAt(`today || today`, false, fixedNow)
+
+	require.NoError(t, err)
+	assert.Equal(t, []any{expectedTodayStart, expectedTodayEnd, expectedTodayStart, expectedTodayEnd}, args)
+}
+
+func TestLogExprDateShortcutYesterdayUsesLocalDay(t *testing.T) {
+	loc := useTestLocalTimeZone(t)
+	fixedNow := time.Date(2025, 1, 2, 12, 30, 0, 0, loc)
+	shortcut, ok := compileLogExprDateShortcut("yesterday", fixedNow)
+
+	require.True(t, ok)
+	assert.Equal(t, "(logs.created_at >= ? AND logs.created_at < ?)", shortcut.sql)
+	assert.Equal(t, []any{int64(1735660800), int64(1735747200)}, shortcut.args)
+}
+
 func TestBuildLogExprSQLEscapesLikePattern(t *testing.T) {
 	_, args, _, err := buildLogExprSQL(`model_name contains "gpt_%!"`, false)
 
@@ -116,6 +207,9 @@ func TestBuildLogExprSQLRejectsUnsupportedExpressions(t *testing.T) {
 		`model_name contains 2`,
 		`unknown == "x"`,
 		`model_name == "` + longString + `"`,
+		`quota > date("2025-01-01", "2006-01-02", "UTC")`,
+		`created_at > now()`,
+		`created_at > date(20250101)`,
 		largeInList,
 	}
 
