@@ -27,6 +27,7 @@ func GetAllLogs(c *gin.Context) {
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
 	requestId := c.Query("request_id")
+	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	logs, total, err := model.GetAllLogsWithOptions(model.LogQueryOptions{
 		LogType:            logType,
@@ -40,6 +41,7 @@ func GetAllLogs(c *gin.Context) {
 		Channel:            channel,
 		Group:              group,
 		RequestId:          requestId,
+		UpstreamRequestId:  upstreamRequestId,
 		Expr:               expr,
 		IncludeAdminFields: true,
 	})
@@ -72,19 +74,21 @@ func GetUserLogs(c *gin.Context) {
 	modelName := c.Query("model_name")
 	group := c.Query("group")
 	requestId := c.Query("request_id")
+	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	logs, total, err := model.GetUserLogsWithOptions(model.LogQueryOptions{
-		UserId:         userId,
-		LogType:        logType,
-		StartTimestamp: startTimestamp,
-		EndTimestamp:   endTimestamp,
-		ModelName:      modelName,
-		TokenName:      tokenName,
-		StartIdx:       pageInfo.GetStartIdx(),
-		Num:            pageInfo.GetPageSize(),
-		Group:          group,
-		RequestId:      requestId,
-		Expr:           expr,
+		UserId:            userId,
+		LogType:           logType,
+		StartTimestamp:    startTimestamp,
+		EndTimestamp:      endTimestamp,
+		ModelName:         modelName,
+		TokenName:         tokenName,
+		StartIdx:          pageInfo.GetStartIdx(),
+		Num:               pageInfo.GetPageSize(),
+		Group:             group,
+		RequestId:         requestId,
+		UpstreamRequestId: upstreamRequestId,
+		Expr:              expr,
 	})
 	if err != nil {
 		common.ApiError(c, err)
@@ -157,6 +161,7 @@ func GetLogsStat(c *gin.Context) {
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
 	requestId := c.Query("request_id")
+	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	stat, err := model.SumUsedQuotaWithOptions(model.LogQueryOptions{
 		LogType:            logType,
@@ -168,6 +173,7 @@ func GetLogsStat(c *gin.Context) {
 		Channel:            channel,
 		Group:              group,
 		RequestId:          requestId,
+		UpstreamRequestId:  upstreamRequestId,
 		Expr:               expr,
 		IncludeAdminFields: true,
 	})
@@ -198,18 +204,20 @@ func GetLogsSelfStat(c *gin.Context) {
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
 	requestId := c.Query("request_id")
+	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	quotaNum, err := model.SumUsedQuotaWithOptions(model.LogQueryOptions{
-		LogType:        logType,
-		StartTimestamp: startTimestamp,
-		EndTimestamp:   endTimestamp,
-		ModelName:      modelName,
-		Username:       username,
-		TokenName:      tokenName,
-		Channel:        channel,
-		Group:          group,
-		RequestId:      requestId,
-		Expr:           expr,
+		LogType:           logType,
+		StartTimestamp:    startTimestamp,
+		EndTimestamp:      endTimestamp,
+		ModelName:         modelName,
+		Username:          username,
+		TokenName:         tokenName,
+		Channel:           channel,
+		Group:             group,
+		RequestId:         requestId,
+		UpstreamRequestId: upstreamRequestId,
+		Expr:              expr,
 	})
 	if err != nil {
 		common.ApiError(c, err)
@@ -263,18 +271,19 @@ func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 		limit = model.LogExportLimit
 	}
 	return model.LogQueryOptions{
-		LogType:        logType,
-		StartTimestamp: startTimestamp,
-		EndTimestamp:   endTimestamp,
-		ModelName:      c.Query("model_name"),
-		Username:       c.Query("username"),
-		TokenName:      c.Query("token_name"),
-		Channel:        channel,
-		Group:          c.Query("group"),
-		RequestId:      c.Query("request_id"),
-		Expr:           c.Query("expr"),
-		Num:            limit,
-		NoLimit:        exportAll,
+		LogType:           logType,
+		StartTimestamp:    startTimestamp,
+		EndTimestamp:      endTimestamp,
+		ModelName:         c.Query("model_name"),
+		Username:          c.Query("username"),
+		TokenName:         c.Query("token_name"),
+		Channel:           channel,
+		Group:             c.Query("group"),
+		RequestId:         c.Query("request_id"),
+		UpstreamRequestId: c.Query("upstream_request_id"),
+		Expr:              c.Query("expr"),
+		Num:               limit,
+		NoLimit:           exportAll,
 	}
 }
 

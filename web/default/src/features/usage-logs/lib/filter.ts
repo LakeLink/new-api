@@ -56,6 +56,9 @@ export function buildSearchParams(
         ...(commonFilters.username && { username: commonFilters.username }),
         ...(commonFilters.requestId && { requestId: commonFilters.requestId }),
         ...(commonFilters.expr && { expr: commonFilters.expr }),
+        ...(commonFilters.upstreamRequestId && {
+          upstreamRequestId: commonFilters.upstreamRequestId,
+        }),
       }
     }
     case 'drawing': {

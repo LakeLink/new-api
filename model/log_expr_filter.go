@@ -44,30 +44,32 @@ type logExprCompiler struct {
 // AST-only and avoiding runtime evaluation of user input.
 func newLogExprCompiler(includeAdminFields bool, variables map[string]logExprSQL) logExprCompiler {
 	fields := map[string]logExprField{
-		"id":                {Column: "logs.id", Kind: logExprFieldInt},
-		"user_id":           {Column: "logs.user_id", Kind: logExprFieldInt},
-		"created_at":        {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
-		"createdAt":         {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
-		"timestamp":         {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
-		"type":              {Column: "logs.type", Kind: logExprFieldInt},
-		"log_type":          {Column: "logs.type", Kind: logExprFieldInt},
-		"content":           {Column: "logs.content", Kind: logExprFieldString},
-		"token_name":        {Column: "logs.token_name", Kind: logExprFieldString},
-		"token":             {Column: "logs.token_name", Kind: logExprFieldString},
-		"model_name":        {Column: "logs.model_name", Kind: logExprFieldString},
-		"model":             {Column: "logs.model_name", Kind: logExprFieldString},
-		"quota":             {Column: "logs.quota", Kind: logExprFieldInt},
-		"prompt_tokens":     {Column: "logs.prompt_tokens", Kind: logExprFieldInt},
-		"completion_tokens": {Column: "logs.completion_tokens", Kind: logExprFieldInt},
-		"use_time":          {Column: "logs.use_time", Kind: logExprFieldInt},
-		"is_stream":         {Column: "logs.is_stream", Kind: logExprFieldBool},
-		"stream":            {Column: "logs.is_stream", Kind: logExprFieldBool},
-		"token_id":          {Column: "logs.token_id", Kind: logExprFieldInt},
-		"group":             {Column: "logs." + logGroupCol, Kind: logExprFieldString},
-		"ip":                {Column: "logs.ip", Kind: logExprFieldString},
-		"request_id":        {Column: "logs.request_id", Kind: logExprFieldString},
-		"requestId":         {Column: "logs.request_id", Kind: logExprFieldString},
-		"other":             {Column: "logs.other", Kind: logExprFieldString},
+		"id":                  {Column: "logs.id", Kind: logExprFieldInt},
+		"user_id":             {Column: "logs.user_id", Kind: logExprFieldInt},
+		"created_at":          {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
+		"createdAt":           {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
+		"timestamp":           {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
+		"type":                {Column: "logs.type", Kind: logExprFieldInt},
+		"log_type":            {Column: "logs.type", Kind: logExprFieldInt},
+		"content":             {Column: "logs.content", Kind: logExprFieldString},
+		"token_name":          {Column: "logs.token_name", Kind: logExprFieldString},
+		"token":               {Column: "logs.token_name", Kind: logExprFieldString},
+		"model_name":          {Column: "logs.model_name", Kind: logExprFieldString},
+		"model":               {Column: "logs.model_name", Kind: logExprFieldString},
+		"quota":               {Column: "logs.quota", Kind: logExprFieldInt},
+		"prompt_tokens":       {Column: "logs.prompt_tokens", Kind: logExprFieldInt},
+		"completion_tokens":   {Column: "logs.completion_tokens", Kind: logExprFieldInt},
+		"use_time":            {Column: "logs.use_time", Kind: logExprFieldInt},
+		"is_stream":           {Column: "logs.is_stream", Kind: logExprFieldBool},
+		"stream":              {Column: "logs.is_stream", Kind: logExprFieldBool},
+		"token_id":            {Column: "logs.token_id", Kind: logExprFieldInt},
+		"group":               {Column: "logs." + logGroupCol, Kind: logExprFieldString},
+		"ip":                  {Column: "logs.ip", Kind: logExprFieldString},
+		"request_id":          {Column: "logs.request_id", Kind: logExprFieldString},
+		"requestId":           {Column: "logs.request_id", Kind: logExprFieldString},
+		"upstream_request_id": {Column: "logs.upstream_request_id", Kind: logExprFieldString},
+		"upstreamRequestId":   {Column: "logs.upstream_request_id", Kind: logExprFieldString},
+		"other":               {Column: "logs.other", Kind: logExprFieldString},
 	}
 	if includeAdminFields {
 		fields["username"] = logExprField{Column: "logs.username", Kind: logExprFieldString}
@@ -654,21 +656,18 @@ func logExprCanJoinChannels() bool {
 }
 
 func applyLogFilters(tx *gorm.DB, opts LogQueryOptions) (*gorm.DB, error) {
-	if opts.ModelName != "" {
-		modelNamePattern, err := sanitizeLikePattern(opts.ModelName)
-		if err != nil {
-			return nil, err
-		}
-		tx = tx.Where("logs.model_name LIKE ? ESCAPE '!'", modelNamePattern)
-	}
-	if opts.Username != "" {
+	tx = applyLogContainsFilter(tx, "logs.model_name", opts.ModelName)
+	if opts.IncludeAdminFields {
+		tx = applyLogContainsFilter(tx, "logs.username", opts.Username)
+	} else if opts.Username != "" {
 		tx = tx.Where("logs.username = ?", opts.Username)
 	}
-	if opts.TokenName != "" {
-		tx = tx.Where("logs.token_name = ?", opts.TokenName)
-	}
+	tx = applyLogContainsFilter(tx, "logs.token_name", opts.TokenName)
 	if opts.RequestId != "" {
 		tx = tx.Where("logs.request_id = ?", opts.RequestId)
+	}
+	if opts.UpstreamRequestId != "" {
+		tx = tx.Where("logs.upstream_request_id = ?", opts.UpstreamRequestId)
 	}
 	if opts.StartTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", opts.StartTimestamp)
@@ -686,14 +685,17 @@ func applyLogFilters(tx *gorm.DB, opts LogQueryOptions) (*gorm.DB, error) {
 }
 
 func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool) (*gorm.DB, error) {
-	if opts.Username != "" {
+	if opts.IncludeAdminFields {
+		tx = applyLogContainsFilter(tx, "logs.username", opts.Username)
+	} else if opts.Username != "" {
 		tx = tx.Where("logs.username = ?", opts.Username)
 	}
-	if opts.TokenName != "" {
-		tx = tx.Where("logs.token_name = ?", opts.TokenName)
-	}
+	tx = applyLogContainsFilter(tx, "logs.token_name", opts.TokenName)
 	if opts.RequestId != "" {
 		tx = tx.Where("logs.request_id = ?", opts.RequestId)
+	}
+	if opts.UpstreamRequestId != "" {
+		tx = tx.Where("logs.upstream_request_id = ?", opts.UpstreamRequestId)
 	}
 	if opts.StartTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", opts.StartTimestamp)
@@ -701,13 +703,7 @@ func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool) (*
 	if opts.EndTimestamp != 0 {
 		tx = tx.Where("logs.created_at <= ?", opts.EndTimestamp)
 	}
-	if opts.ModelName != "" {
-		modelNamePattern, err := sanitizeLikePattern(opts.ModelName)
-		if err != nil {
-			return nil, err
-		}
-		tx = tx.Where("logs.model_name LIKE ? ESCAPE '!'", modelNamePattern)
-	}
+	tx = applyLogContainsFilter(tx, "logs.model_name", opts.ModelName)
 	if opts.Channel != 0 {
 		tx = tx.Where("logs.channel_id = ?", opts.Channel)
 	}

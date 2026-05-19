@@ -104,8 +104,7 @@ const exprFieldRows = [
     fields: 'created_at, createdAt, timestamp',
     type: 'Number',
     scope: 'All users',
-    description:
-      'Creation time as Unix seconds; date(...) is also accepted.',
+    description: 'Creation time as Unix seconds; date(...) is also accepted.',
   },
   {
     fields: 'type, log_type',
@@ -166,8 +165,7 @@ const exprFieldRows = [
     fields: 'today, yesterday',
     type: 'Boolean',
     scope: 'All users',
-    description:
-      'Shortcut filters for the current or previous local day.',
+    description: 'Shortcut filters for the current or previous local day.',
   },
   {
     fields: 'token_id',
@@ -192,6 +190,12 @@ const exprFieldRows = [
     type: 'String',
     scope: 'All users',
     description: 'Request ID for tracing one call.',
+  },
+  {
+    fields: 'upstream_request_id, upstreamRequestId',
+    type: 'String',
+    scope: 'All users',
+    description: 'Upstream provider request ID for tracing one call.',
   },
   {
     fields: 'other',
@@ -380,6 +384,8 @@ export function CommonLogsFilterBar<TData>(
     if (searchParams.username) next.username = searchParams.username
     if (searchParams.requestId) next.requestId = searchParams.requestId
     if (searchParams.expr) next.expr = searchParams.expr
+    if (searchParams.upstreamRequestId)
+      next.upstreamRequestId = searchParams.upstreamRequestId
 
     if (Object.keys(next).length > 0) {
       setFilters((prev) => ({ ...prev, ...next }))
@@ -400,6 +406,7 @@ export function CommonLogsFilterBar<TData>(
     searchParams.username,
     searchParams.requestId,
     searchParams.expr,
+    searchParams.upstreamRequestId,
     searchParams.type,
   ])
 
@@ -462,7 +469,8 @@ export function CommonLogsFilterBar<TData>(
     (!!filters.token ||
       !!filters.username ||
       !!filters.channel ||
-      !!filters.requestId)
+      !!filters.requestId ||
+      !!filters.upstreamRequestId)
 
   const hasAdditionalFilters =
     exprMode ||
@@ -776,6 +784,15 @@ export function CommonLogsFilterBar<TData>(
               placeholder={t('Request ID')}
               value={filters.requestId || ''}
               onChange={(e) => handleChange('requestId', e.target.value)}
+              onKeyDown={handleKeyDown}
+              className={inputClass}
+            />
+            <Input
+              placeholder={t('Upstream Request ID')}
+              value={filters.upstreamRequestId || ''}
+              onChange={(e) =>
+                handleChange('upstreamRequestId', e.target.value)
+              }
               onKeyDown={handleKeyDown}
               className={inputClass}
             />
