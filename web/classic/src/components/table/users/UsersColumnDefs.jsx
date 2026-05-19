@@ -215,6 +215,7 @@ const renderOperations = (
     showDeleteModal,
     showResetPasskeyModal,
     showResetTwoFAModal,
+    showUserBurnForecastModal,
     showUserSubscriptionsModal,
     t,
   },
@@ -224,6 +225,11 @@ const renderOperations = (
   }
 
   const moreMenu = [
+    {
+      node: 'item',
+      name: t('余额燃尽预测'),
+      onClick: () => showUserBurnForecastModal(record),
+    },
     {
       node: 'item',
       name: t('订阅管理'),
@@ -315,6 +321,7 @@ export const getUsersColumns = ({
   showDeleteModal,
   showResetPasskeyModal,
   showResetTwoFAModal,
+  showUserBurnForecastModal,
   showUserSubscriptionsModal,
 }) => {
   return [
@@ -382,6 +389,7 @@ export const getUsersColumns = ({
           showDeleteModal,
           showResetPasskeyModal,
           showResetTwoFAModal,
+          showUserBurnForecastModal,
           showUserSubscriptionsModal,
           t,
         }),

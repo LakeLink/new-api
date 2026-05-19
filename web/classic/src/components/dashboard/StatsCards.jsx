@@ -78,6 +78,11 @@ const StatsCards = ({
                           {item.value}
                         </Skeleton>
                       </div>
+                      {item.description && (
+                        <div className='mt-1 max-w-[160px] truncate text-xs text-gray-400'>
+                          {item.description}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {item.title === t('当前余额') ? (

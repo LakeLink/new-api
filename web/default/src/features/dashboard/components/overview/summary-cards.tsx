@@ -19,17 +19,22 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, CreditCard } from 'lucide-react'
+import { ArrowRight, CreditCard, TimerReset } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
-import { formatNumber, formatQuota } from '@/lib/format'
+import { formatDateStr, formatNumber, formatQuota } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
 import { useStatus } from '@/hooks/use-status'
 import { Button } from '@/components/ui/button'
 import { StaggerContainer, StaggerItem } from '@/components/page-transition'
 import { getUserQuotaDates } from '@/features/dashboard/api'
 import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
+import {
+  BALANCE_BURN_FORECAST_DAYS,
+  calculateBalanceBurnForecast,
+  type BalanceBurnForecast,
+} from '@/features/dashboard/lib/stats'
 import type { QuotaDataItem } from '@/features/dashboard/types'
 import { StatCard } from '../ui/stat-card'
 
@@ -87,12 +92,51 @@ function buildSummarySparklines(
   }
 }
 
+function getBurnForecastValue(
+  forecast: BalanceBurnForecast,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (forecast.status === 'exhausted') return t('Exhausted')
+  if (forecast.status === 'idle') return t('No active burn')
+
+  const daysRemaining = forecast.daysRemaining ?? 0
+  if (daysRemaining < 1) return t('Less than 1 day remaining')
+
+  return t('{{count}} days remaining', {
+    count: Math.ceil(daysRemaining),
+  })
+}
+
+function getBurnForecastDetail(
+  forecast: BalanceBurnForecast,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (forecast.status === 'exhausted') {
+    return t('Balance is already exhausted')
+  }
+
+  if (forecast.status === 'idle') {
+    return t('No quota consumption in the last {{count}} days', {
+      count: Math.round(forecast.lookbackDays),
+    })
+  }
+
+  return t('Estimated empty on {{date}}', {
+    date: forecast.estimatedEmptyAt
+      ? formatDateStr(forecast.estimatedEmptyAt)
+      : '-',
+  })
+}
+
 export function SummaryCards() {
   const { t } = useTranslation()
   const user = useAuthStore((state) => state.auth.user)
   const { status, loading } = useStatus()
 
-  const summaryTimeRange = useMemo(() => computeTimeRange(1), [])
+  const summaryTimeRange = useMemo(
+    () => computeTimeRange(BALANCE_BURN_FORECAST_DAYS),
+    []
+  )
 
   const usageTrendQuery = useQuery({
     queryKey: [
@@ -149,6 +193,32 @@ export function SummaryCards() {
       user?.quota,
     ]
   )
+
+  const burnForecast = useMemo(
+    () =>
+      calculateBalanceBurnForecast(
+        usageTrendQuery.data?.data ?? [],
+        Number(user?.quota ?? 0),
+        summaryTimeRange.start_timestamp,
+        summaryTimeRange.end_timestamp
+      ),
+    [
+      summaryTimeRange.end_timestamp,
+      summaryTimeRange.start_timestamp,
+      usageTrendQuery.data?.data,
+      user?.quota,
+    ]
+  )
+
+  const burnForecastValue = usageTrendQuery.isLoading
+    ? t('Calculating...')
+    : getBurnForecastValue(burnForecast, t)
+  const burnForecastDetail = usageTrendQuery.isLoading
+    ? t('Loading recent usage data')
+    : getBurnForecastDetail(burnForecast, t)
+  const burnForecastRate = t('Average daily burn: {{value}}', {
+    value: formatQuota(burnForecast.dailyBurnQuota),
+  })
 
   const items = useSummaryCardsConfig({
     ...summaryValues,
@@ -224,6 +294,27 @@ export function SummaryCards() {
               {currencyEnabled
                 ? `${t('Displayed in')} ${currencyLabel}`
                 : t('Balance is shown in quota units')}
+            </p>
+          </div>
+
+          <div className='border-warning/20 flex flex-col gap-2 border-t pt-4'>
+            <div className='text-muted-foreground text-sm'>
+              {t('Balance burn forecast')}
+            </div>
+            <div className='flex items-center gap-2'>
+              <span className='font-mono text-xl font-semibold tracking-tight'>
+                {burnForecastValue}
+              </span>
+              <TimerReset
+                className='text-muted-foreground size-4'
+                aria-hidden='true'
+              />
+            </div>
+            <p className='text-muted-foreground text-sm leading-relaxed'>
+              {burnForecastDetail}
+            </p>
+            <p className='text-muted-foreground/70 text-xs leading-relaxed'>
+              {burnForecastRate}
             </p>
           </div>
           <Button className='justify-between' render={<Link to='/wallet' />}>

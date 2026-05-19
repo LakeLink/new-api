@@ -31,6 +31,7 @@ import EnableDisableUserModal from './modals/EnableDisableUserModal';
 import DeleteUserModal from './modals/DeleteUserModal';
 import ResetPasskeyModal from './modals/ResetPasskeyModal';
 import ResetTwoFAModal from './modals/ResetTwoFAModal';
+import UserBurnForecastModal from './modals/UserBurnForecastModal';
 import UserSubscriptionsModal from './modals/UserSubscriptionsModal';
 
 const UsersTable = (usersData) => {
@@ -62,6 +63,8 @@ const UsersTable = (usersData) => {
   const [enableDisableAction, setEnableDisableAction] = useState('');
   const [showResetPasskeyModal, setShowResetPasskeyModal] = useState(false);
   const [showResetTwoFAModal, setShowResetTwoFAModal] = useState(false);
+  const [showUserBurnForecastModal, setShowUserBurnForecastModal] =
+    useState(false);
   const [showUserSubscriptionsModal, setShowUserSubscriptionsModal] =
     useState(false);
 
@@ -102,6 +105,11 @@ const UsersTable = (usersData) => {
     setShowUserSubscriptionsModal(true);
   };
 
+  const showUserBurnForecastUserModal = (user) => {
+    setModalUser(user);
+    setShowUserBurnForecastModal(true);
+  };
+
   // Modal confirm handlers
   const handlePromoteConfirm = () => {
     manageUser(modalUser.id, 'promote', modalUser);
@@ -140,6 +148,7 @@ const UsersTable = (usersData) => {
       showDeleteModal: showDeleteUserModal,
       showResetPasskeyModal: showResetPasskeyUserModal,
       showResetTwoFAModal: showResetTwoFAUserModal,
+      showUserBurnForecastModal: showUserBurnForecastUserModal,
       showUserSubscriptionsModal: showUserSubscriptionsUserModal,
     });
   }, [
@@ -152,6 +161,7 @@ const UsersTable = (usersData) => {
     showDeleteUserModal,
     showResetPasskeyUserModal,
     showResetTwoFAUserModal,
+    showUserBurnForecastUserModal,
     showUserSubscriptionsUserModal,
   ]);
 
@@ -259,6 +269,13 @@ const UsersTable = (usersData) => {
         user={modalUser}
         t={t}
         onSuccess={() => refresh?.()}
+      />
+
+      <UserBurnForecastModal
+        visible={showUserBurnForecastModal}
+        onCancel={() => setShowUserBurnForecastModal(false)}
+        user={modalUser}
+        t={t}
       />
     </>
   );

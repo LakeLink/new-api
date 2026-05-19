@@ -32,6 +32,39 @@ import {
 import { renderQuota } from '../../helpers';
 import { createSectionTitle } from '../../helpers/dashboard';
 
+const formatForecastDate = (date) => {
+  if (!date) return '-';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getBalanceBurnValue = (forecast, t) => {
+  if (!forecast) return t('计算中');
+  if (forecast.status === 'exhausted') return t('已耗尽');
+  if (forecast.status === 'idle') return t('暂无消耗');
+
+  const daysRemaining = forecast.daysRemaining || 0;
+  if (daysRemaining < 1) return t('小于 1 天');
+
+  return t('约 {{count}} 天', { count: Math.ceil(daysRemaining) });
+};
+
+const getBalanceBurnDescription = (forecast, t) => {
+  if (!forecast) return t('正在加载近期用量');
+  if (forecast.status === 'exhausted') return t('余额已经耗尽');
+  if (forecast.status === 'idle') {
+    return t('近 {{count}} 天无额度消耗', {
+      count: Math.round(forecast.lookbackDays || 7),
+    });
+  }
+
+  return t('预计 {{date}} 用尽', {
+    date: formatForecastDate(forecast.estimatedEmptyAt),
+  });
+};
+
 export const useDashboardStats = (
   userState,
   consumeQuota,
@@ -39,6 +72,7 @@ export const useDashboardStats = (
   times,
   trendData,
   performanceMetrics,
+  balanceBurnForecast,
   navigate,
   t,
 ) => {
@@ -63,6 +97,16 @@ export const useDashboardStats = (
             avatarColor: 'purple',
             trendData: [],
             trendColor: '#8b5cf6',
+          },
+          {
+            title: t('余额燃尽预测'),
+            value: getBalanceBurnValue(balanceBurnForecast, t),
+            description: `${getBalanceBurnDescription(balanceBurnForecast, t)} · ${t('日均消耗 {{value}}', { value: renderQuota(balanceBurnForecast?.dailyBurnQuota || 0) })}`,
+            icon: <IconStopwatchStroked />,
+            avatarColor: 'red',
+            trendData: balanceBurnForecast?.trend || [],
+            trendColor: '#ef4444',
+            onClick: () => navigate('/console/topup'),
           },
         ],
       },
@@ -142,6 +186,7 @@ export const useDashboardStats = (
       consumeTokens,
       trendData,
       performanceMetrics,
+      balanceBurnForecast,
       navigate,
       t,
     ],

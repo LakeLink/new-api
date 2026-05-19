@@ -37,6 +37,10 @@ import {
   ILLUSTRATION_SIZE,
 } from '../constants/dashboard.constants';
 
+const SECONDS_PER_DAY = 24 * 60 * 60;
+
+export const BALANCE_BURN_FORECAST_DAYS = 7;
+
 // ========== 时间相关工具函数 ==========
 export const getDefaultTime = () => {
   return localStorage.getItem(STORAGE_KEYS.DATA_EXPORT_DEFAULT_TIME) || 'hour';
@@ -325,6 +329,80 @@ export const calculateTrendData = (
     tokens: tokensTrend,
     rpm: rpmTrend,
     tpm: tpmTrend,
+  };
+};
+
+const getBucketIndex = (timestamp, start, end, bucketCount) => {
+  if (end <= start) return 0;
+  const ratio = (timestamp - start) / (end - start);
+  return Math.min(
+    bucketCount - 1,
+    Math.max(0, Math.floor(ratio * bucketCount)),
+  );
+};
+
+export const getBalanceBurnForecastRange = () => {
+  const end = Math.floor(Date.now() / 1000) + 3600;
+  const start = end - BALANCE_BURN_FORECAST_DAYS * SECONDS_PER_DAY;
+  return { start, end };
+};
+
+export const calculateBalanceBurnForecast = (
+  data,
+  currentBalance,
+  start,
+  end,
+  bucketCount = BALANCE_BURN_FORECAST_DAYS,
+) => {
+  const lookbackDays = Math.max((end - start) / SECONDS_PER_DAY, 1 / 24);
+  const trend = Array.from({ length: bucketCount }, () => 0);
+  let totalUsage = 0;
+
+  data.forEach((item) => {
+    const quota = Math.max(0, Number(item.quota) || 0);
+    totalUsage += quota;
+
+    const timestamp = Number(item.created_at) || start;
+    const index = getBucketIndex(timestamp, start, end, bucketCount);
+    trend[index] += quota;
+  });
+
+  const balance = Math.max(0, Number(currentBalance) || 0);
+  const dailyBurnQuota = totalUsage / lookbackDays;
+
+  if (balance <= 0) {
+    return {
+      status: 'exhausted',
+      dailyBurnQuota,
+      daysRemaining: 0,
+      estimatedEmptyAt: new Date(),
+      lookbackDays,
+      trend,
+    };
+  }
+
+  if (dailyBurnQuota <= 0) {
+    return {
+      status: 'idle',
+      dailyBurnQuota: 0,
+      daysRemaining: null,
+      estimatedEmptyAt: null,
+      lookbackDays,
+      trend,
+    };
+  }
+
+  const daysRemaining = balance / dailyBurnQuota;
+
+  return {
+    status: 'active',
+    dailyBurnQuota,
+    daysRemaining,
+    estimatedEmptyAt: new Date(
+      Date.now() + daysRemaining * SECONDS_PER_DAY * 1000,
+    ),
+    lookbackDays,
+    trend,
   };
 };
 

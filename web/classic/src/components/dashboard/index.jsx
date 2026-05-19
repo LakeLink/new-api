@@ -81,6 +81,7 @@ const Dashboard = () => {
     dashboardData.times,
     dashboardData.trendData,
     dashboardData.performanceMetrics,
+    dashboardData.balanceBurnForecast,
     dashboardData.navigate,
     dashboardData.t,
   );
@@ -101,6 +102,7 @@ const Dashboard = () => {
         dashboardCharts.updateChartData(data);
       }
     });
+    await dashboardData.loadBalanceBurnForecastData();
     await loadUserData();
     await dashboardData.loadUptimeData();
   };

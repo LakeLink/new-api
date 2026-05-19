@@ -21,7 +21,12 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { API, isAdmin, showError, timestamp2string } from '../../helpers';
-import { getDefaultTime, getInitialTimestamp } from '../../helpers/dashboard';
+import {
+  calculateBalanceBurnForecast,
+  getBalanceBurnForecastRange,
+  getDefaultTime,
+  getInitialTimestamp,
+} from '../../helpers/dashboard';
 import { TIME_OPTIONS } from '../../constants/dashboard.constants';
 import { useIsMobile } from '../common/useIsMobile';
 import { useMinimumLoadingTime } from '../common/useMinimumLoadingTime';
@@ -60,6 +65,10 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
   const [pieData, setPieData] = useState([{ type: 'null', value: '0' }]);
   const [lineData, setLineData] = useState([]);
   const [modelColors, setModelColors] = useState({});
+  const [balanceBurnData, setBalanceBurnData] = useState([]);
+  const [balanceBurnRange, setBalanceBurnRange] = useState(() =>
+    getBalanceBurnForecastRange(),
+  );
 
   // ========== 图表状态 ==========
   const [activeChartTab, setActiveChartTab] = useState('1');
@@ -118,6 +127,22 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
 
     return { avgRPM, avgTPM, timeDiff };
   }, [times, consumeTokens, inputs.start_timestamp, inputs.end_timestamp]);
+
+  const balanceBurnForecast = useMemo(
+    () =>
+      calculateBalanceBurnForecast(
+        balanceBurnData,
+        userState?.user?.quota,
+        balanceBurnRange.start,
+        balanceBurnRange.end,
+      ),
+    [
+      balanceBurnData,
+      balanceBurnRange.end,
+      balanceBurnRange.start,
+      userState?.user?.quota,
+    ],
+  );
 
   const getGreeting = useMemo(() => {
     const hours = new Date().getHours();
@@ -234,6 +259,26 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
     }
   }, [inputs, isAdminUser]);
 
+  const loadBalanceBurnForecastData = useCallback(async () => {
+    try {
+      const range = getBalanceBurnForecastRange();
+      const url = `/api/data/self/?start_timestamp=${range.start}&end_timestamp=${range.end}&default_time=hour`;
+      const res = await API.get(url);
+      const { success, message, data } = res.data;
+      if (success) {
+        setBalanceBurnRange(range);
+        setBalanceBurnData(data || []);
+        return data || [];
+      } else {
+        showError(message);
+        return [];
+      }
+    } catch (err) {
+      console.error(err);
+      return [];
+    }
+  }, []);
+
   const getUserData = useCallback(async () => {
     let res = await API.get(`/api/user/self`);
     const { success, message, data } = res.data;
@@ -246,9 +291,10 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
 
   const refresh = useCallback(async () => {
     const data = await loadQuotaData();
+    await loadBalanceBurnForecastData();
     await loadUptimeData();
     return data;
-  }, [loadQuotaData, loadUptimeData]);
+  }, [loadBalanceBurnForecastData, loadQuotaData, loadUptimeData]);
 
   const handleSearchConfirm = useCallback(
     async (updateChartDataCallback) => {
@@ -300,6 +346,7 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
     setLineData,
     modelColors,
     setModelColors,
+    balanceBurnForecast,
 
     // 图表状态
     activeChartTab,
@@ -333,6 +380,7 @@ export const useDashboardData = (userState, userDispatch, statusState) => {
     handleCloseModal,
     loadQuotaData,
     loadUserQuotaData,
+    loadBalanceBurnForecastData,
     loadUptimeData,
     getUserData,
     refresh,

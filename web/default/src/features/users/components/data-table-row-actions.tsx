@@ -30,6 +30,7 @@ import {
   ShieldAlert,
   Link2,
   CreditCard,
+  TimerReset,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -54,6 +55,7 @@ import {
 import { getUserActionMessage } from '../lib'
 import { type User, type ManageUserAction } from '../types'
 import { UserBindingDialog } from './dialogs/user-binding-dialog'
+import { UserBurnForecastDialog } from './dialogs/user-burn-forecast-dialog'
 import { useUsers } from './users-provider'
 
 interface DataTableRowActionsProps {
@@ -68,6 +70,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const [resetTwoFAOpen, setResetTwoFAOpen] = useState(false)
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false)
   const [subscriptionsDialogOpen, setSubscriptionsDialogOpen] = useState(false)
+  const [burnForecastDialogOpen, setBurnForecastDialogOpen] = useState(false)
 
   const handleEdit = () => {
     setCurrentRow(user)
@@ -199,6 +202,18 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           <DropdownMenuItem
             onSelect={(event) => {
               event.preventDefault()
+              setBurnForecastDialogOpen(true)
+            }}
+          >
+            {t('Balance burn forecast')}
+            <DropdownMenuShortcut>
+              <TimerReset size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault()
               setBindingDialogOpen(true)
             }}
           >
@@ -286,6 +301,12 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         onOpenChange={setBindingDialogOpen}
         userId={user.id}
         onUnbindSuccess={triggerRefresh}
+      />
+
+      <UserBurnForecastDialog
+        open={burnForecastDialogOpen}
+        onOpenChange={setBurnForecastDialogOpen}
+        user={user}
       />
 
       <UserSubscriptionsDialog
