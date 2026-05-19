@@ -4621,6 +4621,11 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "in <1min": "trong <1 phút",
+    "in {{hours}}h{{minutes}}min": "trong {{hours}} giờ {{minutes}} phút",
+    "in {{count}} days": "trong {{count}} ngày",
+    "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} ngày {{hours}} giờ {{minutes}} phút {{seconds}} giây",
+    "{{username}} (ID: {{id}})": "{{username}} (ID: {{id}})"
   }
 }

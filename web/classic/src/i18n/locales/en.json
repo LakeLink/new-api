@@ -3962,6 +3962,13 @@
     "默认折叠侧边栏": "Default collapse sidebar",
     "默认测试模型": "Default Test Model",
     "默认用户消息": "Default User Message",
-    "默认补全倍率": "Default completion ratio"
+    "默认补全倍率": "Default completion ratio",
+    "小于 1 分钟": "<1 minute",
+    "{{hours}}小时{{minutes}}分钟": "{{hours}}h{{minutes}}min",
+    "{{count}}天": "in {{count}} days",
+    "{{days}}天{{hours}}小时{{minutes}}分钟{{seconds}}秒": "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s",
+    "第 {{count}} 天": "Day {{count}}",
+    "消耗": "Usage",
+    "{{username}}（ID：{{id}}）": "{{username}} (ID: {{id}})"
   }
 }

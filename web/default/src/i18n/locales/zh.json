@@ -4621,6 +4621,11 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "in <1min": "小于 1 分钟",
+    "in {{hours}}h{{minutes}}min": "{{hours}}小时{{minutes}}分钟",
+    "in {{count}} days": "{{count}}天",
+    "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}}天{{hours}}小时{{minutes}}分钟{{seconds}}秒",
+    "{{username}} (ID: {{id}})": "{{username}}（ID：{{id}}）"
   }
 }

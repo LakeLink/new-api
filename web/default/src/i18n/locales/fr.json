@@ -4621,6 +4621,11 @@
     "Zero retention": "Aucune rétention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "in <1min": "dans <1 min",
+    "in {{hours}}h{{minutes}}min": "dans {{hours}} h {{minutes}} min",
+    "in {{count}} days": "dans {{count}} jours",
+    "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} j {{hours}} h {{minutes}} min {{seconds}} s",
+    "{{username}} (ID: {{id}})": "{{username}} (ID : {{id}})"
   }
 }

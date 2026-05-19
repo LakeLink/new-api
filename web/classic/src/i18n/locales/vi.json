@@ -2405,7 +2405,7 @@
     "消息已清空": "Tin nhắn đã được xóa",
     "消息已编辑": "Tin nhắn đã được chỉnh sửa",
     "消息详情": "Chi tiết tin nhắn",
-    "消耗": "Tiêu thụ",
+    "消耗": "Mức dùng",
     "消耗分布": "Phân phối tiêu thụ",
     "消耗趋势": "Xu hướng tiêu thụ",
     "消耗额度": "Hạn ngạch tiêu thụ",
@@ -4336,6 +4336,12 @@
     "默认折叠侧边栏": "Mặc định thu gọn thanh bên",
     "默认测试模型": "Mô hình kiểm tra mặc định",
     "默认用户消息": "Xin chào",
-    "默认补全倍率": "Tỷ lệ hoàn thành mặc định"
+    "默认补全倍率": "Tỷ lệ hoàn thành mặc định",
+    "小于 1 分钟": "< 1 phút",
+    "{{hours}}小时{{minutes}}分钟": "{{hours}} giờ {{minutes}} phút",
+    "{{count}}天": "{{count}} ngày",
+    "{{days}}天{{hours}}小时{{minutes}}分钟{{seconds}}秒": "{{days}} ngày {{hours}} giờ {{minutes}} phút {{seconds}} giây",
+    "第 {{count}} 天": "Ngày {{count}}",
+    "{{username}}（ID：{{id}}）": "{{username}} (ID: {{id}})"
   }
 }

@@ -4621,6 +4621,11 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "in <1min": "менее чем через 1 мин",
+    "in {{hours}}h{{minutes}}min": "через {{hours}} ч {{minutes}} мин",
+    "in {{count}} days": "через {{count}} дн.",
+    "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} д {{hours}} ч {{minutes}} мин {{seconds}} с",
+    "{{username}} (ID: {{id}})": "{{username}} (ИД: {{id}})"
   }
 }

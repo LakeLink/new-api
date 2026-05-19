@@ -30,25 +30,24 @@ import {
   IconSend,
 } from '@douyinfe/semi-icons';
 import { renderQuota } from '../../helpers';
-import { createSectionTitle } from '../../helpers/dashboard';
+import {
+  createSectionTitle,
+  formatBurnDurationCompact,
+} from '../../helpers/dashboard';
 
 const formatForecastDate = (date) => {
   if (!date) return '-';
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
 };
 
 const getBalanceBurnValue = (forecast, t) => {
   if (!forecast) return t('计算中');
-  if (forecast.status === 'exhausted') return t('已耗尽');
-  if (forecast.status === 'idle') return t('暂无消耗');
-
-  const daysRemaining = forecast.daysRemaining || 0;
-  if (daysRemaining < 1) return t('小于 1 天');
-
-  return t('约 {{count}} 天', { count: Math.ceil(daysRemaining) });
+  return formatBurnDurationCompact(forecast, t);
 };
 
 const getBalanceBurnDescription = (forecast, t) => {
@@ -101,11 +100,12 @@ export const useDashboardStats = (
           {
             title: t('余额燃尽预测'),
             value: getBalanceBurnValue(balanceBurnForecast, t),
-            description: `${getBalanceBurnDescription(balanceBurnForecast, t)} · ${t('日均消耗 {{value}}', { value: renderQuota(balanceBurnForecast?.dailyBurnQuota || 0) })}`,
+            description: getBalanceBurnDescription(balanceBurnForecast, t),
             icon: <IconStopwatchStroked />,
             avatarColor: 'red',
-            trendData: balanceBurnForecast?.trend || [],
+            trendData: [],
             trendColor: '#ef4444',
+            hideTrend: true,
             onClick: () => navigate('/console/topup'),
           },
         ],

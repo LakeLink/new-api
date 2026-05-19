@@ -4621,6 +4621,11 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "in <1min": "1分未満",
+    "in {{hours}}h{{minutes}}min": "{{hours}}時間{{minutes}}分",
+    "in {{count}} days": "{{count}}日後",
+    "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}}日{{hours}}時間{{minutes}}分{{seconds}}秒",
+    "{{username}} (ID: {{id}})": "{{username}}（ID：{{id}}）"
   }
 }

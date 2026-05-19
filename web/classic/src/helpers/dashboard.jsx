@@ -341,10 +341,90 @@ const getBucketIndex = (timestamp, start, end, bucketCount) => {
   );
 };
 
+const SECONDS_PER_HOUR = 60 * 60;
+const SECONDS_PER_MINUTE = 60;
+
 export const getBalanceBurnForecastRange = () => {
   const end = Math.floor(Date.now() / 1000) + 3600;
   const start = end - BALANCE_BURN_FORECAST_DAYS * SECONDS_PER_DAY;
   return { start, end };
+};
+
+const getPositiveQuota = (item) => Math.max(0, Number(item.quota) || 0);
+
+const calculateWindowUsage = (data, windowStart, effectiveEnd) =>
+  (data || []).reduce((total, item) => {
+    const timestamp = Number(item.created_at) || 0;
+    if (timestamp < windowStart || timestamp > effectiveEnd) return total;
+    return total + getPositiveQuota(item);
+  }, 0);
+
+const calculateHourlyBurnRate = (
+  totalUsage,
+  recent24Usage,
+  recent48Usage,
+  lookbackSeconds,
+) => {
+  const lookbackHours = Math.max(lookbackSeconds / SECONDS_PER_HOUR, 1);
+  const fullRate = totalUsage / lookbackHours;
+  const recent24Rate = recent24Usage / Math.min(24, lookbackHours);
+  const recent48Rate = recent48Usage / Math.min(48, lookbackHours);
+
+  if (recent24Usage > 0) {
+    return recent24Rate * 0.55 + recent48Rate * 0.3 + fullRate * 0.15;
+  }
+
+  if (recent48Usage > 0) {
+    return recent48Rate * 0.65 + fullRate * 0.35;
+  }
+
+  return fullRate;
+};
+
+export const getDurationParts = (totalSeconds) => {
+  const normalized = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const days = Math.floor(normalized / SECONDS_PER_DAY);
+  const hours = Math.floor((normalized % SECONDS_PER_DAY) / SECONDS_PER_HOUR);
+  const minutes = Math.floor(
+    (normalized % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE,
+  );
+  const seconds = normalized % SECONDS_PER_MINUTE;
+
+  return { days, hours, minutes, seconds };
+};
+
+export const formatBurnDurationCompact = (forecast, t) => {
+  if (forecast.status === 'exhausted') return t('已耗尽');
+  if (forecast.status === 'idle' || forecast.secondsRemaining === null) {
+    return t('暂无消耗');
+  }
+
+  if (forecast.secondsRemaining < SECONDS_PER_MINUTE) {
+    return t('小于 1 分钟');
+  }
+
+  if (forecast.secondsRemaining < 2 * SECONDS_PER_DAY) {
+    const totalMinutes = Math.max(
+      1,
+      Math.ceil(forecast.secondsRemaining / SECONDS_PER_MINUTE),
+    );
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return t('{{hours}}小时{{minutes}}分钟', { hours, minutes });
+  }
+
+  return t('{{count}}天', {
+    count: Math.ceil(forecast.secondsRemaining / SECONDS_PER_DAY),
+  });
+};
+
+export const formatBurnDurationPrecise = (forecast, t) => {
+  if (forecast.status === 'idle' || forecast.secondsRemaining === null) {
+    return t('暂无消耗');
+  }
+
+  const parts = getDurationParts(forecast.secondsRemaining);
+  return t('{{days}}天{{hours}}小时{{minutes}}分钟{{seconds}}秒', parts);
 };
 
 export const calculateBalanceBurnForecast = (
@@ -354,54 +434,89 @@ export const calculateBalanceBurnForecast = (
   end,
   bucketCount = BALANCE_BURN_FORECAST_DAYS,
 ) => {
-  const lookbackDays = Math.max((end - start) / SECONDS_PER_DAY, 1 / 24);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const effectiveEnd = Math.max(
+    start + SECONDS_PER_HOUR,
+    Math.min(end, nowSeconds),
+  );
+  const lookbackSeconds = Math.max(effectiveEnd - start, SECONDS_PER_HOUR);
+  const lookbackDays = lookbackSeconds / SECONDS_PER_DAY;
   const trend = Array.from({ length: bucketCount }, () => 0);
   let totalUsage = 0;
 
-  data.forEach((item) => {
-    const quota = Math.max(0, Number(item.quota) || 0);
+  (data || []).forEach((item) => {
+    const timestamp = Number(item.created_at) || start;
+    if (timestamp < start || timestamp > effectiveEnd) return;
+
+    const quota = getPositiveQuota(item);
     totalUsage += quota;
 
-    const timestamp = Number(item.created_at) || start;
-    const index = getBucketIndex(timestamp, start, end, bucketCount);
+    const index = getBucketIndex(timestamp, start, effectiveEnd, bucketCount);
     trend[index] += quota;
   });
 
   const balance = Math.max(0, Number(currentBalance) || 0);
-  const dailyBurnQuota = totalUsage / lookbackDays;
+  const recent24Usage = calculateWindowUsage(
+    data,
+    effectiveEnd - SECONDS_PER_DAY,
+    effectiveEnd,
+  );
+  const recent48Usage = calculateWindowUsage(
+    data,
+    effectiveEnd - 2 * SECONDS_PER_DAY,
+    effectiveEnd,
+  );
+  const hourlyBurnQuota = calculateHourlyBurnRate(
+    totalUsage,
+    recent24Usage,
+    recent48Usage,
+    lookbackSeconds,
+  );
+  const dailyBurnQuota = hourlyBurnQuota * 24;
 
   if (balance <= 0) {
     return {
       status: 'exhausted',
       dailyBurnQuota,
+      hourlyBurnQuota,
       daysRemaining: 0,
+      secondsRemaining: 0,
       estimatedEmptyAt: new Date(),
       lookbackDays,
+      totalUsageQuota: totalUsage,
+      recentUsageQuota: recent24Usage,
       trend,
     };
   }
 
-  if (dailyBurnQuota <= 0) {
+  if (hourlyBurnQuota <= 0) {
     return {
       status: 'idle',
       dailyBurnQuota: 0,
+      hourlyBurnQuota: 0,
       daysRemaining: null,
+      secondsRemaining: null,
       estimatedEmptyAt: null,
       lookbackDays,
+      totalUsageQuota: totalUsage,
+      recentUsageQuota: recent24Usage,
       trend,
     };
   }
 
-  const daysRemaining = balance / dailyBurnQuota;
+  const secondsRemaining = (balance / hourlyBurnQuota) * SECONDS_PER_HOUR;
+  const daysRemaining = secondsRemaining / SECONDS_PER_DAY;
 
   return {
     status: 'active',
     dailyBurnQuota,
+    hourlyBurnQuota,
     daysRemaining,
-    estimatedEmptyAt: new Date(
-      Date.now() + daysRemaining * SECONDS_PER_DAY * 1000,
-    ),
+    secondsRemaining,
+    estimatedEmptyAt: new Date(Date.now() + secondsRemaining * 1000),
     lookbackDays,
+    totalUsageQuota: totalUsage,
+    recentUsageQuota: recent24Usage,
     trend,
   };
 };

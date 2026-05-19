@@ -29,7 +29,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
-import { formatDateStr, formatNumber, formatQuota } from '@/lib/format'
+import { formatDateTimeStr, formatNumber, formatQuota } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useStatus } from '@/hooks/use-status'
@@ -40,6 +40,7 @@ import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-
 import {
   BALANCE_BURN_FORECAST_DAYS,
   calculateBalanceBurnForecast,
+  formatBurnDurationCompact,
   type BalanceBurnForecast,
 } from '@/features/dashboard/lib/stats'
 import type { QuotaDataItem } from '@/features/dashboard/types'
@@ -103,15 +104,7 @@ function getBurnForecastValue(
   forecast: BalanceBurnForecast,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
-  if (forecast.status === 'exhausted') return t('Exhausted')
-  if (forecast.status === 'idle') return t('No active burn')
-
-  const daysRemaining = forecast.daysRemaining ?? 0
-  if (daysRemaining < 1) return t('Less than 1 day remaining')
-
-  return t('{{count}} days remaining', {
-    count: Math.ceil(daysRemaining),
-  })
+  return formatBurnDurationCompact(forecast, t)
 }
 
 function getBurnForecastDetail(
@@ -130,7 +123,7 @@ function getBurnForecastDetail(
 
   return t('Estimated empty on {{date}}', {
     date: forecast.estimatedEmptyAt
-      ? formatDateStr(forecast.estimatedEmptyAt)
+      ? formatDateTimeStr(forecast.estimatedEmptyAt)
       : '-',
   })
 }

@@ -98,6 +98,7 @@ const StatsCards = ({
                       {t('充值')}
                     </Tag>
                   ) : (
+                    !item.hideTrend &&
                     (loading ||
                       (item.trendData && item.trendData.length > 0)) && (
                       <div className='w-24 h-10'>

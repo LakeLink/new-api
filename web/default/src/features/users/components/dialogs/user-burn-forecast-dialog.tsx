@@ -16,12 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, TimerReset } from 'lucide-react'
+import { Loader2, RefreshCw, TimerReset } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { formatDateStr, formatQuota } from '@/lib/format'
+import { formatDateTimeStr, formatQuota } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -33,6 +34,7 @@ import { getUserQuotaDates } from '@/features/dashboard/api'
 import {
   BALANCE_BURN_FORECAST_DAYS,
   calculateBalanceBurnForecast,
+  formatBurnDurationPrecise,
   type BalanceBurnForecast,
 } from '@/features/dashboard/lib/stats'
 import type { User } from '../../types'
@@ -47,15 +49,7 @@ function getForecastValue(
   forecast: BalanceBurnForecast,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
-  if (forecast.status === 'exhausted') return t('Exhausted')
-  if (forecast.status === 'idle') return t('No active burn')
-
-  const daysRemaining = forecast.daysRemaining ?? 0
-  if (daysRemaining < 1) return t('Less than 1 day remaining')
-
-  return t('{{count}} days remaining', {
-    count: Math.ceil(daysRemaining),
-  })
+  return formatBurnDurationPrecise(forecast, t)
 }
 
 function getForecastDetail(
@@ -74,7 +68,7 @@ function getForecastDetail(
 
   return t('Estimated empty on {{date}}', {
     date: forecast.estimatedEmptyAt
-      ? formatDateStr(forecast.estimatedEmptyAt)
+      ? formatDateTimeStr(forecast.estimatedEmptyAt)
       : '-',
   })
 }
@@ -89,11 +83,15 @@ function normalizeTrend(values: number[]): number[] {
 export function UserBurnForecastDialog(props: Props) {
   const { t } = useTranslation()
   const user = props.user
-  const range = useMemo(() => {
-    const openedUserId = props.open ? user?.id : null
-    if (openedUserId) return computeTimeRange(BALANCE_BURN_FORECAST_DAYS)
-    return computeTimeRange(BALANCE_BURN_FORECAST_DAYS)
-  }, [props.open, user?.id])
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const fallbackRange = useMemo(
+    () => computeTimeRange(BALANCE_BURN_FORECAST_DAYS),
+    []
+  )
+
+  const refreshForecast = useCallback(() => {
+    setRefreshVersion((value) => value + 1)
+  }, [])
 
   const usageQuery = useQuery({
     queryKey: [
@@ -101,49 +99,72 @@ export function UserBurnForecastDialog(props: Props) {
       'balance-burn-forecast',
       user?.id,
       user?.username,
-      range.start_timestamp,
-      range.end_timestamp,
+      props.open,
+      refreshVersion,
     ],
-    queryFn: async () =>
-      getUserQuotaDates(
+    queryFn: async () => {
+      const nextRange = computeTimeRange(BALANCE_BURN_FORECAST_DAYS)
+      const result = await getUserQuotaDates(
         {
           username: user?.username ?? '',
-          start_timestamp: range.start_timestamp,
-          end_timestamp: range.end_timestamp,
+          start_timestamp: nextRange.start_timestamp,
+          end_timestamp: nextRange.end_timestamp,
           default_time: 'hour',
         },
         true
-      ),
+      )
+      return { ...result, range: nextRange }
+    },
     enabled: props.open && Boolean(user?.username),
-    staleTime: 60 * 1000,
+    staleTime: 0,
   })
+
+  const forecastRange = usageQuery.data?.range ?? fallbackRange
 
   const forecast = useMemo(
     () =>
       calculateBalanceBurnForecast(
         usageQuery.data?.data ?? [],
         Number(user?.quota ?? 0),
-        range.start_timestamp,
-        range.end_timestamp
+        forecastRange.start_timestamp,
+        forecastRange.end_timestamp
       ),
     [
-      range.end_timestamp,
-      range.start_timestamp,
+      forecastRange.end_timestamp,
+      forecastRange.start_timestamp,
       usageQuery.data?.data,
       user?.quota,
     ]
   )
 
   const trend = normalizeTrend(forecast.trend)
-  const recentUsage = forecast.dailyBurnQuota * forecast.lookbackDays
+  const recentUsage = forecast.recentUsageQuota
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className='sm:max-w-lg'>
         <DialogHeader>
-          <DialogTitle>{t('Balance burn forecast')}</DialogTitle>
+          <div className='flex items-start justify-between gap-3'>
+            <DialogTitle>{t('Balance burn forecast')}</DialogTitle>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={refreshForecast}
+              disabled={usageQuery.isFetching}
+            >
+              <RefreshCw
+                className={usageQuery.isFetching ? 'animate-spin' : undefined}
+                aria-hidden='true'
+              />
+              {t('Refresh')}
+            </Button>
+          </div>
           <DialogDescription>
-            {user?.username || '-'} (ID: {user?.id || '-'})
+            {t('{{username}} (ID: {{id}})', {
+              username: user?.username || '-',
+              id: user?.id || '-',
+            })}
           </DialogDescription>
         </DialogHeader>
 

@@ -3802,6 +3802,13 @@
     "默认折叠侧边栏": "Réduire la barre latérale par défaut",
     "默认测试模型": "Modèle de test par défaut",
     "默认用户消息": "Bonjour",
-    "默认补全倍率": "Taux de complétion par défaut"
+    "默认补全倍率": "Taux de complétion par défaut",
+    "小于 1 分钟": "< 1 minute",
+    "{{hours}}小时{{minutes}}分钟": "{{hours}} h {{minutes}} min",
+    "{{count}}天": "dans {{count}} jours",
+    "{{days}}天{{hours}}小时{{minutes}}分钟{{seconds}}秒": "{{days}} j {{hours}} h {{minutes}} min {{seconds}} s",
+    "第 {{count}} 天": "Jour {{count}}",
+    "消耗": "Utilisation",
+    "{{username}}（ID：{{id}}）": "{{username}} (ID : {{id}})"
   }
 }

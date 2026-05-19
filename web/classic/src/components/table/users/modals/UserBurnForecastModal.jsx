@@ -17,11 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { Modal, Spin, Typography } from '@douyinfe/semi-ui';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Button, Modal, Spin, Typography } from '@douyinfe/semi-ui';
+import { IconRefresh } from '@douyinfe/semi-icons';
+import { VChart } from '@visactor/react-vchart';
 import { API, renderQuota, showError } from '../../../../helpers';
 import {
   calculateBalanceBurnForecast,
+  formatBurnDurationPrecise,
   getBalanceBurnForecastRange,
 } from '../../../../helpers/dashboard';
 
@@ -32,18 +35,15 @@ const formatForecastDate = (date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 };
 
 const getForecastValue = (forecast, t) => {
   if (!forecast) return t('计算中');
-  if (forecast.status === 'exhausted') return t('已耗尽');
-  if (forecast.status === 'idle') return t('暂无消耗');
-
-  const daysRemaining = forecast.daysRemaining || 0;
-  if (daysRemaining < 1) return t('小于 1 天');
-
-  return t('约 {{count}} 天', { count: Math.ceil(daysRemaining) });
+  return formatBurnDurationPrecise(forecast, t);
 };
 
 const getForecastDetail = (forecast, t) => {
@@ -60,14 +60,54 @@ const getForecastDetail = (forecast, t) => {
   });
 };
 
-const normalizeTrend = (values) => {
-  const sanitized = (values || []).map((value) =>
-    Math.max(0, Number(value) || 0),
-  );
-  const max = Math.max(...sanitized, 0);
-  if (max <= 0) return sanitized.map(() => 0);
-  return sanitized.map((value) => Math.max(10, (value / max) * 100));
-};
+const getTrendChartSpec = (trend, t) => ({
+  type: 'bar',
+  height: 150,
+  padding: { top: 8, right: 8, bottom: 4, left: 8 },
+  data: [
+    {
+      id: 'burn-trend',
+      values: (trend || []).map((value, index) => ({
+        bucket: t('第 {{count}} 天', { count: index + 1 }),
+        quota: Number(value) || 0,
+      })),
+    },
+  ],
+  xField: 'bucket',
+  yField: 'quota',
+  bar: {
+    style: {
+      fill: '#f59e0b',
+      cornerRadius: [4, 4, 0, 0],
+    },
+  },
+  axes: [
+    {
+      orient: 'bottom',
+      label: { visible: false },
+      tick: { visible: false },
+      domainLine: { visible: false },
+    },
+    {
+      orient: 'left',
+      label: { visible: false },
+      tick: { visible: false },
+      domainLine: { visible: false },
+      grid: { visible: false },
+    },
+  ],
+  tooltip: {
+    mark: {
+      title: { value: (datum) => datum?.bucket || '' },
+      content: [
+        {
+          key: t('消耗'),
+          value: (datum) => renderQuota(Number(datum?.quota || 0)),
+        },
+      ],
+    },
+  },
+});
 
 const ForecastMetric = ({ label, value }) => (
   <div className='rounded-lg border border-gray-100 bg-white p-3'>
@@ -94,43 +134,58 @@ const UserBurnForecastModal = ({ visible, onCancel, user, t }) => {
     [quotaData, range.end, range.start, user?.quota],
   );
 
-  const trend = normalizeTrend(forecast.trend);
-  const recentUsage = forecast.dailyBurnQuota * forecast.lookbackDays;
+  const recentUsage = forecast.recentUsageQuota;
+  const hasTrend = forecast.trend.some((value) => Number(value) > 0);
+
+  const loadForecast = useCallback(async () => {
+    if (!visible || !user?.username) return;
+
+    const nextRange = getBalanceBurnForecastRange();
+    setRange(nextRange);
+    setLoading(true);
+    try {
+      const res = await API.get(
+        `/api/data/?username=${encodeURIComponent(user.username)}&start_timestamp=${nextRange.start}&end_timestamp=${nextRange.end}&default_time=hour`,
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        setQuotaData(data || []);
+      } else {
+        showError(message);
+        setQuotaData([]);
+      }
+    } catch (error) {
+      showError(error.message);
+      setQuotaData([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [visible, user?.username]);
 
   useEffect(() => {
-    const loadForecast = async () => {
-      if (!visible || !user?.username) return;
-
-      const nextRange = getBalanceBurnForecastRange();
-      setRange(nextRange);
-      setLoading(true);
-      try {
-        const res = await API.get(
-          `/api/data/?username=${encodeURIComponent(user.username)}&start_timestamp=${nextRange.start}&end_timestamp=${nextRange.end}&default_time=hour`,
-        );
-        const { success, message, data } = res.data;
-        if (success) {
-          setQuotaData(data || []);
-        } else {
-          showError(message);
-          setQuotaData([]);
-        }
-      } catch (error) {
-        showError(error.message);
-        setQuotaData([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     loadForecast();
-  }, [visible, user?.username]);
+  }, [loadForecast]);
 
   return (
     <Modal
       visible={visible}
       onCancel={onCancel}
-      title={t('余额燃尽预测')}
+      title={
+        <div className='flex items-center justify-between gap-3 pr-8'>
+          <span>{t('余额燃尽预测')}</span>
+          <Button
+            size='small'
+            icon={<IconRefresh />}
+            loading={loading}
+            onClick={(event) => {
+              event.stopPropagation();
+              loadForecast();
+            }}
+          >
+            {t('刷新')}
+          </Button>
+        </div>
+      }
       footer={null}
       width={560}
     >
@@ -138,7 +193,10 @@ const UserBurnForecastModal = ({ visible, onCancel, user, t }) => {
         <div className='space-y-4'>
           <div className='rounded-xl border border-amber-100 bg-amber-50 p-4'>
             <div className='text-xs text-gray-500'>
-              {user?.username || '-'} (ID: {user?.id || '-'})
+              {t('{{username}}（ID：{{id}}）', {
+                username: user?.username || '-',
+                id: user?.id || '-',
+              })}
             </div>
             <div className='mt-2 font-mono text-2xl font-semibold'>
               {getForecastValue(forecast, t)}
@@ -169,14 +227,17 @@ const UserBurnForecastModal = ({ visible, onCancel, user, t }) => {
                 value: renderQuota(forecast.dailyBurnQuota),
               })}
             </div>
-            <div className='mt-3 flex h-12 items-end gap-1'>
-              {trend.map((height, index) => (
-                <span
-                  key={`${user?.id || 'user'}-burn-${index}`}
-                  className='flex-1 rounded-t-sm bg-amber-400'
-                  style={{ height: `${height}%` }}
+            <div className='mt-3 h-[150px]'>
+              {hasTrend ? (
+                <VChart
+                  spec={getTrendChartSpec(forecast.trend, t)}
+                  option={{ mode: 'desktop-browser' }}
                 />
-              ))}
+              ) : (
+                <div className='flex h-full items-center justify-center text-xs text-gray-400'>
+                  {t('暂无消耗')}
+                </div>
+              )}
             </div>
           </div>
         </div>
