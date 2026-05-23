@@ -29,6 +29,7 @@ type ActiveRequest struct {
 	TokenId        int                `json:"token_id"`
 	TokenName      string             `json:"token_name"`
 	Model          string             `json:"model"`
+	ChannelName    string             `json:"channel_name"`
 	ChannelId      int                `json:"channel_id"`
 	ChannelType    int                `json:"channel_type"`
 	StartTime      time.Time          `json:"start_time"`
@@ -56,6 +57,7 @@ type ActiveRequestSnapshot struct {
 	TokenId         int     `json:"token_id"`
 	TokenName       string  `json:"token_name"`
 	Model           string  `json:"model"`
+	ChannelName     string  `json:"channel_name"`
 	ChannelId       int     `json:"channel_id"`
 	ChannelType     int     `json:"channel_type"`
 	StartTime       int64   `json:"start_time"`
@@ -94,6 +96,7 @@ func (t *ActiveRequestTracker) Register(info *relaycommon.RelayInfo, c *gin.Cont
 		channelType = info.ChannelMeta.ChannelType
 	}
 	username := common.GetContextKeyString(c, constant.ContextKeyUserName)
+	channelName := common.GetContextKeyString(c, constant.ContextKeyChannelName)
 	req := &ActiveRequest{
 		RequestId:      info.RequestId,
 		UserId:         info.UserId,
@@ -101,6 +104,7 @@ func (t *ActiveRequestTracker) Register(info *relaycommon.RelayInfo, c *gin.Cont
 		TokenId:        info.TokenId,
 		TokenName:      c.GetString("token_name"),
 		Model:          info.OriginModelName,
+		ChannelName:    channelName,
 		ChannelId:      channelId,
 		ChannelType:    channelType,
 		StartTime:      now,
@@ -272,6 +276,7 @@ func (r *ActiveRequest) snapshot(now time.Time) ActiveRequestSnapshot {
 		TokenId:         r.TokenId,
 		TokenName:       r.TokenName,
 		Model:           r.Model,
+		ChannelName:     r.ChannelName,
 		ChannelId:       r.ChannelId,
 		ChannelType:     r.ChannelType,
 		StartTime:       r.StartTime.Unix(),

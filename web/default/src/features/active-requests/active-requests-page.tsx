@@ -26,6 +26,14 @@ function formatElapsed(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+function formatChannel(req: ActiveRequestSnapshot): string {
+  const channelName = req.channel_name?.trim()
+  if (!channelName) {
+    return `#${req.channel_id}`
+  }
+  return `${channelName} (${req.channel_id})`
+}
+
 export function ActiveRequestsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -198,9 +206,7 @@ function ActiveRequestRow({
       <TableCell>{userLabel}</TableCell>
       <TableCell>{req.token_name || '-'}</TableCell>
       <TableCell className='max-w-[200px] truncate'>{req.model}</TableCell>
-      <TableCell>
-        {req.channel_id} / {req.channel_type}
-      </TableCell>
+      <TableCell>{formatChannel(req)}</TableCell>
       <TableCell className='text-right font-mono'>
         {formatElapsed(req.elapsed_seconds)}
       </TableCell>

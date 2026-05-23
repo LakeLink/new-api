@@ -27,6 +27,7 @@ func TestActiveRequestTrackerRetainsCompletedRequests(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Request.RemoteAddr = "127.0.0.1:12345"
 	common.SetContextKey(c, constant.ContextKeyUserName, "alice")
+	common.SetContextKey(c, constant.ContextKeyChannelName, "primary-openai")
 
 	tracker := &ActiveRequestTracker{}
 	tracker.Register(&relaycommon.RelayInfo{
@@ -53,6 +54,9 @@ func TestActiveRequestTrackerRetainsCompletedRequests(t *testing.T) {
 	}
 	if snapshot.Username != "alice" {
 		t.Fatalf("Username = %q, want alice", snapshot.Username)
+	}
+	if snapshot.ChannelName != "primary-openai" {
+		t.Fatalf("ChannelName = %q, want primary-openai", snapshot.ChannelName)
 	}
 	if snapshot.CanTerminate {
 		t.Fatal("completed request should not be terminable")

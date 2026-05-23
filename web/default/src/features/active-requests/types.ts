@@ -5,6 +5,7 @@ export interface ActiveRequestSnapshot {
   token_id: number
   token_name: string
   model: string
+  channel_name: string
   channel_id: number
   channel_type: number
   start_time: number

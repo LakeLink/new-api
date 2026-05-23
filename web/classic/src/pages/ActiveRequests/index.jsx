@@ -40,6 +40,14 @@ function formatElapsed(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function formatChannel(record) {
+  const channelName = record.channel_name?.trim();
+  if (!channelName) {
+    return `#${record.channel_id}`;
+  }
+  return `${channelName} (${record.channel_id})`;
+}
+
 const ActiveRequests = () => {
   const { t } = useTranslation();
   const [requests, setRequests] = useState([]);
@@ -139,7 +147,7 @@ const ActiveRequests = () => {
     {
       title: t('Channel'),
       key: 'channel',
-      render: (_, record) => `${record.channel_id} / ${record.channel_type}`,
+      render: (_, record) => formatChannel(record),
     },
     {
       title: t('Elapsed'),
