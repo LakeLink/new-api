@@ -65,3 +65,10 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
   )
   return res.data
 }
+
+export async function confirmPaymentCompliance() {
+  const res = await api.post<UpdateOptionResponse>(
+    '/api/option/confirm_payment_compliance'
+  )
+  return res.data
+}

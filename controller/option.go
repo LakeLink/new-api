@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -38,6 +39,15 @@ func isVisiblePublicKeyOption(key string) bool {
 	default:
 		return false
 	}
+}
+
+func isPositiveOptionValue(value string) bool {
+	intValue, err := strconv.Atoi(strings.TrimSpace(value))
+	if err == nil {
+		return intValue > 0
+	}
+	floatValue, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	return err == nil && floatValue > 0
 }
 
 func collectModelNamesFromOptionValue(raw string, modelNames map[string]struct{}) {
@@ -87,7 +97,7 @@ func GetOptions(c *gin.Context) {
 			strings.HasSuffix(k, "Key") ||
 			strings.HasSuffix(k, "secret") ||
 			strings.HasSuffix(k, "api_key")
-		if isSensitiveKey && !isVisiblePublicKeyOption(k) {
+		if isSensitiveKey {
 			continue
 		}
 		options = append(options, &model.Option{
