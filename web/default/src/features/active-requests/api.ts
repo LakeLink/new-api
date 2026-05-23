@@ -1,15 +1,18 @@
 import { api } from '@/lib/api'
-import type { ActiveRequestSnapshot } from './types'
+import type { ActiveRequestsResponse } from './types'
 
-export async function getActiveRequests(): Promise<ActiveRequestSnapshot[]> {
-  const res = await api.get<{ data: ActiveRequestSnapshot[] }>(
-    '/api/active-requests'
-  )
-  return res.data.data
+type ActiveRequestsApiResponse = ActiveRequestsResponse & {
+  success: boolean
 }
 
-export async function terminateActiveRequest(
-  requestId: string
-): Promise<void> {
+export async function getActiveRequests(): Promise<ActiveRequestsResponse> {
+  const res = await api.get<ActiveRequestsApiResponse>('/api/active-requests')
+  return {
+    data: res.data.data ?? [],
+    completed_retention_seconds: res.data.completed_retention_seconds ?? 10,
+  }
+}
+
+export async function terminateActiveRequest(requestId: string): Promise<void> {
   await api.delete(`/api/active-requests/${requestId}`)
 }

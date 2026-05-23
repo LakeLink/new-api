@@ -1,22 +1,14 @@
 import { useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Activity, RefreshCw, StopCircle, Wifi, WifiOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import {
-  Activity,
-  RefreshCw,
-  StopCircle,
-  Wifi,
-  WifiOff,
-} from 'lucide-react'
-
-import { getActiveRequests, terminateActiveRequest } from './api'
-import type { ActiveRequestSnapshot } from './types'
-
-import { Button } from '@/components/ui/button'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
-import { Switch } from '@/components/ui/switch'
-import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import {
   Table,
   TableBody,
@@ -25,8 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Spinner } from '@/components/ui/spinner'
-import { toast } from 'sonner'
+import { getActiveRequests, terminateActiveRequest } from './api'
+import type { ActiveRequestSnapshot } from './types'
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -40,7 +32,7 @@ export function ActiveRequestsPage() {
   const [autoRefresh, setAutoRefresh] = useState(false)
 
   const {
-    data: requests,
+    data: activeRequestsResponse,
     isLoading,
     isFetching,
   } = useQuery({
@@ -63,6 +55,14 @@ export function ActiveRequestsPage() {
   const handleRefresh = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['active-requests'] })
   }, [queryClient])
+
+  const requests = activeRequestsResponse?.data ?? []
+  const activeCount = requests.filter(
+    (request) => (request.status ?? 'active') === 'active'
+  ).length
+  const completedCount = requests.length - activeCount
+  const completedRetentionSeconds =
+    activeRequestsResponse?.completed_retention_seconds ?? 10
 
   return (
     <div className='flex-1 space-y-4 p-4 pt-6 md:p-8'>
@@ -99,8 +99,20 @@ export function ActiveRequestsPage() {
 
       <Card>
         <CardHeader className='py-3'>
-          <CardTitle className='text-sm font-medium'>
-            {t('Total')}: {requests?.length ?? 0}
+          <CardTitle className='flex flex-wrap items-center gap-x-4 gap-y-1 text-sm font-medium'>
+            <span>
+              {t('Total')}: {requests.length}
+            </span>
+            <span>
+              {t('Active')}: {activeCount}
+            </span>
+            <span>
+              {t('Recently ended')}: {completedCount}
+            </span>
+            <span className='text-muted-foreground'>
+              {t('Ended requests stay visible for')} {completedRetentionSeconds}
+              s
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent className='p-0'>
@@ -108,17 +120,18 @@ export function ActiveRequestsPage() {
             <div className='flex items-center justify-center py-12'>
               <Spinner className='h-8 w-8' />
             </div>
-          ) : !requests || requests.length === 0 ? (
-            <div className='flex flex-col items-center justify-center py-12 text-muted-foreground'>
+          ) : requests.length === 0 ? (
+            <div className='text-muted-foreground flex flex-col items-center justify-center py-12'>
               <Activity className='mb-2 h-8 w-8' />
-              <p>{t('No active requests')}</p>
+              <p>{t('No active or recent requests')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('Request ID')}</TableHead>
-                  <TableHead>{t('User')}</TableHead>
+                  <TableHead>{t('Status')}</TableHead>
+                  <TableHead>{t('Username')}</TableHead>
                   <TableHead>{t('Token')}</TableHead>
                   <TableHead>{t('Model')}</TableHead>
                   <TableHead>{t('Channel')}</TableHead>
@@ -159,15 +172,30 @@ function ActiveRequestRow({
   req: ActiveRequestSnapshot
   onTerminate: (id: string) => void
 }) {
-  const isStale = req.stale_for_seconds > 60
   const { t } = useTranslation()
+  const status = req.status ?? 'active'
+  const isCompleted = status === 'completed'
+  const isStale = !isCompleted && req.stale_for_seconds > 60
+  const canTerminate = req.can_terminate ?? !isCompleted
+  const userLabel = req.username
+    ? `${req.username} (#${req.user_id})`
+    : req.user_id
 
   return (
-    <TableRow className={isStale ? 'bg-destructive/5' : undefined}>
+    <TableRow
+      className={
+        isCompleted ? 'opacity-70' : isStale ? 'bg-destructive/5' : undefined
+      }
+    >
       <TableCell className='font-mono text-xs'>
         {req.request_id.slice(0, 8)}...
       </TableCell>
-      <TableCell>{req.user_id}</TableCell>
+      <TableCell>
+        <Badge variant={isCompleted ? 'outline' : 'secondary'}>
+          {t(isCompleted ? 'Completed' : 'Active')}
+        </Badge>
+      </TableCell>
+      <TableCell>{userLabel}</TableCell>
       <TableCell>{req.token_name || '-'}</TableCell>
       <TableCell className='max-w-[200px] truncate'>{req.model}</TableCell>
       <TableCell>
@@ -181,10 +209,14 @@ function ActiveRequestRow({
       <TableCell className='text-right'>
         <span
           className={
-            req.stale_for_seconds > 30 ? 'text-destructive font-medium' : ''
+            !isCompleted && req.stale_for_seconds > 30
+              ? 'text-destructive font-medium'
+              : ''
           }
         >
-          {formatElapsed(req.stale_for_seconds)}
+          {isCompleted
+            ? `${t('Ended')} ${formatElapsed(req.ended_seconds_ago ?? 0)}`
+            : formatElapsed(req.stale_for_seconds)}
         </span>
       </TableCell>
       <TableCell>
@@ -194,19 +226,23 @@ function ActiveRequestRow({
           ) : (
             <WifiOff className='mr-1 h-3 w-3' />
           )}
-          {req.is_stream ? 'Stream' : 'Normal'}
+          {t(req.is_stream ? 'Stream' : 'Normal')}
         </Badge>
       </TableCell>
       <TableCell className='font-mono text-xs'>{req.client_ip}</TableCell>
       <TableCell className='text-right'>
-        <Button
-          variant='destructive'
-          size='sm'
-          onClick={() => onTerminate(req.request_id)}
-        >
-          <StopCircle className='mr-1 h-3 w-3' />
-          {t('Terminate')}
-        </Button>
+        {canTerminate ? (
+          <Button
+            variant='destructive'
+            size='sm'
+            onClick={() => onTerminate(req.request_id)}
+          >
+            <StopCircle className='mr-1 h-3 w-3' />
+            {t('Terminate')}
+          </Button>
+        ) : (
+          <span className='text-muted-foreground text-sm'>{t('Ended')}</span>
+        )}
       </TableCell>
     </TableRow>
   )

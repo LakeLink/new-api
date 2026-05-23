@@ -4527,6 +4527,22 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Active Requests": "Active Requests",
+    "Auto Refresh": "Auto Refresh",
+    "Request terminated": "Request terminated",
+    "Failed to terminate request": "Failed to terminate request",
+    "No active requests": "No active requests",
+    "No active or recent requests": "No active or recent requests",
+    "Elapsed": "Elapsed",
+    "Output Chunks": "Output Chunks",
+    "Stale For": "Stale For",
+    "Terminate": "Terminate",
+    "Normal": "Normal",
+    "Recently ended": "Recently ended",
+    "Ended requests stay visible for": "Ended requests stay visible for",
+    "Ended": "Ended",
+    "Completed request visibility (seconds)": "Completed request visibility (seconds)",
+    "How long recently ended requests stay visible in the active request monitor": "How long recently ended requests stay visible in the active request monitor"
   }
 }

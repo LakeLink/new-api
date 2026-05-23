@@ -4631,6 +4631,22 @@
     "in {{hours}}h{{minutes}}min": "dans {{hours}} h {{minutes}} min",
     "in {{count}} days": "dans {{count}} jours",
     "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} j {{hours}} h {{minutes}} min {{seconds}} s",
-    "{{username}} (ID: {{id}})": "{{username}} (ID : {{id}})"
+    "{{username}} (ID: {{id}})": "{{username}} (ID : {{id}})",
+    "Active Requests": "Requêtes actives",
+    "Auto Refresh": "Actualisation auto",
+    "Request terminated": "Requête terminée",
+    "Failed to terminate request": "Échec de l'arrêt de la requête",
+    "No active requests": "Aucune requête active",
+    "No active or recent requests": "Aucune requête active ou récente",
+    "Elapsed": "Durée",
+    "Output Chunks": "Blocs de sortie",
+    "Stale For": "Inactif depuis",
+    "Terminate": "Terminer",
+    "Normal": "Normal",
+    "Recently ended": "Récemment terminées",
+    "Ended requests stay visible for": "Les requêtes terminées restent visibles pendant",
+    "Ended": "Terminée",
+    "Completed request visibility (seconds)": "Visibilité des requêtes terminées (secondes)",
+    "How long recently ended requests stay visible in the active request monitor": "Durée pendant laquelle les requêtes récemment terminées restent visibles dans le moniteur des requêtes actives"
   }
 }

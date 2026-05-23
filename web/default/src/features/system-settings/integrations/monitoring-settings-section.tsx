@@ -62,6 +62,12 @@ const monitoringSchema = z
         .int()
         .min(1, 'Interval must be at least 1 minute'),
     }),
+    active_request_setting: z.object({
+      completed_retention_seconds: z.coerce
+        .number()
+        .int()
+        .min(0, 'Retention must be zero or greater'),
+    }),
   })
   .superRefine((values, ctx) => {
     const disableParsed = parseHttpStatusCodeRules(
@@ -105,6 +111,7 @@ type MonitoringSettingsSectionProps = {
     AutomaticRetryStatusCodes: string
     'monitor_setting.auto_test_channel_enabled': boolean
     'monitor_setting.auto_test_channel_minutes': number
+    'active_request_setting.completed_retention_seconds': number
   }
 }
 
@@ -122,6 +129,7 @@ type NormalizedMonitoringValues = {
   AutomaticRetryStatusCodes: string
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
+  'active_request_setting.completed_retention_seconds': number
 }
 
 const buildFormDefaults = (
@@ -141,6 +149,10 @@ const buildFormDefaults = (
       defaults['monitor_setting.auto_test_channel_enabled'],
     auto_test_channel_minutes:
       defaults['monitor_setting.auto_test_channel_minutes'],
+  },
+  active_request_setting: {
+    completed_retention_seconds:
+      defaults['active_request_setting.completed_retention_seconds'],
   },
 })
 
@@ -164,6 +176,8 @@ const normalizeDefaults = (
     defaults['monitor_setting.auto_test_channel_enabled'],
   'monitor_setting.auto_test_channel_minutes':
     defaults['monitor_setting.auto_test_channel_minutes'],
+  'active_request_setting.completed_retention_seconds':
+    defaults['active_request_setting.completed_retention_seconds'],
 })
 
 const normalizeFormValues = (
@@ -186,6 +200,8 @@ const normalizeFormValues = (
     values.monitor_setting.auto_test_channel_enabled,
   'monitor_setting.auto_test_channel_minutes':
     values.monitor_setting.auto_test_channel_minutes,
+  'active_request_setting.completed_retention_seconds':
+    values.active_request_setting.completed_retention_seconds,
 })
 
 export function MonitoringSettingsSection({
@@ -302,6 +318,43 @@ export function MonitoringSettingsSection({
                   </FormControl>
                   <FormDescription>
                     {t('How frequently the system tests all channels')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='active_request_setting.completed_retention_seconds'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {t('Completed request visibility (seconds)')}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      step={1}
+                      value={
+                        typeof field.value === 'number' &&
+                        Number.isFinite(field.value)
+                          ? field.value
+                          : ''
+                      }
+                      onChange={(event) =>
+                        field.onChange(event.target.valueAsNumber)
+                      }
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'How long recently ended requests stay visible in the active request monitor'
+                    )}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

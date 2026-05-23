@@ -44,6 +44,7 @@ export default function SettingsMonitoring(props) {
       '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
     'monitor_setting.auto_test_channel_enabled': false,
     'monitor_setting.auto_test_channel_minutes': 10,
+    'active_request_setting.completed_retention_seconds': 10,
   });
   const refForm = useRef();
   const [inputsRow, setInputsRow] = useState(inputs);
@@ -159,6 +160,24 @@ export default function SettingsMonitoring(props) {
                     setInputs({
                       ...inputs,
                       'monitor_setting.auto_test_channel_minutes':
+                        parseInt(value),
+                    })
+                  }
+                />
+              </Col>
+              <Col xs={24} sm={12} md={8} lg={8} xl={8}>
+                <Form.InputNumber
+                  label={t('已结束请求显示时长')}
+                  step={1}
+                  min={0}
+                  suffix={t('秒')}
+                  extraText={t('最近结束的请求将在活跃请求页面保留多久')}
+                  placeholder={''}
+                  field={'active_request_setting.completed_retention_seconds'}
+                  onChange={(value) =>
+                    setInputs({
+                      ...inputs,
+                      'active_request_setting.completed_retention_seconds':
                         parseInt(value),
                     })
                   }

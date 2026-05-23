@@ -4631,6 +4631,22 @@
     "in {{hours}}h{{minutes}}min": "trong {{hours}} giờ {{minutes}} phút",
     "in {{count}} days": "trong {{count}} ngày",
     "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} ngày {{hours}} giờ {{minutes}} phút {{seconds}} giây",
-    "{{username}} (ID: {{id}})": "{{username}} (ID: {{id}})"
+    "{{username}} (ID: {{id}})": "{{username}} (ID: {{id}})",
+    "Active Requests": "Yêu cầu đang hoạt động",
+    "Auto Refresh": "Tự động làm mới",
+    "Request terminated": "Đã chấm dứt yêu cầu",
+    "Failed to terminate request": "Không thể chấm dứt yêu cầu",
+    "No active requests": "Không có yêu cầu đang hoạt động",
+    "No active or recent requests": "Không có yêu cầu đang hoạt động hoặc vừa kết thúc",
+    "Elapsed": "Đã chạy",
+    "Output Chunks": "Khối đầu ra",
+    "Stale For": "Không phản hồi trong",
+    "Terminate": "Chấm dứt",
+    "Normal": "Bình thường",
+    "Recently ended": "Vừa kết thúc",
+    "Ended requests stay visible for": "Yêu cầu đã kết thúc hiển thị trong",
+    "Ended": "Đã kết thúc",
+    "Completed request visibility (seconds)": "Thời gian hiển thị yêu cầu đã kết thúc (giây)",
+    "How long recently ended requests stay visible in the active request monitor": "Thời gian giữ các yêu cầu vừa kết thúc trong trình giám sát yêu cầu đang hoạt động"
   }
 }

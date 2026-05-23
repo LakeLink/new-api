@@ -42,6 +42,7 @@ const defaultOperationsSettings: OperationsSettings = {
     '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
   'monitor_setting.auto_test_channel_enabled': false,
   'monitor_setting.auto_test_channel_minutes': 10,
+  'active_request_setting.completed_retention_seconds': 10,
   SMTPServer: '',
   SMTPPort: '',
   SMTPAccount: '',

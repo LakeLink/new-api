@@ -28,11 +28,7 @@ import {
   Space,
   Spin,
 } from '@douyinfe/semi-ui';
-import {
-  IconRefresh,
-  IconStop,
-  IconWifi,
-} from '@douyinfe/semi-icons';
+import { IconRefresh, IconStop, IconWifi } from '@douyinfe/semi-icons';
 import { useTranslation } from 'react-i18next';
 import { API } from '../../helpers';
 
@@ -47,6 +43,8 @@ function formatElapsed(seconds) {
 const ActiveRequests = () => {
   const { t } = useTranslation();
   const [requests, setRequests] = useState([]);
+  const [completedRetentionSeconds, setCompletedRetentionSeconds] =
+    useState(10);
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
@@ -56,6 +54,9 @@ const ActiveRequests = () => {
       const res = await API.get('/api/active-requests');
       if (res.data.success) {
         setRequests(res.data.data || []);
+        setCompletedRetentionSeconds(
+          res.data.completed_retention_seconds ?? 10,
+        );
       }
     } catch (err) {
       // ignore
@@ -100,10 +101,28 @@ const ActiveRequests = () => {
       ),
     },
     {
-      title: t('User'),
+      title: t('Status'),
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (status = 'active') => {
+        const isCompleted = status === 'completed';
+        return (
+          <Tag color={isCompleted ? 'grey' : 'green'} shape='circle'>
+            {t(isCompleted ? 'Completed' : 'Active')}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: t('Username'),
       dataIndex: 'user_id',
       key: 'user_id',
-      width: 80,
+      width: 120,
+      render: (_, record) =>
+        record.username
+          ? `${record.username} (#${record.user_id})`
+          : record.user_id,
     },
     {
       title: t('Token'),
@@ -148,15 +167,21 @@ const ActiveRequests = () => {
       dataIndex: 'stale_for_seconds',
       key: 'stale_for',
       align: 'right',
-      render: (val) => (
+      render: (val, record) => (
         <Text
           style={{
             fontFamily: 'monospace',
-            color: val > 30 ? 'var(--semi-color-danger)' : undefined,
-            fontWeight: val > 30 ? 600 : undefined,
+            color:
+              record.status !== 'completed' && val > 30
+                ? 'var(--semi-color-danger)'
+                : undefined,
+            fontWeight:
+              record.status !== 'completed' && val > 30 ? 600 : undefined,
           }}
         >
-          {formatElapsed(val)}
+          {record.status === 'completed'
+            ? `${t('Ended')} ${formatElapsed(record.ended_seconds_ago || 0)}`
+            : formatElapsed(val)}
         </Text>
       ),
     },
@@ -168,10 +193,10 @@ const ActiveRequests = () => {
         <Tag color={isStream ? 'blue' : 'grey'} shape='circle'>
           {isStream ? (
             <>
-              <IconWifi size='extra-small' /> Stream
+              <IconWifi size='extra-small' /> {t('Stream')}
             </>
           ) : (
-            'Normal'
+            t('Normal')
           )}
         </Tag>
       ),
@@ -190,19 +215,27 @@ const ActiveRequests = () => {
       title: t('Actions'),
       key: 'actions',
       align: 'right',
-      render: (_, record) => (
-        <Popconfirm
-          title={t('Confirm')}
-          content={t('Terminate this request?')}
-          onConfirm={() => handleTerminate(record.request_id)}
-        >
-          <Button type='danger' size='small' icon={<IconStop />}>
-            {t('Terminate')}
-          </Button>
-        </Popconfirm>
-      ),
+      render: (_, record) =>
+        record.status === 'completed' || record.can_terminate === false ? (
+          <Text type='tertiary'>{t('Ended')}</Text>
+        ) : (
+          <Popconfirm
+            title={t('Confirm')}
+            content={t('Terminate this request?')}
+            onConfirm={() => handleTerminate(record.request_id)}
+          >
+            <Button type='danger' size='small' icon={<IconStop />}>
+              {t('Terminate')}
+            </Button>
+          </Popconfirm>
+        ),
     },
   ];
+
+  const activeCount = requests.filter(
+    (request) => (request.status || 'active') === 'active',
+  ).length;
+  const completedCount = requests.length - activeCount;
 
   return (
     <div style={{ marginTop: 60, padding: '0 16px' }}>
@@ -218,6 +251,15 @@ const ActiveRequests = () => {
           <Text heading={4}>{t('Active Requests')}</Text>
           <Text type='tertiary'>
             {t('Total')}: {requests.length}
+          </Text>
+          <Text type='tertiary'>
+            {t('Active')}: {activeCount}
+          </Text>
+          <Text type='tertiary'>
+            {t('Recently ended')}: {completedCount}
+          </Text>
+          <Text type='tertiary'>
+            {t('Ended requests stay visible for')} {completedRetentionSeconds}s
           </Text>
         </Space>
         <Space>
@@ -242,12 +284,14 @@ const ActiveRequests = () => {
         empty={
           <Spin spinning={loading}>
             <div style={{ padding: 40, textAlign: 'center' }}>
-              {t('No active requests')}
+              {t('No active or recent requests')}
             </div>
           </Spin>
         }
         rowClassName={(record) =>
-          record.stale_for_seconds > 60 ? 'stale-row' : ''
+          record.status !== 'completed' && record.stale_for_seconds > 60
+            ? 'stale-row'
+            : ''
         }
       />
     </div>

@@ -4,15 +4,17 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/active_request_setting"
 	"github.com/gin-gonic/gin"
 )
 
-// GetActiveRequests returns all currently active relay requests.
+// GetActiveRequests returns active and recently completed relay requests.
 func GetActiveRequests(c *gin.Context) {
 	snapshots := service.GlobalActiveRequestTracker.List()
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    snapshots,
+		"success":                     true,
+		"data":                        snapshots,
+		"completed_retention_seconds": active_request_setting.GetActiveRequestSetting().CompletedRetentionSeconds,
 	})
 }
 

@@ -4631,6 +4631,22 @@
     "in {{hours}}h{{minutes}}min": "{{hours}}時間{{minutes}}分",
     "in {{count}} days": "{{count}}日後",
     "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}}日{{hours}}時間{{minutes}}分{{seconds}}秒",
-    "{{username}} (ID: {{id}})": "{{username}}（ID：{{id}}）"
+    "{{username}} (ID: {{id}})": "{{username}}（ID：{{id}}）",
+    "Active Requests": "アクティブリクエスト",
+    "Auto Refresh": "自動更新",
+    "Request terminated": "リクエストを終了しました",
+    "Failed to terminate request": "リクエストの終了に失敗しました",
+    "No active requests": "アクティブなリクエストはありません",
+    "No active or recent requests": "アクティブまたは最近終了したリクエストはありません",
+    "Elapsed": "経過時間",
+    "Output Chunks": "出力チャンク",
+    "Stale For": "停滞時間",
+    "Terminate": "終了",
+    "Normal": "通常",
+    "Recently ended": "最近終了",
+    "Ended requests stay visible for": "終了したリクエストの表示時間",
+    "Ended": "終了済み",
+    "Completed request visibility (seconds)": "終了したリクエストの表示時間（秒）",
+    "How long recently ended requests stay visible in the active request monitor": "最近終了したリクエストをアクティブリクエストモニターに表示しておく時間"
   }
 }

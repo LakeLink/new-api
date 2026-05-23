@@ -4631,6 +4631,22 @@
     "in {{hours}}h{{minutes}}min": "через {{hours}} ч {{minutes}} мин",
     "in {{count}} days": "через {{count}} дн.",
     "{{days}}d {{hours}}h {{minutes}}m {{seconds}}s": "{{days}} д {{hours}} ч {{minutes}} мин {{seconds}} с",
-    "{{username}} (ID: {{id}})": "{{username}} (ИД: {{id}})"
+    "{{username}} (ID: {{id}})": "{{username}} (ИД: {{id}})",
+    "Active Requests": "Активные запросы",
+    "Auto Refresh": "Автообновление",
+    "Request terminated": "Запрос завершен",
+    "Failed to terminate request": "Не удалось завершить запрос",
+    "No active requests": "Нет активных запросов",
+    "No active or recent requests": "Нет активных или недавно завершенных запросов",
+    "Elapsed": "Прошло",
+    "Output Chunks": "Выходные фрагменты",
+    "Stale For": "Бездействует",
+    "Terminate": "Завершить",
+    "Normal": "Обычный",
+    "Recently ended": "Недавно завершены",
+    "Ended requests stay visible for": "Завершенные запросы видны в течение",
+    "Ended": "Завершен",
+    "Completed request visibility (seconds)": "Видимость завершенных запросов (секунды)",
+    "How long recently ended requests stay visible in the active request monitor": "Как долго недавно завершенные запросы видны в мониторе активных запросов"
   }
 }
