@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
@@ -14,20 +16,20 @@ import (
 
 // ActiveRequest represents an in-flight relay request tracked in memory.
 type ActiveRequest struct {
-	RequestId      string                `json:"request_id"`
-	UserId         int                   `json:"user_id"`
-	TokenId        int                   `json:"token_id"`
-	TokenName      string                `json:"token_name"`
-	Model          string                `json:"model"`
-	ChannelId      int                   `json:"channel_id"`
-	ChannelType    int                   `json:"channel_type"`
-	StartTime      time.Time             `json:"start_time"`
-	IsStream       bool                  `json:"is_stream"`
-	ClientIP       string                `json:"client_ip"`
-	InputTokens    int                   `json:"input_tokens"`
-	OutputChunks   int32                 `json:"output_chunks"`
-	LastOutputNano int64                 `json:"-"` // atomic unix nano
-	CancelFunc     context.CancelFunc    `json:"-"`
+	RequestId      string             `json:"request_id"`
+	UserId         int                `json:"user_id"`
+	TokenId        int                `json:"token_id"`
+	TokenName      string             `json:"token_name"`
+	Model          string             `json:"model"`
+	ChannelId      int                `json:"channel_id"`
+	ChannelType    int                `json:"channel_type"`
+	StartTime      time.Time          `json:"start_time"`
+	IsStream       bool               `json:"is_stream"`
+	ClientIP       string             `json:"client_ip"`
+	InputTokens    int                `json:"input_tokens"`
+	OutputChunks   int32              `json:"output_chunks"`
+	LastOutputNano int64              `json:"-"` // atomic unix nano
+	CancelFunc     context.CancelFunc `json:"-"`
 }
 
 // RecordOutput atomically increments the output chunk counter and updates last output time.
@@ -68,14 +70,20 @@ var GlobalActiveRequestTracker = &ActiveRequestTracker{
 // Register adds a new active request to the tracker.
 func (t *ActiveRequestTracker) Register(info *relaycommon.RelayInfo, c *gin.Context) {
 	now := time.Now()
+	channelId := common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
+	if info.ChannelMeta != nil {
+		channelId = info.ChannelMeta.ChannelId
+		channelType = info.ChannelMeta.ChannelType
+	}
 	req := &ActiveRequest{
 		RequestId:      info.RequestId,
 		UserId:         info.UserId,
 		TokenId:        info.TokenId,
 		TokenName:      c.GetString("token_name"),
 		Model:          info.OriginModelName,
-		ChannelId:      info.ChannelMeta.ChannelId,
-		ChannelType:    info.ChannelMeta.ChannelType,
+		ChannelId:      channelId,
+		ChannelType:    channelType,
 		StartTime:      now,
 		IsStream:       info.IsStream,
 		ClientIP:       c.ClientIP(),
@@ -123,9 +131,9 @@ func (t *ActiveRequestTracker) RecordOutput(requestId string) {
 
 // UpdateInputTokens sets the estimated input token count for a request.
 func (t *ActiveRequestTracker) UpdateInputTokens(requestId string, tokens int) {
-	t.mu.RLock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	req, ok := t.entries[requestId]
-	t.mu.RUnlock()
 	if ok {
 		req.InputTokens = tokens
 	}

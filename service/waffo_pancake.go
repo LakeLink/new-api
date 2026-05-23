@@ -21,6 +21,7 @@ type WaffoPancakePriceSnapshot struct {
 // buyer editing email at checkout — see WaffoPancakeBuyerIdentityFromUserID.
 type WaffoPancakeCreateSessionParams struct {
 	ProductID        string
+	OrderID          string
 	BuyerIdentity    string
 	PriceSnapshot    *WaffoPancakePriceSnapshot
 	BuyerEmail       string
@@ -53,6 +54,7 @@ type WaffoPancakeWebhookEvent struct {
 
 type WaffoPancakeWebhookData struct {
 	OrderID                       string
+	OrderMetadata                 map[string]string
 	BuyerEmail                    string
 	Currency                      string
 	Amount                        string
@@ -60,6 +62,8 @@ type WaffoPancakeWebhookData struct {
 	ProductName                   string
 	MerchantProvidedBuyerIdentity string
 }
+
+const waffoPancakeTradeNoMetadataKey = "new_api_trade_no"
 
 // NormalizedEventType returns the event type or empty string for a nil event.
 func (e *WaffoPancakeWebhookEvent) NormalizedEventType() string {
@@ -114,6 +118,11 @@ func CreateWaffoPancakeCheckoutSession(ctx context.Context, params *WaffoPancake
 		},
 		BuyerIdentity: params.BuyerIdentity,
 	}
+	if tradeNo := strings.TrimSpace(params.OrderID); tradeNo != "" {
+		sdkParams.Metadata = map[string]string{
+			waffoPancakeTradeNoMetadataKey: tradeNo,
+		}
+	}
 	if params.PriceSnapshot != nil {
 		sdkParams.PriceSnapshot = &pancake.PriceInfo{
 			Amount:      params.PriceSnapshot.Amount,
@@ -132,6 +141,7 @@ func CreateWaffoPancakeCheckoutSession(ctx context.Context, params *WaffoPancake
 		SessionID:      session.SessionID,
 		CheckoutURL:    session.CheckoutURL,
 		ExpiresAt:      session.ExpiresAt,
+		OrderID:        params.OrderID,
 		Token:          session.Token,
 		TokenExpiresAt: session.TokenExpiresAt,
 	}, nil
@@ -172,6 +182,7 @@ func VerifyConfiguredWaffoPancakeWebhook(payload string, signatureHeader string)
 		Mode:      string(evt.Mode),
 		Data: WaffoPancakeWebhookData{
 			OrderID:                       evt.Data.OrderID,
+			OrderMetadata:                 evt.Data.OrderMetadata,
 			BuyerEmail:                    evt.Data.BuyerEmail,
 			Currency:                      evt.Data.Currency,
 			Amount:                        evt.Data.Amount,
@@ -182,6 +193,23 @@ func VerifyConfiguredWaffoPancakeWebhook(payload string, signatureHeader string)
 	}, nil
 }
 
+// ResolveWaffoPancakeLocalTradeNo returns the local trade_no stored in checkout
+// metadata, falling back to orderId for legacy orders created before metadata.
+func ResolveWaffoPancakeLocalTradeNo(event *WaffoPancakeWebhookEvent) string {
+	if event == nil {
+		return ""
+	}
+	if event.Data.OrderMetadata != nil {
+		if tradeNo := strings.TrimSpace(event.Data.OrderMetadata[waffoPancakeTradeNoMetadataKey]); tradeNo != "" {
+			return tradeNo
+		}
+		if tradeNo := strings.TrimSpace(event.Data.OrderMetadata["trade_no"]); tradeNo != "" {
+			return tradeNo
+		}
+	}
+	return strings.TrimSpace(event.Data.OrderID)
+}
+
 // ResolveWaffoPancakeTradeNo maps a verified webhook event to a local TopUp
 // trade_no, rejecting any payload whose buyer identity doesn't match the one
 // we recorded at checkout — defence-in-depth on top of signature verification.
@@ -189,13 +217,13 @@ func ResolveWaffoPancakeTradeNo(event *WaffoPancakeWebhookEvent) (string, error)
 	if event == nil {
 		return "", fmt.Errorf("missing webhook event")
 	}
-	tradeNo := strings.TrimSpace(event.Data.OrderID)
+	tradeNo := ResolveWaffoPancakeLocalTradeNo(event)
 	if tradeNo == "" {
-		return "", fmt.Errorf("missing webhook orderId")
+		return "", fmt.Errorf("missing webhook orderId/tradeNo")
 	}
 	topUp := model.GetTopUpByTradeNo(tradeNo)
 	if topUp == nil || topUp.PaymentProvider != model.PaymentProviderWaffoPancake {
-		return "", fmt.Errorf("waffo pancake order not found for webhook orderId=%s", tradeNo)
+		return "", fmt.Errorf("waffo pancake order not found for webhook tradeNo=%s orderId=%s", tradeNo, event.Data.OrderID)
 	}
 	expectedIdentity := WaffoPancakeBuyerIdentityFromUserID(topUp.UserId)
 	actualIdentity := strings.TrimSpace(event.Data.MerchantProvidedBuyerIdentity)
@@ -216,13 +244,13 @@ func ResolveWaffoPancakeSubscriptionTradeNo(event *WaffoPancakeWebhookEvent) (st
 	if event == nil {
 		return "", fmt.Errorf("missing webhook event")
 	}
-	tradeNo := strings.TrimSpace(event.Data.OrderID)
+	tradeNo := ResolveWaffoPancakeLocalTradeNo(event)
 	if tradeNo == "" {
-		return "", fmt.Errorf("missing webhook orderId")
+		return "", fmt.Errorf("missing webhook orderId/tradeNo")
 	}
 	order := model.GetSubscriptionOrderByTradeNo(tradeNo)
 	if order == nil || order.PaymentProvider != model.PaymentProviderWaffoPancake {
-		return "", fmt.Errorf("waffo pancake subscription order not found for webhook orderId=%s", tradeNo)
+		return "", fmt.Errorf("waffo pancake subscription order not found for webhook tradeNo=%s orderId=%s", tradeNo, event.Data.OrderID)
 	}
 	expectedIdentity := WaffoPancakeBuyerIdentityFromUserID(order.UserId)
 	actualIdentity := strings.TrimSpace(event.Data.MerchantProvidedBuyerIdentity)

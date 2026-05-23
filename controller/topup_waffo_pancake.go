@@ -403,6 +403,7 @@ func RequestWaffoPancakePay(c *gin.Context) {
 	expiresInSeconds := 45 * 60
 	session, err := service.CreateWaffoPancakeCheckoutSession(c.Request.Context(), &service.WaffoPancakeCreateSessionParams{
 		ProductID:     setting.WaffoPancakeProductID,
+		OrderID:       tradeNo,
 		BuyerIdentity: getWaffoPancakeBuyerIdentity(user),
 		PriceSnapshot: &service.WaffoPancakePriceSnapshot{
 			Amount:      formatWaffoPancakeAmount(payMoney),
@@ -487,7 +488,7 @@ func WaffoPancakeWebhook(c *gin.Context) {
 
 	// Subscription vs top-up dispatch by trade_no prefix (written at
 	// session-creation time): WAFFO_PANCAKE_SUB- vs WAFFO_PANCAKE-.
-	rawTradeNo := strings.TrimSpace(event.Data.OrderID)
+	rawTradeNo := service.ResolveWaffoPancakeLocalTradeNo(event)
 	isSubscription := strings.HasPrefix(rawTradeNo, "WAFFO_PANCAKE_SUB-")
 
 	if isSubscription {

@@ -28,7 +28,11 @@ var completionRatioMetaOptionKeys = []string{
 	"AudioCompletionRatio",
 }
 
-func isDeprecatedPaymentConfirmationOptionKey(key string) bool {
+func isHiddenPaymentComplianceOptionKey(key string) bool {
+	return key == "payment_setting.compliance_confirmed_ip"
+}
+
+func isPaymentComplianceOptionKey(key string) bool {
 	return strings.HasPrefix(key, "payment_setting.compliance_")
 }
 
@@ -88,7 +92,7 @@ func GetOptions(c *gin.Context) {
 	optionValues := make(map[string]string)
 	common.OptionMapRWMutex.Lock()
 	for k, v := range common.OptionMap {
-		if isDeprecatedPaymentConfirmationOptionKey(k) {
+		if isHiddenPaymentComplianceOptionKey(k) {
 			continue
 		}
 		value := common.Interface2String(v)
@@ -148,7 +152,7 @@ func UpdateOption(c *gin.Context) {
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
 	}
-	if isDeprecatedPaymentConfirmationOptionKey(option.Key) {
+	if isPaymentComplianceOptionKey(option.Key) {
 		common.ApiSuccess(c, nil)
 		return
 	}

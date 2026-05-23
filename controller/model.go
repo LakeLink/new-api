@@ -218,17 +218,20 @@ func ListModels(c *gin.Context, modelType int) {
 	}
 
 	userModelNames := make([]string, 0)
-	groups, err := getModelListGroups(c)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "get user group failed",
-		})
-		return
-	}
-	ownerGroups := groups.ownerGroups
 	modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+	ownerGroups := make([]string, 0)
 	if modelLimitEnable {
+		tokenGroup := common.GetContextKeyString(c, constant.ContextKeyTokenGroup)
+		userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+		switch {
+		case tokenGroup == "auto" && userGroup != "":
+			ownerGroups = service.GetUserAutoGroup(userGroup)
+		case tokenGroup != "" && tokenGroup != "auto":
+			ownerGroups = []string{tokenGroup}
+		case userGroup != "":
+			ownerGroups = []string{userGroup}
+		}
+
 		s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
 		var tokenModelLimit map[string]bool
 		if ok {
@@ -245,6 +248,16 @@ func ListModels(c *gin.Context, modelType int) {
 			userModelNames = append(userModelNames, allowModel)
 		}
 	} else {
+		groups, err := getModelListGroups(c)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "get user group failed",
+			})
+			return
+		}
+		ownerGroups = groups.ownerGroups
+
 		var models []string
 		if groups.tokenGroup == "auto" {
 			for _, autoGroup := range ownerGroups {

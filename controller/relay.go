@@ -232,6 +232,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		relayInfo.UpstreamRequestBodySize = 0
 
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -569,6 +570,7 @@ func RelayTask(c *gin.Context) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		relayInfo.UpstreamRequestBodySize = 0
 
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
 		if taskErr == nil {

@@ -67,8 +67,9 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
 }
 
 export async function confirmPaymentCompliance() {
-  const res = await api.post<UpdateOptionResponse>(
-    '/api/option/confirm_payment_compliance'
-  )
-  return res.data
+	const res = await api.post<UpdateOptionResponse>(
+		'/api/option/confirm_payment_compliance',
+		{ confirmed: true }
+	)
+	return res.data
 }
