@@ -46,7 +46,7 @@ const ActiveRequests = () => {
   const [completedRetentionSeconds, setCompletedRetentionSeconds] =
     useState(10);
   const [loading, setLoading] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
   const fetchRequests = useCallback(async () => {
     setLoading(true);

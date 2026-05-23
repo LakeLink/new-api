@@ -29,7 +29,7 @@ function formatElapsed(seconds: number): string {
 export function ActiveRequestsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [autoRefresh, setAutoRefresh] = useState(false)
+  const [autoRefresh, setAutoRefresh] = useState(true)
 
   const {
     data: activeRequestsResponse,
