@@ -108,7 +108,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	scanner.Split(bufio.ScanLines)
 	SetEventStreamHeaders(c)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parentCtx := context.Background()
+	if info.RelayCancelCtx != nil {
+		parentCtx = info.RelayCancelCtx
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	ctx = context.WithValue(ctx, "stop_chan", stopChan)
@@ -244,6 +248,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			if !strings.HasPrefix(data, "[DONE]") {
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
+				if info.OnOutputChunk != nil {
+					info.OnOutputChunk()
+				}
 
 				select {
 				case dataChan <- data:

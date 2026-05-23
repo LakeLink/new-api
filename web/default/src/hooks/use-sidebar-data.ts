@@ -141,6 +141,11 @@ export function useSidebarData(): SidebarData {
             icon: Ticket,
           },
           {
+            title: t('Active Requests'),
+            url: '/active-requests',
+            icon: Activity,
+          },
+          {
             title: t('Subscription Management'),
             url: '/subscriptions',
             icon: CreditCard,

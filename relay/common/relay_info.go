@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -171,6 +172,12 @@ type RelayInfo struct {
 	FinalRequestRelayFormat types.RelayFormat
 
 	StreamStatus *StreamStatus
+
+	// RelayCancelCtx/RelayCancelFunc allow admin-initiated termination of active requests.
+	RelayCancelCtx  context.Context
+	RelayCancelFunc context.CancelFunc
+	// OnOutputChunk is called each time an SSE chunk is sent to the client (streaming only).
+	OnOutputChunk func()
 
 	ThinkingContentInfo
 	TokenCountMeta

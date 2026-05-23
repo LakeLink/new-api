@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/active_request_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -123,6 +125,27 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	// Register active request for admin monitoring
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	relayInfo.RelayCancelCtx = ctx
+	relayInfo.RelayCancelFunc = cancel
+	relayInfo.OnOutputChunk = func() {
+		service.GlobalActiveRequestTracker.RecordOutput(requestId)
+	}
+	service.GlobalActiveRequestTracker.Register(relayInfo, c)
+	defer service.GlobalActiveRequestTracker.Deregister(requestId)
+
+	// Auto-timeout: terminate request if it exceeds the configured limit
+	if timeoutSec := active_request_setting.GetActiveRequestSetting().TimeoutSeconds; timeoutSec > 0 {
+		go func() {
+			select {
+			case <-time.After(time.Duration(timeoutSec) * time.Second):
+				service.GlobalActiveRequestTracker.Terminate(requestId)
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.
@@ -149,6 +172,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	relayInfo.SetEstimatePromptTokens(tokens)
+	service.GlobalActiveRequestTracker.UpdateInputTokens(requestId, tokens)
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, tokens, meta)
 	if err != nil {
