@@ -4543,6 +4543,7 @@
     "Ended requests stay visible for": "已结束请求保留显示",
     "Ended": "已结束",
     "Completed request visibility (seconds)": "已结束请求显示时长（秒）",
-    "How long recently ended requests stay visible in the active request monitor": "最近结束的请求在活跃请求监控中保留显示的时长"
+    "How long recently ended requests stay visible in the active request monitor": "最近结束的请求在活跃请求监控中保留显示的时长",
+    "View active and recently completed relay requests.": "查看正在运行和最近结束的中继请求。"
   }
 }

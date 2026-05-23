@@ -4374,6 +4374,7 @@
     "活跃请求": "Yêu cầu đang hoạt động",
     "已结束请求显示时长": "Thời gian hiển thị yêu cầu đã kết thúc",
     "最近结束的请求将在活跃请求页面保留多久": "Thời gian giữ các yêu cầu vừa kết thúc trên trang yêu cầu đang hoạt động",
-    "Username": "Tên người dùng"
+    "Username": "Tên người dùng",
+    "查看正在运行和最近结束的请求": "Xem các yêu cầu đang chạy hoặc vừa kết thúc"
   }
 }

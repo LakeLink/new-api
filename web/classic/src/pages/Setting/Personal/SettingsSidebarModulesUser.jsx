@@ -107,6 +107,7 @@ export default function SettingsSidebarModulesUser() {
         deployment: isSidebarModuleAllowed('admin', 'deployment'),
         redemption: isSidebarModuleAllowed('admin', 'redemption'),
         user: isSidebarModuleAllowed('admin', 'user'),
+        activeRequests: isSidebarModuleAllowed('admin', 'activeRequests'),
         setting: isSidebarModuleAllowed('admin', 'setting'),
       };
     }
@@ -350,6 +351,11 @@ export default function SettingsSidebarModulesUser() {
           description: t('兑换码生成管理'),
         },
         { key: 'user', title: t('用户管理'), description: t('用户账户管理') },
+        {
+          key: 'activeRequests',
+          title: t('活跃请求'),
+          description: t('查看正在运行和最近结束的请求'),
+        },
         {
           key: 'setting',
           title: t('系统设置'),

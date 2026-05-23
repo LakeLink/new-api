@@ -4647,6 +4647,7 @@
     "Ended requests stay visible for": "終了したリクエストの表示時間",
     "Ended": "終了済み",
     "Completed request visibility (seconds)": "終了したリクエストの表示時間（秒）",
-    "How long recently ended requests stay visible in the active request monitor": "最近終了したリクエストをアクティブリクエストモニターに表示しておく時間"
+    "How long recently ended requests stay visible in the active request monitor": "最近終了したリクエストをアクティブリクエストモニターに表示しておく時間",
+    "View active and recently completed relay requests.": "実行中および最近完了したリレーリクエストを表示します。"
   }
 }

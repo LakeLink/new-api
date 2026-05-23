@@ -65,6 +65,7 @@ export default function SettingsSidebarModulesAdmin(props) {
       deployment: true,
       redemption: true,
       user: true,
+      activeRequests: true,
       subscription: true,
       setting: true,
     },
@@ -126,6 +127,7 @@ export default function SettingsSidebarModulesAdmin(props) {
         deployment: true,
         redemption: true,
         user: true,
+        activeRequests: true,
         subscription: true,
         setting: true,
       },
@@ -195,6 +197,7 @@ export default function SettingsSidebarModulesAdmin(props) {
             deployment: true,
             redemption: true,
             user: true,
+            activeRequests: true,
             subscription: true,
             setting: true,
           },
@@ -271,6 +274,11 @@ export default function SettingsSidebarModulesAdmin(props) {
           description: t('兑换码生成管理'),
         },
         { key: 'user', title: t('用户管理'), description: t('用户账户管理') },
+        {
+          key: 'activeRequests',
+          title: t('活跃请求'),
+          description: t('查看正在运行和最近结束的请求'),
+        },
         {
           key: 'setting',
           title: t('系统设置'),
@@ -382,7 +390,8 @@ export default function SettingsSidebarModulesAdmin(props) {
                       <div style={{ marginLeft: '16px' }}>
                         <Switch
                           checked={
-                            sidebarModulesAdmin[section.key]?.[module.key]
+                            sidebarModulesAdmin[section.key]?.[module.key] !==
+                            false
                           }
                           onChange={handleModuleChange(section.key, module.key)}
                           size='default'

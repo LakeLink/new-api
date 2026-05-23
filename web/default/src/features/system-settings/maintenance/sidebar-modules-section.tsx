@@ -136,6 +136,10 @@ export function SidebarModulesSection({
         title: t('Users'),
         description: t('Administer user accounts and roles.'),
       },
+      activeRequests: {
+        title: t('Active Requests'),
+        description: t('View active and recently completed relay requests.'),
+      },
       setting: {
         title: t('System settings'),
         description: t('Advanced platform configuration.'),

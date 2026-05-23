@@ -4002,6 +4002,7 @@
     "活跃请求": "Active Requests",
     "已结束请求显示时长": "Completed request visibility",
     "最近结束的请求将在活跃请求页面保留多久": "How long recently ended requests stay visible on the active requests page",
-    "Username": "Username"
+    "Username": "Username",
+    "查看正在运行和最近结束的请求": "View requests that are running or recently ended"
   }
 }

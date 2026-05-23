@@ -3841,6 +3841,7 @@
     "活跃请求": "Requêtes actives",
     "已结束请求显示时长": "Visibilité des requêtes terminées",
     "最近结束的请求将在活跃请求页面保留多久": "Durée pendant laquelle les requêtes récemment terminées restent visibles sur la page des requêtes actives",
-    "Username": "Nom d'utilisateur"
+    "Username": "Nom d'utilisateur",
+    "查看正在运行和最近结束的请求": "Voir les requêtes en cours ou récemment terminées"
   }
 }
