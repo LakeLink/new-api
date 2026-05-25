@@ -2,13 +2,16 @@ package openai
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -52,8 +55,10 @@ type responsesStreamAccumulator struct {
 	reasoningText strings.Builder
 	usageText     strings.Builder
 
-	terminalStatus   string
-	incompleteReason string
+	terminalStatus     string
+	incompleteReason   string
+	lastOutputDelta    string
+	lastReasoningDelta string
 
 	sawToolCall                 bool
 	toolCallIndexByID           map[string]int
@@ -92,6 +97,8 @@ func (a *responsesStreamAccumulator) Apply(ev *dto.ResponsesStreamResponse) erro
 	a.lastToolCallID = ""
 	a.lastToolCallName = ""
 	a.lastToolCallArgsDelta = ""
+	a.lastOutputDelta = ""
+	a.lastReasoningDelta = ""
 
 	switch ev.Type {
 	case "response.created":
@@ -101,13 +108,19 @@ func (a *responsesStreamAccumulator) Apply(ev *dto.ResponsesStreamResponse) erro
 		if ev.Delta != "" {
 			a.outputText.WriteString(ev.Delta)
 			a.usageText.WriteString(ev.Delta)
+			a.lastOutputDelta = ev.Delta
 		}
+	case "response.output_text.done":
+		a.applyOutputTextDone(ev.Text)
 
 	case "response.reasoning_summary_text.delta":
 		if ev.Delta != "" {
 			a.reasoningText.WriteString(ev.Delta)
 			a.usageText.WriteString(ev.Delta)
+			a.lastReasoningDelta = ev.Delta
 		}
+	case "response.reasoning_summary_text.done":
+		a.applyReasoningSummaryTextDone(ev.Text)
 
 	case "response.output_item.added", "response.output_item.done":
 		a.applyToolCallItem(ev.Item)
@@ -247,6 +260,32 @@ func (a *responsesStreamAccumulator) mergeUsage(response *dto.OpenAIResponsesRes
 	}
 }
 
+func (a *responsesStreamAccumulator) applyOutputTextDone(text string) {
+	if a == nil || text == "" {
+		return
+	}
+	delta := stringDeltaFromPrefix(a.outputText.String(), text)
+	if delta == "" {
+		return
+	}
+	a.outputText.WriteString(delta)
+	a.usageText.WriteString(delta)
+	a.lastOutputDelta = delta
+}
+
+func (a *responsesStreamAccumulator) applyReasoningSummaryTextDone(text string) {
+	if a == nil || text == "" {
+		return
+	}
+	delta := stringDeltaFromPrefix(a.reasoningText.String(), text)
+	if delta == "" {
+		return
+	}
+	a.reasoningText.WriteString(delta)
+	a.usageText.WriteString(delta)
+	a.lastReasoningDelta = delta
+}
+
 func (a *responsesStreamAccumulator) applyToolCallItem(item *dto.ResponsesOutput) {
 	if item == nil || item.Type != "function_call" {
 		return
@@ -380,6 +419,30 @@ func emptyResponsesChatResultError(messageText string, reasoning string, toolCal
 	return types.NewOpenAIError(fmt.Errorf("responses stream returned empty assistant response"), types.ErrorCodeEmptyResponse, http.StatusInternalServerError)
 }
 
+type responsesStreamScanResult struct {
+	line string
+	err  error
+	done bool
+}
+
+func responsesStreamContext(c *gin.Context, info *relaycommon.RelayInfo) context.Context {
+	if info != nil && info.RelayCancelCtx != nil {
+		return info.RelayCancelCtx
+	}
+	if c != nil && c.Request != nil {
+		return c.Request.Context()
+	}
+	return context.Background()
+}
+
+func responsesStreamTimeout() time.Duration {
+	timeout := time.Duration(constant.StreamingTimeout) * time.Second
+	if timeout <= 0 {
+		return helper.DefaultStreamingTimeout
+	}
+	return timeout
+}
+
 func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
@@ -437,7 +500,13 @@ func OaiResponsesToChatStreamToNonStreamHandler(c *gin.Context, info *relaycommo
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 
-	defer service.CloseResponseBodyGracefully(resp)
+	var closeBodyOnce sync.Once
+	closeBody := func() {
+		closeBodyOnce.Do(func() {
+			_ = resp.Body.Close()
+		})
+	}
+	defer closeBody()
 
 	responseId := helper.GetResponseID(c)
 	createdAt := time.Now().Unix()
@@ -447,45 +516,86 @@ func OaiResponsesToChatStreamToNonStreamHandler(c *gin.Context, info *relaycommo
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, helper.InitialScannerBufferSize), helper.DefaultMaxScannerBufferSize)
-	for scanner.Scan() {
-		data := strings.TrimSpace(scanner.Text())
-		if data == "" {
-			continue
-		}
-		if !strings.HasPrefix(data, "data:") && !strings.HasPrefix(data, "[DONE]") && !strings.HasPrefix(data, "event:") {
-			continue
-		}
-		if strings.HasPrefix(data, "event:") {
-			continue
-		}
-		if strings.HasPrefix(data, "data:") {
-			data = strings.TrimSpace(data[5:])
-		}
-		if data == "" || strings.HasPrefix(data, "[DONE]") {
-			break
-		}
+	ctx, cancel := context.WithCancel(responsesStreamContext(c, info))
+	defer cancel()
 
-		var streamResp dto.ResponsesStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {
-			logger.LogError(c, "failed to unmarshal responses stream event: "+err.Error())
-			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
-			break
+	scanResults := make(chan responsesStreamScanResult, 1)
+	go func() {
+		for scanner.Scan() {
+			select {
+			case scanResults <- responsesStreamScanResult{line: scanner.Text()}:
+			case <-ctx.Done():
+				return
+			}
 		}
+		scanResults <- responsesStreamScanResult{err: scanner.Err(), done: true}
+	}()
 
-		info.SetFirstResponseTime()
-		info.ReceivedResponseCount++
+	idleTimer := time.NewTimer(responsesStreamTimeout())
+	defer idleTimer.Stop()
 
-		if err := acc.Apply(&streamResp); err != nil {
-			_, _, _, _, streamErr = acc.Result()
-		}
-		if streamErr != nil {
-			break
+	for {
+		select {
+		case result := <-scanResults:
+			if result.done {
+				if result.err != nil && streamErr == nil {
+					streamErr = types.NewOpenAIError(result.err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+				}
+				goto streamDone
+			}
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(responsesStreamTimeout())
+
+			data := strings.TrimSpace(result.line)
+			if data == "" {
+				continue
+			}
+			if !strings.HasPrefix(data, "data:") && !strings.HasPrefix(data, "[DONE]") && !strings.HasPrefix(data, "event:") {
+				continue
+			}
+			if strings.HasPrefix(data, "event:") {
+				continue
+			}
+			if strings.HasPrefix(data, "data:") {
+				data = strings.TrimSpace(data[5:])
+			}
+			if data == "" || strings.HasPrefix(data, "[DONE]") {
+				goto streamDone
+			}
+
+			var streamResp dto.ResponsesStreamResponse
+			if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {
+				logger.LogError(c, "failed to unmarshal responses stream event: "+err.Error())
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+				goto streamDone
+			}
+
+			info.SetFirstResponseTime()
+			info.ReceivedResponseCount++
+
+			if err := acc.Apply(&streamResp); err != nil {
+				_, _, _, _, streamErr = acc.Result()
+			}
+			if streamErr != nil {
+				goto streamDone
+			}
+		case <-idleTimer.C:
+			closeBody()
+			streamErr = types.NewOpenAIError(fmt.Errorf("responses stream idle timeout"), types.ErrorCodeBadResponse, http.StatusGatewayTimeout)
+			goto streamDone
+		case <-ctx.Done():
+			closeBody()
+			streamErr = types.NewOpenAIError(ctx.Err(), types.ErrorCodeBadResponse, http.StatusGatewayTimeout)
+			goto streamDone
 		}
 	}
-	if err := scanner.Err(); err != nil && streamErr == nil {
-		streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
-	}
 
+streamDone:
 	if streamErr != nil {
 		return nil, streamErr
 	}
@@ -767,51 +877,55 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		switch streamEvent.Type {
 		case "response.created":
 
-		//case "response.reasoning_text.delta":
-		//if !sendReasoningDelta(streamResp.Delta) {
-		//	sr.Stop(streamErr)
-		//	return
-		//}
+			//case "response.reasoning_text.delta":
+			//if !sendReasoningDelta(streamResp.Delta) {
+			//	sr.Stop(streamErr)
+			//	return
+			//}
 
 		//case "response.reasoning_text.done":
 
 		case "response.reasoning_summary_text.delta":
-			if !sendReasoningSummaryDelta(streamEvent.Delta) {
+			if !sendReasoningSummaryDelta(acc.lastReasoningDelta) {
 				sr.Stop(streamErr)
 				return
 			}
 
 		case "response.reasoning_summary_text.done":
+			if !sendReasoningSummaryDelta(acc.lastReasoningDelta) {
+				sr.Stop(streamErr)
+				return
+			}
 			if hasSentReasoningSummary {
 				needsReasoningSummarySeparator = true
 			}
 
-		//case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
-		//	key := responsesStreamIndexKey(strings.TrimSpace(streamResp.ItemID), streamResp.SummaryIndex)
-		//	if key == "" || streamResp.Part == nil {
-		//		break
-		//	}
-		//	// Only handle summary text parts, ignore other part types.
-		//	if streamResp.Part.Type != "" && streamResp.Part.Type != "summary_text" {
-		//		break
-		//	}
-		//	prev := reasoningSummaryTextByKey[key]
-		//	next := streamResp.Part.Text
-		//	delta := stringDeltaFromPrefix(prev, next)
-		//	reasoningSummaryTextByKey[key] = next
-		//	if !sendReasoningSummaryDelta(delta) {
-		//		sr.Stop(streamErr)
-		//		return
-		//	}
+			//case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+			//	key := responsesStreamIndexKey(strings.TrimSpace(streamResp.ItemID), streamResp.SummaryIndex)
+			//	if key == "" || streamResp.Part == nil {
+			//		break
+			//	}
+			//	// Only handle summary text parts, ignore other part types.
+			//	if streamResp.Part.Type != "" && streamResp.Part.Type != "summary_text" {
+			//		break
+			//	}
+			//	prev := reasoningSummaryTextByKey[key]
+			//	next := streamResp.Part.Text
+			//	delta := stringDeltaFromPrefix(prev, next)
+			//	reasoningSummaryTextByKey[key] = next
+			//	if !sendReasoningSummaryDelta(delta) {
+			//		sr.Stop(streamErr)
+			//		return
+			//	}
 
-		case "response.output_text.delta":
-			if streamEvent.Delta != "" {
+		case "response.output_text.delta", "response.output_text.done":
+			if acc.lastOutputDelta != "" {
 				if !sendStartIfNeeded() {
 					sr.Stop(streamErr)
 					return
 				}
 
-				delta := streamEvent.Delta
+				delta := acc.lastOutputDelta
 				chunk := &dto.ChatCompletionsStreamResponse{
 					Id:      acc.responseID,
 					Object:  "chat.completion.chunk",

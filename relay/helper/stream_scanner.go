@@ -24,6 +24,7 @@ import (
 const (
 	InitialScannerBufferSize    = 64 << 10 // 64KB (64*1024)
 	DefaultMaxScannerBufferSize = 64 << 20 // 64MB (64*1024*1024) default SSE buffer size
+	DefaultStreamingTimeout     = 300 * time.Second
 	DefaultPingInterval         = 10 * time.Second
 )
 
@@ -44,14 +45,19 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		info.StreamStatus = relaycommon.NewStreamStatus()
 	}
 
-	// 确保响应体总是被关闭
-	defer func() {
+	var closeBodyOnce sync.Once
+	closeResponseBody := func() {
 		if resp.Body != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
-	}()
+	}
+	// 确保响应体总是被关闭
+	defer closeBodyOnce.Do(closeResponseBody)
 
 	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
+	if streamingTimeout <= 0 {
+		streamingTimeout = DefaultStreamingTimeout
+	}
 
 	var (
 		stopChan   = make(chan bool, 3) // 增加缓冲区避免阻塞
@@ -83,6 +89,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	defer func() {
 		// 通知所有 goroutine 停止
 		common.SafeSendBool(stopChan, true)
+		closeBodyOnce.Do(closeResponseBody)
 
 		ticker.Stop()
 		if pingTicker != nil {
@@ -280,6 +287,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	select {
 	case <-ticker.C:
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
+	case <-ctx.Done():
+		if c.Request != nil && c.Request.Context().Err() != nil {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+		} else {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, ctx.Err())
+		}
 	case <-stopChan:
 		// EndReason already set by the goroutine that triggered stopChan
 	case <-c.Request.Context().Done():

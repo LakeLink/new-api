@@ -134,6 +134,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	service.GlobalActiveRequestTracker.Register(relayInfo, c)
 	defer service.GlobalActiveRequestTracker.Deregister(requestId)
+	defer cancel()
 
 	// Auto-timeout: terminate request if it exceeds the configured limit
 	if timeoutSec := active_request_setting.GetActiveRequestSetting().TimeoutSeconds; timeoutSec > 0 {
@@ -517,6 +518,10 @@ func RelayTask(c *gin.Context) {
 		})
 		return
 	}
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	relayInfo.RelayCancelCtx = ctx
+	relayInfo.RelayCancelFunc = cancel
+	defer cancel()
 
 	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
 		respondTaskError(c, taskErr)

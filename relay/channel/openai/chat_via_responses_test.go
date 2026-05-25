@@ -83,6 +83,15 @@ func responsesMixedTextToolCallStreamDoneBody() string {
 	}, "\n\n")
 }
 
+func responsesDoneTextOnlyStreamBody() string {
+	return strings.Join([]string{
+		`data: {"type":"response.output_text.done","text":"Hello from done"}`,
+		`data: {"type":"response.completed","response":{"id":"resp_done_text","created_at":123,"model":"gpt-test","status":"completed","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}}`,
+		"data: [DONE]",
+		"",
+	}, "\n\n")
+}
+
 func collectSSEData(body string) []string {
 	events := strings.Split(body, "\n\n")
 	data := make([]string, 0, len(events))
@@ -267,6 +276,38 @@ func TestOaiResponsesToChatStreamHandlerPreservesTextAndDoneToolCall(t *testing.
 		!strings.Contains(body, `Paris`) ||
 		!strings.Contains(body, `"finish_reason":"tool_calls"`) {
 		t.Fatalf("expected streamed text and tool call chunks, got %q", body)
+	}
+}
+
+func TestOaiResponsesToChatStreamToNonStreamHandlerUsesDoneText(t *testing.T) {
+	c, recorder, resp, info := setupResponsesChatTest(t, responsesDoneTextOnlyStreamBody())
+
+	usage, err := OaiResponsesToChatStreamToNonStreamHandler(c, info, resp)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if usage == nil || usage.TotalTokens != 7 {
+		t.Fatalf("expected total usage 7, got %#v", usage)
+	}
+	if got := gjson.Get(recorder.Body.String(), "choices.0.message.content").String(); got != "Hello from done" {
+		t.Fatalf("expected done text content, got %q in %s", got, recorder.Body.String())
+	}
+}
+
+func TestOaiResponsesToChatStreamHandlerUsesDoneText(t *testing.T) {
+	c, recorder, resp, info := setupResponsesChatTest(t, responsesDoneTextOnlyStreamBody())
+
+	usage, err := OaiResponsesToChatStreamHandler(c, info, resp)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if usage == nil || usage.TotalTokens != 7 {
+		t.Fatalf("expected total usage 7, got %#v", usage)
+	}
+	if !strings.Contains(recorder.Body.String(), `"content":"Hello from done"`) {
+		t.Fatalf("expected streamed done text chunk, got %q", recorder.Body.String())
 	}
 }
 
