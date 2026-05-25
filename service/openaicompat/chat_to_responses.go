@@ -35,41 +35,52 @@ func normalizeChatImageURLToString(v any) any {
 	}
 }
 
-func convertChatResponseFormatToResponsesText(reqFormat *dto.ResponseFormat) json.RawMessage {
-	if reqFormat == nil || strings.TrimSpace(reqFormat.Type) == "" {
+func convertChatResponseFormatToResponsesText(reqFormat *dto.ResponseFormat, verbosity json.RawMessage) json.RawMessage {
+	if (reqFormat == nil || strings.TrimSpace(reqFormat.Type) == "") && len(verbosity) == 0 {
 		return nil
 	}
 
-	format := map[string]any{
-		"type": reqFormat.Type,
+	text := make(map[string]any)
+
+	if reqFormat != nil && strings.TrimSpace(reqFormat.Type) != "" {
+		format := map[string]any{
+			"type": reqFormat.Type,
+		}
+
+		if reqFormat.Type == "json_schema" && len(reqFormat.JsonSchema) > 0 {
+			var chatSchema map[string]any
+			if err := common.Unmarshal(reqFormat.JsonSchema, &chatSchema); err == nil {
+				for key, value := range chatSchema {
+					if key == "type" {
+						continue
+					}
+					format[key] = value
+				}
+
+				if nested, ok := format["json_schema"].(map[string]any); ok {
+					for key, value := range nested {
+						if _, exists := format[key]; !exists {
+							format[key] = value
+						}
+					}
+					delete(format, "json_schema")
+				}
+			} else {
+				format["json_schema"] = reqFormat.JsonSchema
+			}
+		}
+
+		text["format"] = format
 	}
 
-	if reqFormat.Type == "json_schema" && len(reqFormat.JsonSchema) > 0 {
-		var chatSchema map[string]any
-		if err := common.Unmarshal(reqFormat.JsonSchema, &chatSchema); err == nil {
-			for key, value := range chatSchema {
-				if key == "type" {
-					continue
-				}
-				format[key] = value
-			}
-
-			if nested, ok := format["json_schema"].(map[string]any); ok {
-				for key, value := range nested {
-					if _, exists := format[key]; !exists {
-						format[key] = value
-					}
-				}
-				delete(format, "json_schema")
-			}
-		} else {
-			format["json_schema"] = reqFormat.JsonSchema
+	if len(verbosity) > 0 {
+		var verbosityValue any
+		if err := common.Unmarshal(verbosity, &verbosityValue); err == nil {
+			text["verbosity"] = verbosityValue
 		}
 	}
 
-	textRaw, _ := common.Marshal(map[string]any{
-		"format": format,
-	})
+	textRaw, _ := common.Marshal(text)
 	return textRaw
 }
 
@@ -355,7 +366,7 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		parallelToolCallsRaw, _ = common.Marshal(*req.ParallelTooCalls)
 	}
 
-	textRaw := convertChatResponseFormatToResponsesText(req.ResponseFormat)
+	textRaw := convertChatResponseFormatToResponsesText(req.ResponseFormat, req.Verbosity)
 
 	maxOutputTokens := lo.FromPtrOr(req.MaxTokens, uint(0))
 	maxCompletionTokens := lo.FromPtrOr(req.MaxCompletionTokens, uint(0))
@@ -372,30 +383,57 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		topP = common.GetPointer(lo.FromPtr(req.TopP))
 	}
 
+	var serviceTier string
+	if len(req.ServiceTier) > 0 {
+		_ = common.Unmarshal(req.ServiceTier, &serviceTier)
+	}
+
+	var promptCacheKeyRaw json.RawMessage
+	if req.PromptCacheKey != "" {
+		promptCacheKeyRaw, _ = common.Marshal(req.PromptCacheKey)
+	}
+
+	reasoning := (*dto.Reasoning)(nil)
+	if len(req.Reasoning) > 0 {
+		var parsed dto.Reasoning
+		if err := common.Unmarshal(req.Reasoning, &parsed); err == nil {
+			reasoning = &parsed
+		}
+	}
+	if req.ReasoningEffort != "" {
+		if reasoning == nil {
+			reasoning = &dto.Reasoning{}
+		}
+		reasoning.Effort = req.ReasoningEffort
+		if reasoning.Summary == "" {
+			reasoning.Summary = "detailed"
+		}
+	}
+
 	out := &dto.OpenAIResponsesRequest{
-		Model:             req.Model,
-		Input:             inputRaw,
-		Instructions:      instructionsRaw,
-		Stream:            req.Stream,
-		Temperature:       req.Temperature,
-		Text:              textRaw,
-		ToolChoice:        toolChoiceRaw,
-		Tools:             toolsRaw,
-		TopP:              topP,
-		User:              req.User,
-		ParallelToolCalls: parallelToolCallsRaw,
-		Store:             req.Store,
-		Metadata:          req.Metadata,
+		Model:                req.Model,
+		Input:                inputRaw,
+		Instructions:         instructionsRaw,
+		Stream:               req.Stream,
+		StreamOptions:        req.StreamOptions,
+		Temperature:          req.Temperature,
+		Text:                 textRaw,
+		ToolChoice:           toolChoiceRaw,
+		Tools:                toolsRaw,
+		TopP:                 topP,
+		TopLogProbs:          req.TopLogProbs,
+		User:                 req.User,
+		ParallelToolCalls:    parallelToolCallsRaw,
+		Store:                req.Store,
+		ServiceTier:          serviceTier,
+		PromptCacheKey:       promptCacheKeyRaw,
+		PromptCacheRetention: req.PromptCacheRetention,
+		SafetyIdentifier:     req.SafetyIdentifier,
+		Metadata:             req.Metadata,
+		Reasoning:            reasoning,
 	}
 	if req.MaxTokens != nil || req.MaxCompletionTokens != nil {
 		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
-	}
-
-	if req.ReasoningEffort != "" {
-		out.Reasoning = &dto.Reasoning{
-			Effort:  req.ReasoningEffort,
-			Summary: "detailed",
-		}
 	}
 
 	return out, nil

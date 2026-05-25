@@ -91,6 +91,69 @@ func TestChatCompletionsRequestToResponsesRequestConvertsToolCallingConversation
 	}
 }
 
+func TestChatCompletionsRequestToResponsesRequestPreservesOptions(t *testing.T) {
+	stream := true
+	topLogProbs := 3
+	req := &dto.GeneralOpenAIRequest{
+		Model:                "gpt-test",
+		Messages:             []dto.Message{{Role: "user", Content: "hello"}},
+		Stream:               &stream,
+		StreamOptions:        &dto.StreamOptions{IncludeUsage: true},
+		TopLogProbs:          &topLogProbs,
+		ServiceTier:          []byte(`"flex"`),
+		PromptCacheKey:       "cache-key",
+		PromptCacheRetention: []byte(`"24h"`),
+		SafetyIdentifier:     []byte(`"user-123"`),
+		Verbosity:            []byte(`"low"`),
+		Reasoning:            []byte(`{"effort":"medium","summary":"auto"}`),
+		Store:                []byte(`false`),
+		Metadata:             []byte(`{"trace":"abc"}`),
+	}
+
+	got, err := ChatCompletionsRequestToResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got.StreamOptions == nil || !got.StreamOptions.IncludeUsage {
+		t.Fatalf("expected stream_options.include_usage=true, got %#v", got.StreamOptions)
+	}
+	if got.TopLogProbs == nil || *got.TopLogProbs != topLogProbs {
+		t.Fatalf("expected top_logprobs=%d, got %#v", topLogProbs, got.TopLogProbs)
+	}
+	if got.ServiceTier != "flex" {
+		t.Fatalf("expected service_tier flex, got %q", got.ServiceTier)
+	}
+	if common.JsonRawMessageToString(got.PromptCacheKey) != "cache-key" {
+		t.Fatalf("expected prompt_cache_key to be preserved, got %s", string(got.PromptCacheKey))
+	}
+	if common.JsonRawMessageToString(got.PromptCacheRetention) != "24h" {
+		t.Fatalf("expected prompt_cache_retention to be preserved, got %s", string(got.PromptCacheRetention))
+	}
+	if common.JsonRawMessageToString(got.SafetyIdentifier) != "user-123" {
+		t.Fatalf("expected safety_identifier to be preserved, got %s", string(got.SafetyIdentifier))
+	}
+	if common.JsonRawMessageToString(got.Store) != "false" {
+		t.Fatalf("expected store=false, got %s", string(got.Store))
+	}
+	if got.Reasoning == nil || got.Reasoning.Effort != "medium" || got.Reasoning.Summary != "auto" {
+		t.Fatalf("expected reasoning to be preserved, got %#v", got.Reasoning)
+	}
+
+	var text map[string]any
+	if err := common.Unmarshal(got.Text, &text); err != nil {
+		t.Fatalf("failed to unmarshal text options: %v", err)
+	}
+	if text["verbosity"] != "low" {
+		t.Fatalf("expected text.verbosity low, got %#v", text["verbosity"])
+	}
+
+	var metadata map[string]any
+	if err := common.Unmarshal(got.Metadata, &metadata); err != nil {
+		t.Fatalf("failed to unmarshal metadata: %v", err)
+	}
+	assertMapString(t, metadata, "trace", "abc")
+}
+
 func weatherTools() []dto.ToolCallRequest {
 	return []dto.ToolCallRequest{
 		{
