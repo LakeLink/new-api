@@ -131,8 +131,8 @@ export function useNotifications() {
   const handleOpenPopover = (tab?: 'notice' | 'announcements') => {
     const nextTab = tab || activeTab
 
-    // Mark currently visible content as read when opening the notification center
-    if (noticeContent) {
+    // Mark only the tab the user is actually opening as read.
+    if (nextTab === 'notice' && noticeContent) {
       markNoticeRead(noticeContent)
     }
     if (nextTab === 'announcements') {
