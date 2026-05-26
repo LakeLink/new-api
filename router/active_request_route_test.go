@@ -3,9 +3,11 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/active_request_setting"
 	"github.com/gin-contrib/sessions"
@@ -39,6 +41,13 @@ func TestActiveRequestsRouteIsRegistered(t *testing.T) {
 		c.Next()
 	})
 	SetApiRouter(router)
+	router.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.RequestURI, "/api") {
+			controller.RelayNotFound(c)
+			return
+		}
+		c.Status(http.StatusNotFound)
+	})
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/active-requests", nil)

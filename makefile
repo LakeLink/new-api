@@ -42,7 +42,7 @@ dev-web-classic:
 	@echo "Starting classic frontend dev server..."
 	@cd $(FRONTEND_CLASSIC_DIR) && bun install && bun run dev
 
-dev: dev-api dev-web
+dev: dev-api-rebuild dev-web
 
 reset-setup:
 	@echo "Resetting local setup wizard state..."
