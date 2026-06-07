@@ -218,6 +218,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
+			relayInfo.LastError = newAPIError
+			if _, ok := c.Get("specific_channel_id"); ok {
+				break
+			}
+			if shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+				continue
+			}
 			break
 		}
 
@@ -315,8 +322,53 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
+func isOpenAIProtocolFormat(format types.RelayFormat) bool {
+	switch format {
+	case types.RelayFormatOpenAI,
+		types.RelayFormatOpenAIResponses,
+		types.RelayFormatOpenAIResponsesCompaction,
+		types.RelayFormatOpenAIAudio,
+		types.RelayFormatOpenAIImage,
+		types.RelayFormatOpenAIRealtime,
+		types.RelayFormatEmbedding:
+		return true
+	}
+	return false
+}
+
+func isAnthropicProtocolFormat(format types.RelayFormat) bool {
+	return format == types.RelayFormatClaude
+}
+
+func shouldRejectCrossProtocol(channelType int, channelSetting dto.ChannelSettings, requestFormat types.RelayFormat) bool {
+	if !channelSetting.DenyCrossProtocol {
+		return false
+	}
+
+	if channelType == constant.ChannelTypeOpenAI {
+		return isAnthropicProtocolFormat(requestFormat)
+	}
+
+	if channelType == constant.ChannelTypeAnthropic {
+		return isOpenAIProtocolFormat(requestFormat)
+	}
+
+	return false
+}
+
+func newChannelProtocolMismatchError(channelType int, requestFormat types.RelayFormat) *types.NewAPIError {
+	return types.NewError(fmt.Errorf("channel protocol mismatch: channel type %d is configured to deny cross-protocol requests and cannot process relay format %s", channelType, requestFormat), types.ErrorCodeChannelProtocolMismatch)
+}
+
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil {
+		channelType := c.GetInt("channel_type")
+		channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		finalRequestFormat := info.GetFinalRequestRelayFormat()
+		if shouldRejectCrossProtocol(channelType, channelSetting, finalRequestFormat) {
+			info.InitChannelMeta(c)
+			return nil, newChannelProtocolMismatchError(channelType, finalRequestFormat)
+		}
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -343,6 +395,12 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
 		return nil, newAPIError
+	}
+
+	channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+	finalRequestFormat := info.GetFinalRequestRelayFormat()
+	if shouldRejectCrossProtocol(channel.Type, channelSetting, finalRequestFormat) {
+		return nil, newChannelProtocolMismatchError(channel.Type, finalRequestFormat)
 	}
 	return channel, nil
 }

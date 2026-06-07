@@ -8,6 +8,7 @@ type ChannelSettings struct {
 	NonStreamUpstreamStream bool   `json:"non_stream_upstream_stream,omitempty"`
 	SystemPrompt            string `json:"system_prompt,omitempty"`
 	SystemPromptOverride    bool   `json:"system_prompt_override,omitempty"`
+	DenyCrossProtocol       bool   `json:"deny_cross_protocol,omitempty"`
 }
 
 type VertexKeyType string
