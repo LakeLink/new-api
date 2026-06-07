@@ -218,6 +218,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
     values.system_prompt_override ||
+    values.deny_cross_protocol ||
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
     values.upstream_model_update_auto_sync_enabled ||
@@ -2899,6 +2900,31 @@ export function ChannelMutateDrawer({
                           />
 
                           <div className='divide-border space-y-0 divide-y border-y'>
+                            <FormField
+                              control={form.control}
+                              name='deny_cross_protocol'
+                              render={({ field }) => (
+                                <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                  <div className='space-y-0.5'>
+                                    <FormLabel>
+                                      {t('Disallow cross-protocol conversion')}
+                                    </FormLabel>
+                                    <FormDescription>
+                                      {t(
+                                        'If enabled, this channel refuses requests converted from another protocol family'
+                                      )}
+                                    </FormDescription>
+                                  </div>
+                                  <FormControl>
+                                    <Switch
+                                      checked={field.value}
+                                      onCheckedChange={field.onChange}
+                                    />
+                                  </FormControl>
+                                </FormItem>
+                              )}
+                            />
+
                             <FormField
                               control={form.control}
                               name='allow_service_tier'

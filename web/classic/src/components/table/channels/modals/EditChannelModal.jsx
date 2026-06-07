@@ -196,6 +196,7 @@ const EditChannelModal = (props) => {
     non_stream_upstream_stream: false,
     system_prompt: '',
     system_prompt_override: false,
+    deny_cross_protocol: false,
     settings: '',
     // 仅 Vertex: 密钥格式（存入 settings.vertex_key_type）
     vertex_key_type: 'json',
@@ -519,6 +520,8 @@ const EditChannelModal = (props) => {
     proxy: '',
     pass_through_body_enabled: false,
     system_prompt: '',
+    system_prompt_override: false,
+    deny_cross_protocol: false,
   });
   const showApiConfigCard = true; // 控制是否显示 API 配置卡片
   const getInitValues = () => ({ ...originInputs });
@@ -874,6 +877,8 @@ const EditChannelModal = (props) => {
           data.system_prompt = parsedSettings.system_prompt || '';
           data.system_prompt_override =
             parsedSettings.system_prompt_override || false;
+          data.deny_cross_protocol =
+            parsedSettings.deny_cross_protocol || false;
         } catch (error) {
           console.error('解析渠道设置失败:', error);
           data.force_format = false;
@@ -883,6 +888,7 @@ const EditChannelModal = (props) => {
           data.non_stream_upstream_stream = false;
           data.system_prompt = '';
           data.system_prompt_override = false;
+          data.deny_cross_protocol = false;
         }
       } else {
         data.force_format = false;
@@ -892,6 +898,7 @@ const EditChannelModal = (props) => {
         data.non_stream_upstream_stream = false;
         data.system_prompt = '';
         data.system_prompt_override = false;
+        data.deny_cross_protocol = false;
       }
 
       if (data.settings) {
@@ -1002,6 +1009,7 @@ const EditChannelModal = (props) => {
         non_stream_upstream_stream: data.non_stream_upstream_stream,
         system_prompt: data.system_prompt,
         system_prompt_override: data.system_prompt_override || false,
+        deny_cross_protocol: data.deny_cross_protocol || false,
       });
       initialModelsRef.current = (data.models || [])
         .map((model) => (model || '').trim())
@@ -1040,6 +1048,7 @@ const EditChannelModal = (props) => {
         (data.weight && data.weight !== 0) ||
         (data.proxy && data.proxy.trim()) ||
         (data.system_prompt && data.system_prompt.trim()) ||
+        data.deny_cross_protocol ||
         data.thinking_to_content ||
         data.pass_through_body_enabled ||
         data.non_stream_upstream_stream ||
@@ -1393,6 +1402,7 @@ const EditChannelModal = (props) => {
       non_stream_upstream_stream: false,
       system_prompt: '',
       system_prompt_override: false,
+      deny_cross_protocol: false,
     });
     // 重置密钥模式状态
     setKeyMode('append');
@@ -1764,6 +1774,7 @@ const EditChannelModal = (props) => {
       non_stream_upstream_stream: localInputs.non_stream_upstream_stream || false,
       system_prompt: localInputs.system_prompt || '',
       system_prompt_override: localInputs.system_prompt_override || false,
+      deny_cross_protocol: localInputs.deny_cross_protocol || false,
     };
     localInputs.setting = JSON.stringify(channelExtraSettings);
 
@@ -1846,6 +1857,7 @@ const EditChannelModal = (props) => {
     delete localInputs.non_stream_upstream_stream;
     delete localInputs.system_prompt;
     delete localInputs.system_prompt_override;
+    delete localInputs.deny_cross_protocol;
     delete localInputs.is_enterprise_account;
     // 顶层的 vertex_key_type 不应发送给后端
     delete localInputs.vertex_key_type;
@@ -2501,6 +2513,16 @@ const EditChannelModal = (props) => {
                       <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
                         {t('字段透传控制')}
                       </div>
+                      <Form.Switch
+                        field='deny_cross_protocol'
+                        label={t('禁止跨协议转换')}
+                        checkedText={t('开')}
+                        uncheckedText={t('关')}
+                        onChange={(value) =>
+                          handleChannelSettingsChange('deny_cross_protocol', value)
+                        }
+                        extraText={t('开启后拒绝接收来自非 OpenAI 族协议的请求')}
+                      />
                       <Form.Switch field='allow_service_tier' label={t('允许 service_tier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_service_tier', value)} extraText={t('service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用')} />
                       <Form.Switch field='disable_store' label={t('禁用 store 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('disable_store', value)} extraText={t('store 字段用于授权 OpenAI 存储请求数据以评估和优化产品。默认关闭，开启后可能导致 Codex 无法正常使用')} />
                       <Form.Switch field='allow_safety_identifier' label={t('允许 safety_identifier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_safety_identifier', value)} extraText={t('safety_identifier 字段用于帮助 OpenAI 识别可能违反使用政策的应用程序用户。默认关闭以保护用户隐私')} />
@@ -2513,6 +2535,16 @@ const EditChannelModal = (props) => {
                       <div className='mt-4 mb-2 text-sm font-medium text-gray-700'>
                         {t('字段透传控制')}
                       </div>
+                      <Form.Switch
+                        field='deny_cross_protocol'
+                        label={t('禁止跨协议转换')}
+                        checkedText={t('开')}
+                        uncheckedText={t('关')}
+                        onChange={(value) =>
+                          handleChannelSettingsChange('deny_cross_protocol', value)
+                        }
+                        extraText={t('开启后拒绝接收来自非 Claude 族协议的请求')}
+                      />
                       <Form.Switch field='allow_service_tier' label={t('允许 service_tier 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_service_tier', value)} extraText={t('service_tier 字段用于指定服务层级，允许透传可能导致实际计费高于预期。默认关闭以避免额外费用')} />
                       <Form.Switch field='allow_inference_geo' label={t('允许 inference_geo 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_inference_geo', value)} extraText={t('inference_geo 字段用于控制 Claude 数据驻留推理区域。默认关闭以避免未经授权透传地域信息')} />
                       <Form.Switch field='allow_speed' label={t('允许 speed 透传')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelOtherSettingsChange('allow_speed', value)} extraText={t('speed 字段用于控制 Claude 推理速度模式。默认关闭以避免意外切换到 fast 模式')} />
