@@ -16,19 +16,22 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-/* eslint-disable react-refresh/only-export-components */
-import { useState } from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { Zap } from 'lucide-react'
-import { formatTimestampToDate, formatTokens } from '@/lib/format'
+/* eslint-disable react-refresh/only-export-components */
+import { useState } from 'react'
+
+import { DataTableColumnHeader } from '@/components/data-table'
+import { StatusBadge } from '@/components/status-badge'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { DataTableColumnHeader } from '@/components/data-table'
-import { StatusBadge } from '@/components/status-badge'
+import { formatTimestampToDate, formatTokens } from '@/lib/format'
+import { cn } from '@/lib/utils'
+
 import { formatDuration } from '../../lib/format'
 import { FailReasonDialog } from '../dialogs/fail-reason-dialog'
 
@@ -134,13 +137,22 @@ export function createDurationColumn<T>(config: {
       const variant =
         duration.durationSec > warningThresholdSec ? 'danger' : 'success'
 
+      const durationBgMap: Record<string, string> = {
+        success:
+          'border border-emerald-200/40 bg-emerald-50/35 !text-emerald-600 dark:border-emerald-900/40 dark:bg-emerald-950/15 dark:!text-emerald-400',
+        warning:
+          'border border-amber-200/45 bg-amber-50/35 !text-amber-600 dark:border-amber-900/40 dark:bg-amber-950/15 dark:!text-amber-400',
+        danger:
+          'border border-rose-200/50 bg-rose-50/35 !text-red-600 dark:border-rose-900/40 dark:bg-rose-950/15 dark:!text-red-400',
+      }
+
       return (
         <StatusBadge
           label={`${duration.durationSec.toFixed(1)}s`}
           variant={variant}
           size='sm'
           copyable={false}
-          className='font-mono'
+          className={cn('rounded-md font-mono', durationBgMap[variant])}
         />
       )
     },
@@ -173,6 +185,7 @@ export function createChannelColumn<T>(config: {
           autoColor={String(channelId)}
           copyText={String(channelId)}
           size='sm'
+          showDot={false}
           className='font-mono'
         />
       )

@@ -15,6 +15,7 @@ type RetryParam struct {
 	Ctx          *gin.Context
 	TokenGroup   string
 	ModelName    string
+	RequestPath  string
 	Retry        *int
 	resetNextTry bool
 }
@@ -60,7 +61,7 @@ func tryGroupFallbackChannel(param *RetryParam) (*model.Channel, string) {
 	}
 
 	for _, fbGroup := range fallbackRule.Fallback {
-		ch, fbErr := model.GetRandomSatisfiedChannel(fbGroup, param.ModelName, param.GetRetry())
+		ch, fbErr := model.GetRandomSatisfiedChannel(fbGroup, param.ModelName, param.GetRetry(), param.RequestPath)
 		if fbErr != nil {
 			continue
 		}
@@ -145,7 +146,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry)
+			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -184,7 +185,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		}
 	} else {
 		clearFallbackSelection(param.Ctx)
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry())
+		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
 		if err != nil {
 			if ch, fbGroup := tryGroupFallbackChannel(param); ch != nil {
 				return ch, fbGroup, nil

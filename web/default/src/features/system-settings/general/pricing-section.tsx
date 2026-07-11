@@ -16,11 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import * as z from 'zod'
-import type { Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { Resolver } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
-import { DEFAULT_CURRENCY_CONFIG } from '@/stores/system-config-store'
+import * as z from 'zod'
+
 import {
   Form,
   FormControl,
@@ -40,6 +40,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { DEFAULT_CURRENCY_CONFIG } from '@/stores/system-config-store'
+
 import { FormDirtyIndicator } from '../components/form-dirty-indicator'
 import { FormNavigationGuard } from '../components/form-navigation-guard'
 import {
@@ -51,6 +53,7 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { safeNumberFieldProps } from '../utils/numeric-field'
 
 const createPricingSchema = (t: (key: string) => string) =>
   z
@@ -243,11 +246,7 @@ export function PricingSection({ defaultValues }: PricingSectionProps) {
                       <Input
                         type='number'
                         step='0.01'
-                        value={field.value as number}
-                        onChange={(e) => field.onChange(e.target.valueAsNumber)}
-                        name={field.name}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
+                        {...safeNumberFieldProps(field)}
                       />
                     </FormControl>
                     <FormDescription>

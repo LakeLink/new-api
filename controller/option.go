@@ -28,14 +28,6 @@ var completionRatioMetaOptionKeys = []string{
 	"AudioCompletionRatio",
 }
 
-func isHiddenPaymentComplianceOptionKey(key string) bool {
-	return key == "payment_setting.compliance_confirmed_ip"
-}
-
-func isPaymentComplianceOptionKey(key string) bool {
-	return strings.HasPrefix(key, "payment_setting.compliance_")
-}
-
 func isVisiblePublicKeyOption(key string) bool {
 	switch key {
 	case "WaffoPancakeWebhookPublicKey", "WaffoPancakeWebhookTestKey":
@@ -92,9 +84,6 @@ func GetOptions(c *gin.Context) {
 	optionValues := make(map[string]string)
 	common.OptionMapRWMutex.Lock()
 	for k, v := range common.OptionMap {
-		if isHiddenPaymentComplianceOptionKey(k) {
-			continue
-		}
 		value := common.Interface2String(v)
 		isSensitiveKey := strings.HasSuffix(k, "Token") ||
 			strings.HasSuffix(k, "Secret") ||
@@ -151,10 +140,6 @@ func UpdateOption(c *gin.Context) {
 		option.Value = common.Interface2String(option.Value.(int))
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
-	}
-	if isPaymentComplianceOptionKey(option.Key) {
-		common.ApiSuccess(c, nil)
-		return
 	}
 	switch option.Key {
 	case "GitHubOAuthEnabled":
@@ -352,6 +337,10 @@ func UpdateOption(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// 出于安全考虑只记录被修改的配置项名称，不记录配置值（可能含密钥等敏感信息）。
+	recordManageAudit(c, "option.update", map[string]interface{}{
+		"key": option.Key,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

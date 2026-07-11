@@ -1,3 +1,4 @@
+import type { LucideIcon } from 'lucide-react'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -18,10 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 /* eslint-disable react-refresh/only-export-components */
 import * as React from 'react'
-import { type LucideIcon } from 'lucide-react'
+
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { stringToColor } from '@/lib/colors'
 import { cn } from '@/lib/utils'
-import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 
 export const dotColorMap = {
   success: 'bg-success',
@@ -37,7 +38,7 @@ export const dotColorMap = {
   grey: 'bg-neutral',
   indigo: 'bg-chart-1',
   'light-blue': 'bg-info',
-  'light-green': 'bg-success',
+  'light-green': 'bg-emerald-400',
   lime: 'bg-chart-3',
   orange: 'bg-warning',
   pink: 'bg-chart-5',
@@ -61,7 +62,7 @@ export const textColorMap = {
   grey: 'text-muted-foreground',
   indigo: 'text-chart-1',
   'light-blue': 'text-info',
-  'light-green': 'text-success',
+  'light-green': 'text-emerald-500 dark:text-emerald-300',
   lime: 'text-chart-3',
   orange: 'text-warning',
   pink: 'text-chart-5',
@@ -73,34 +74,28 @@ export const textColorMap = {
 
 export type StatusVariant = keyof typeof dotColorMap
 
+/** Controls the visual style of the badge.
+ * - `badge`    — default pill with background and padding (default)
+ * - `text`     — plain text, no background or padding, only color
+ * - `underline`— plain text with a bottom border underline
+ */
+export type StatusBadgeType = 'badge' | 'text' | 'underline'
+
+/** Context that lets ancestor components (e.g. MobileCardList field area)
+ *  override the badge type without modifying every call site. */
+export const StatusBadgeTypeContext =
+  React.createContext<StatusBadgeType>('badge')
+
 const sizeMap = {
-  sm: 'h-5 gap-1 px-2 text-xs leading-none',
-  md: 'h-6 gap-1 px-2 text-xs leading-none',
-  lg: 'h-7 gap-1.5 px-2.5 text-sm leading-none',
+  sm: 'h-5 gap-1 px-1.5 text-sm leading-none',
+  md: 'h-5 gap-1 px-1.5 text-sm leading-none',
+  lg: 'h-6 gap-1.5 px-2 text-sm leading-none',
 } as const
 
-const badgeSurfaceMap = {
-  success: 'bg-success/10 text-success',
-  warning: 'bg-warning/10 text-warning',
-  danger: 'bg-destructive/10 text-destructive',
-  info: 'bg-info/10 text-info',
-  neutral: 'bg-muted text-muted-foreground',
-  purple: 'bg-chart-4/10 text-chart-4',
-  amber: 'bg-warning/10 text-warning',
-  blue: 'bg-chart-1/10 text-chart-1',
-  cyan: 'bg-chart-2/10 text-chart-2',
-  green: 'bg-success/10 text-success',
-  grey: 'bg-muted text-muted-foreground',
-  indigo: 'bg-chart-1/10 text-chart-1',
-  'light-blue': 'bg-info/10 text-info',
-  'light-green': 'bg-success/10 text-success',
-  lime: 'bg-chart-3/10 text-chart-3',
-  orange: 'bg-warning/10 text-warning',
-  pink: 'bg-chart-5/10 text-chart-5',
-  red: 'bg-destructive/10 text-destructive',
-  teal: 'bg-chart-2/10 text-chart-2',
-  violet: 'bg-chart-4/10 text-chart-4',
-  yellow: 'bg-warning/10 text-warning',
+const textSizeMap = {
+  sm: 'gap-1 text-sm leading-none',
+  md: 'gap-1 text-sm leading-none',
+  lg: 'gap-1.5 text-sm leading-none',
 } as const
 
 export interface StatusBadgeProps extends Omit<
@@ -118,6 +113,8 @@ export interface StatusBadgeProps extends Omit<
   copyable?: boolean
   copyText?: string
   autoColor?: string
+  /** Visual style. Defaults to 'badge'. Can be overridden via StatusBadgeTypeContext. */
+  type?: StatusBadgeType
 }
 
 export function StatusBadge({
@@ -131,12 +128,14 @@ export function StatusBadge({
   copyable = true,
   copyText,
   autoColor,
+  type: typeProp,
   className,
   onClick,
   ...props
 }: StatusBadgeProps) {
   const { copyToClipboard } = useCopyToClipboard()
-  void showDot
+  const contextType = React.useContext(StatusBadgeTypeContext)
+  const type = typeProp ?? contextType
 
   const computedVariant: StatusVariant = autoColor
     ? (stringToColor(autoColor) as StatusVariant)
@@ -151,24 +150,47 @@ export function StatusBadge({
   }
 
   const content =
-    children ?? (label ? <span className='truncate'>{label}</span> : null)
+    children ??
+    (label ? (
+      <span className='min-w-0 truncate leading-normal'>{label}</span>
+    ) : null)
+
+  const isBadge = type === 'badge'
+  const title = copyable
+    ? `Click to copy: ${copyText || label || ''}`
+    : label || undefined
 
   return (
     <span
+      data-slot='status-badge'
       className={cn(
-        'inline-flex w-fit max-w-full shrink-0 items-center rounded-full font-medium tracking-normal whitespace-nowrap transition-colors',
-        sizeMap[size ?? 'sm'],
-        badgeSurfaceMap[computedVariant],
+        'inline-flex w-fit max-w-full min-w-0 shrink items-center font-medium tracking-normal whitespace-nowrap transition-colors',
+        isBadge
+          ? cn('rounded-4xl', sizeMap[size ?? 'sm'])
+          : cn(
+              textSizeMap[size ?? 'sm'],
+              type === 'underline' && 'border-b border-current pb-px'
+            ),
+        textColorMap[computedVariant],
         pulse && 'animate-pulse',
         copyable &&
           'cursor-copy hover:brightness-95 active:scale-95 dark:hover:brightness-110',
         className
       )}
       onClick={handleClick}
-      title={copyable ? `Click to copy: ${copyText || label || ''}` : undefined}
+      title={title}
       {...props}
     >
-      {Icon && <Icon className='size-3 shrink-0' />}
+      {showDot && (
+        <span
+          className={cn(
+            'inline-block size-1.5 shrink-0 rounded-full',
+            dotColorMap[computedVariant]
+          )}
+          aria-hidden='true'
+        />
+      )}
+      {Icon && <Icon className='size-3.5 shrink-0' />}
       {content}
     </span>
   )
@@ -208,7 +230,7 @@ export function StatusBadgeList<T>(props: StatusBadgeListProps<T>) {
   return (
     <div
       className={cn(
-        'flex max-w-full items-center gap-1 overflow-hidden',
+        'flex max-w-full min-w-0 items-center gap-1 overflow-hidden',
         className
       )}
       {...domProps}

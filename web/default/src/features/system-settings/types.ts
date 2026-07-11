@@ -1,3 +1,6 @@
+Failed to create stream fd: Operation not permitted
+Failed to create stream fd: Operation not permitted
+Failed to create stream fd: Operation not permitted
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -39,10 +42,60 @@ export type UpdateOptionResponse = {
   message: string
 }
 
-export type DeleteLogsResponse = {
+export type SystemTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed'
+
+export type SystemTask<
+  TPayload = Record<string, unknown>,
+  TState = Record<string, unknown>,
+  TResult = Record<string, unknown>,
+> = {
+  id: number
+  task_id: string
+  type: string
+  status: SystemTaskStatus
+  active_key?: string
+  payload?: TPayload
+  state?: TState
+  result?: TResult
+  error?: string
+  locked_by?: string
+  locked_until?: number
+  created_at: number
+  updated_at: number
+}
+
+export type LogCleanupTaskPayload = {
+  target_timestamp: number
+  batch_size: number
+}
+
+export type LogCleanupTaskState = {
+  total: number
+  processed: number
+  progress: number
+  remaining: number
+}
+
+export type LogCleanupTaskResult = {
+  deleted_count: number
+}
+
+export type LogCleanupTask = SystemTask<
+  LogCleanupTaskPayload,
+  LogCleanupTaskState,
+  LogCleanupTaskResult
+>
+
+export type SystemTaskResponse<TTask = SystemTask | null> = {
   success: boolean
   message: string
-  data?: number
+  data?: TTask
+}
+
+export type SystemTaskListResponse = {
+  success: boolean
+  message: string
+  data?: SystemTask[]
 }
 
 export type SiteSettings = {
@@ -161,10 +214,22 @@ export type ModelSettings = {
   UserUsableGroups: string
   GroupGroupRatio: string
   AutoGroups: string
+  GroupFallback: string
   DefaultUseAutoGroup: boolean
   'group_ratio_setting.group_special_usable_group': string
+  RetryTimes: number
+  ChannelDisableThreshold: string
+  AutomaticDisableChannelEnabled: boolean
+  AutomaticEnableChannelEnabled: boolean
+  AutomaticDisableKeywords: string
+  AutomaticDisableStatusCodes: string
+  AutomaticRetryStatusCodes: string
+  'monitor_setting.auto_test_channel_enabled': boolean
+  'monitor_setting.auto_test_channel_minutes': number
+  'monitor_setting.channel_test_mode': 'scheduled_all' | 'passive_recovery'
   'channel_affinity_setting.enabled': boolean
   'channel_affinity_setting.switch_on_success': boolean
+  'channel_affinity_setting.keep_on_channel_disabled': boolean
   'channel_affinity_setting.max_entries': number
   'channel_affinity_setting.default_ttl_seconds': number
   'channel_affinity_setting.rules': string
@@ -204,7 +269,6 @@ export type BillingSettings = {
   UserUsableGroups: string
   GroupGroupRatio: string
   AutoGroups: string
-  GroupFallback: string
   DefaultUseAutoGroup: boolean
   'group_ratio_setting.group_special_usable_group': string
   PayAddress: string
@@ -226,10 +290,6 @@ export type BillingSettings = {
   CreemWebhookSecret: string
   CreemTestMode: boolean
   CreemProducts: string
-  'payment_setting.compliance_confirmed': boolean
-  'payment_setting.compliance_terms_version': string
-  'payment_setting.compliance_confirmed_at': number
-  'payment_setting.compliance_confirmed_by': number
   WaffoEnabled: boolean
   WaffoApiKey: string
   WaffoPrivateKey: string
@@ -258,32 +318,25 @@ export type BillingSettings = {
 }
 
 export type OperationsSettings = {
-  RetryTimes: number
   DefaultCollapseSidebar: boolean
   DemoSiteEnabled: boolean
   SelfUseModeEnabled: boolean
-  ChannelDisableThreshold: string
   QuotaRemindThreshold: string
-  AutomaticDisableChannelEnabled: boolean
-  AutomaticEnableChannelEnabled: boolean
-  AutomaticDisableKeywords: string
-  AutomaticDisableStatusCodes: string
-  AutomaticRetryStatusCodes: string
-  'monitor_setting.auto_test_channel_enabled': boolean
-  'monitor_setting.auto_test_channel_minutes': number
-  'active_request_setting.completed_retention_seconds': number
   SMTPServer: string
   SMTPPort: string
   SMTPAccount: string
   SMTPFrom: string
   SMTPToken: string
   SMTPSSLEnabled: boolean
+  SMTPStartTLSEnabled: boolean
+  SMTPInsecureSkipVerify: boolean
   SMTPForceAuthLogin: boolean
   WorkerUrl: string
   WorkerValidKey: string
   WorkerAllowHttpImageRequestEnabled: boolean
   LogConsumeEnabled: boolean
   LogExportPermission: '10' | '100'
+  'active_request_setting.completed_retention_seconds': number
   'performance_setting.disk_cache_enabled': boolean
   'performance_setting.disk_cache_threshold_mb': number
   'performance_setting.disk_cache_max_size_mb': number
@@ -315,6 +368,7 @@ export type SecuritySettings = {
   'fetch_setting.ip_list': string[]
   'fetch_setting.allowed_ports': number[]
   'fetch_setting.apply_ip_filter_for_domain': boolean
+  'token_setting.max_user_tokens': number
 }
 
 export type UpstreamChannel = {
