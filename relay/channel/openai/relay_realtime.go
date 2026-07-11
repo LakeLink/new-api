@@ -2,6 +2,7 @@ package openai
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -24,6 +25,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	info.IsStream = true
 	clientConn := info.ClientWs
 	targetConn := info.TargetWs
+	relayCtx := c.Request.Context()
+	if info.RelayCancelCtx != nil {
+		relayCtx = info.RelayCancelCtx
+	}
 
 	clientClosed := make(chan struct{})
 	targetClosed := make(chan struct{})
@@ -34,6 +39,23 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	usage := &dto.RealtimeUsage{}
 	localUsage := &dto.RealtimeUsage{}
 	sumUsage := &dto.RealtimeUsage{}
+	var closeConnectionsOnce sync.Once
+	closeConnections := func() {
+		closeConnectionsOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = targetConn.Close()
+		})
+	}
+	defer closeConnections()
+
+	gopool.Go(func() {
+		select {
+		case <-relayCtx.Done():
+			closeConnections()
+		case <-c.Request.Context().Done():
+			closeConnections()
+		}
+	})
 
 	gopool.Go(func() {
 		defer func() {
@@ -208,6 +230,7 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 		//return service.OpenAIErrorWrapper(err, "realtime_error", http.StatusInternalServerError), nil
 		logger.LogError(c, "realtime error: "+err.Error())
 	case <-c.Done():
+	case <-relayCtx.Done():
 	}
 
 	if usage.TotalTokens != 0 {

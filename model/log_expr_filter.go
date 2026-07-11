@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"time"
 
@@ -716,17 +715,8 @@ func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool) (*
 	return applyLogExprFilter(tx, opts.Expr, opts.IncludeAdminFields)
 }
 
-func logDBType() string {
-	if os.Getenv("LOG_SQL_DSN") != "" {
-		return common.LogSqlType
-	}
-	if common.UsingPostgreSQL {
-		return common.DatabaseTypePostgreSQL
-	}
-	if common.UsingMySQL {
-		return common.DatabaseTypeMySQL
-	}
-	return common.DatabaseTypeSQLite
+func logDBType() common.DatabaseType {
+	return common.LogDatabaseType()
 }
 
 func logCoalesceInt(expr string) string {

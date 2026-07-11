@@ -1,6 +1,3 @@
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
 package helper
 
 import (
@@ -17,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
@@ -49,6 +47,24 @@ func NewStreamScanner(reader io.Reader) *bufio.Scanner {
 	return scanner
 }
 
+func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
+	if c == nil || c.Writer == nil || resp == nil {
+		return
+	}
+	// codex
+	for _, name := range []string{"X-Reasoning-Included", "X-Codex-Turn-State"} {
+		values := resp.Header.Values(name)
+		if !service.ShouldCopyUpstreamHeader(c, name, values) {
+			continue
+		}
+		for _, value := range values {
+			if value != "" {
+				c.Writer.Header().Add(name, value)
+			}
+		}
+	}
+}
+
 // ExtendWriteDeadline pushes the connection write deadline forward before each
 // stream write. Best-effort: writers that don't support deadlines (e.g.
 // httptest recorders) are silently ignored.
@@ -65,9 +81,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		return
 	}
 
-	if info.StreamStatus == nil {
-		info.StreamStatus = relaycommon.NewStreamStatus()
-	}
+	// Each upstream attempt needs an independent status. Reusing a status from
+	// a failed attempt can make a successful retry inherit a stale end reason.
+	info.StreamStatus = relaycommon.NewStreamStatus()
 
 	parentCtx := context.Background()
 	if info.RelayCancelCtx != nil {
@@ -136,6 +152,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	defer cleanup()
 
 	scanner.Split(bufio.ScanLines)
+	copyCodexSSEHeaders(c, resp)
 	SetEventStreamHeaders(c)
 
 	ctx = context.WithValue(ctx, "stop_chan", stopChan)

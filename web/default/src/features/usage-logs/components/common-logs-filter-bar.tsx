@@ -1,6 +1,3 @@
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -19,10 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useQueryClient, useIsFetching } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
-import { type Table } from '@tanstack/react-table'
+import type { Table } from '@tanstack/react-table'
 import {
   CircleQuestionMark,
   Download,
@@ -30,12 +26,10 @@ import {
   EyeOff,
   ListFilter,
 } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { useAuthStore } from '@/stores/auth-store'
-import { ROLE } from '@/lib/roles'
-import { useIsAdmin } from '@/hooks/use-admin'
-import { useStatus } from '@/hooks/use-status'
+
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -60,6 +54,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { useStatus } from '@/hooks/use-status'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { exportLogs } from '../api'
 import {
   DEFAULT_LOG_EXPORT_ROW_LIMIT,
@@ -77,13 +75,15 @@ import {
   LogsFilterInput,
   LogsFilterToolbar,
 } from './logs-filter-toolbar'
-import { useUsageLogsContext } from './usage-logs-provider'
+import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
-const logTypeValues = ['0', '1', '2', '3', '4', '5', '6'] as const
 
-type LogTypeValue = (typeof logTypeValues)[number]
+type LogTypeValue = (typeof LOG_TYPE_FILTERS)[number]['value']
 type LogExportRowLimit = (typeof LOG_EXPORT_ROW_OPTIONS)[number]
+const logTypeValueSet = new Set<string>(
+  LOG_TYPE_FILTERS.map((type) => type.value)
+)
 
 const exportFormatOptions: Array<{
   value: LogExportFormat
@@ -337,7 +337,7 @@ const exprExamples = [
 ] as const
 
 function isLogTypeValue(value: string): value is LogTypeValue {
-  return (logTypeValues as readonly string[]).includes(value)
+  return logTypeValueSet.has(value)
 }
 
 interface CommonLogsFilterBarProps<TData> {
@@ -351,7 +351,7 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const isAdmin = useIsAdmin()
+  const { isAdminView: isAdmin } = useLogsViewScope()
   const userRole = useAuthStore((state) => state.auth.user?.role ?? 0)
   const { status } = useStatus()
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
@@ -499,6 +499,11 @@ export function CommonLogsFilterBar<TData>(
     filters.requestId,
     filters.upstreamRequestId,
   ].filter(Boolean).length
+  const expressionFilterCount = filters.expr ? 1 : 0
+  const mobileFilterCount = exprMode
+    ? expressionFilterCount
+    : [filters.model, filters.group, hasTypeFilter].filter(Boolean).length +
+      expandedFilterCount
   const sensitiveType = sensitiveVisible ? 'text' : 'password'
   const logTypeItems = useMemo(
     () =>
@@ -858,14 +863,7 @@ export function CommonLogsFilterBar<TData>(
           </>
         )
       }
-      mobileFilterCount={
-        exprMode
-          ? filters.expr
-            ? 1
-            : 0
-          : [filters.model, filters.group, hasTypeFilter].filter(Boolean)
-              .length + expandedFilterCount
-      }
+      mobileFilterCount={mobileFilterCount}
       hasAdvancedActiveFilters={!exprMode && hasExpandedFilters}
       advancedFilterCount={exprMode ? 0 : expandedFilterCount}
       hasActiveFilters={hasAdditionalFilters}

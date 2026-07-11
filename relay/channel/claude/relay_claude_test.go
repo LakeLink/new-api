@@ -1,11 +1,12 @@
 package claude
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +42,7 @@ func TestResponseOpenAI2ClaudeToolUseInputIsObject(t *testing.T) {
 					},
 				},
 			})
-			resp := service.ResponseOpenAI2Claude(&dto.OpenAITextResponse{
+			resp := relayconvert.ResponseOpenAI2Claude(&dto.OpenAITextResponse{
 				Id:    "chatcmpl_1",
 				Model: "gpt-test",
 				Choices: []dto.OpenAITextResponseChoice{
@@ -322,7 +323,7 @@ func TestBuildOpenAIStyleUsageFromClaudeUsageDefaultsAggregateCacheCreationTo5m(
 	require.Equal(t, 0, openAIUsage.ClaudeCacheCreation1hTokens)
 }
 
-func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48HighUsesAdaptiveThinking(t *testing.T) {
+func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48HighUsesAdaptiveThinking(t *testing.T) {
 	request := dto.GeneralOpenAIRequest{
 		Model:       "claude-opus-4-8-high",
 		Temperature: commonPointer(0.7),
@@ -336,7 +337,7 @@ func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48HighUsesAdaptiveThinking(t *tes
 		},
 	}
 
-	claudeRequest, err := RequestOpenAI2ClaudeMessage(nil, request)
+	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, request)
 	require.NoError(t, err)
 	require.Equal(t, "claude-opus-4-8", claudeRequest.Model)
 	require.NotNil(t, claudeRequest.Thinking)
@@ -348,7 +349,7 @@ func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48HighUsesAdaptiveThinking(t *tes
 	require.Nil(t, claudeRequest.TopK)
 }
 
-func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(t *testing.T) {
+func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(t *testing.T) {
 	request := dto.GeneralOpenAIRequest{
 		Model:       "claude-opus-4-8-thinking",
 		Temperature: commonPointer(0.7),
@@ -362,7 +363,7 @@ func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(
 		},
 	}
 
-	claudeRequest, err := RequestOpenAI2ClaudeMessage(nil, request)
+	claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, request)
 	require.NoError(t, err)
 	require.Equal(t, "claude-opus-4-8", claudeRequest.Model)
 	require.NotNil(t, claudeRequest.Thinking)
@@ -372,4 +373,79 @@ func TestRequestOpenAI2ClaudeMessage_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+func TestOpenAIChatRequestToClaudeMessagesSupportsInlineFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		file        *dto.MessageFile
+		wantType    string
+		wantText    string
+		wantMime    string
+		wantContent int
+	}{
+		{
+			name: "pdf becomes document",
+			file: &dto.MessageFile{
+				FileName: "spec.pdf",
+				FileData: "JVBERi0xLjQK",
+			},
+			wantType:    "document",
+			wantMime:    "application/pdf",
+			wantContent: 1,
+		},
+		{
+			name: "text becomes text block",
+			file: &dto.MessageFile{
+				FileName: "notes.txt",
+				FileData: base64.StdEncoding.EncodeToString([]byte("alpha\nbeta")),
+			},
+			wantType:    "text",
+			wantText:    "alpha\nbeta",
+			wantContent: 1,
+		},
+		{
+			name: "unsupported file is ignored",
+			file: &dto.MessageFile{
+				FileName: "blob.bin",
+				FileData: "AAEC",
+			},
+			wantContent: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := dto.GeneralOpenAIRequest{
+				Model: "claude-3-5-sonnet",
+				Messages: []dto.Message{{
+					Role: "user",
+					Content: []any{
+						dto.MediaContent{Type: dto.ContentTypeFile, File: test.file},
+					},
+				}},
+			}
+
+			claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, request)
+			require.NoError(t, err)
+			require.Len(t, claudeRequest.Messages, 1)
+			content, ok := claudeRequest.Messages[0].Content.([]dto.ClaudeMediaMessage)
+			require.True(t, ok)
+			require.Len(t, content, test.wantContent)
+			if test.wantContent == 0 {
+				return
+			}
+			assert.Equal(t, test.wantType, content[0].Type)
+			if test.wantText != "" {
+				require.NotNil(t, content[0].Text)
+				assert.Equal(t, test.wantText, *content[0].Text)
+			}
+			if test.wantMime != "" {
+				require.NotNil(t, content[0].Source)
+				assert.Equal(t, "base64", content[0].Source.Type)
+				assert.Equal(t, test.wantMime, content[0].Source.MediaType)
+				assert.Equal(t, test.file.FileData, content[0].Source.Data)
+			}
+		})
+	}
 }

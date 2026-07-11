@@ -25,10 +25,6 @@ func ResponsesFinishReasonFromStatus(resp *dto.OpenAIResponsesResponse) (string,
 	return relayconvert.ResponsesFinishReasonFromStatus(resp)
 }
 
-func MapResponsesTerminalStatusToFinishReason(status string, incompleteReason string, hasToolCalls bool) string {
-	return openaicompat.MapResponsesTerminalStatusToFinishReason(status, incompleteReason, hasToolCalls)
-}
-
 func ExtractOutputTextFromResponses(resp *dto.OpenAIResponsesResponse) string {
 	return relayconvert.ExtractOutputTextFromResponses(resp)
 }
