@@ -18,12 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
 
-import { buildQueryParams } from './lib/utils'
+import { buildQueryParams } from './lib/query-params'
 import type {
   GetLogsParams,
   GetLogsResponse,
   GetLogStatsParams,
   GetLogStatsResponse,
+  GetLogExpressionSchemaResponse,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
   LogExportFormat,
@@ -41,7 +42,8 @@ function buildApiPath(endpoint: string, isAdmin: boolean): string {
 async function fetchLogs<T>(
   endpoint: string,
   params: T,
-  isAdmin: boolean
+  isAdmin: boolean,
+  signal?: AbortSignal
 ): Promise<GetLogsResponse> {
   const paramRecord = params as unknown as Record<string, unknown>
   const queryParams = buildQueryParams({
@@ -50,20 +52,27 @@ async function fetchLogs<T>(
     ...params,
   })
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}?${queryParams}`)
+  const res = await api.get(`${path}?${queryParams}`, {
+    signal,
+    disableDuplicate: true,
+  })
   return res.data
 }
 
 async function fetchLogStats<T>(
   endpoint: string,
   params: T,
-  isAdmin: boolean
+  isAdmin: boolean,
+  signal?: AbortSignal
 ): Promise<GetLogStatsResponse> {
   const queryParams = buildQueryParams(
     params as unknown as Record<string, unknown>
   )
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}/stat?${queryParams}`)
+  const res = await api.get(`${path}/stat?${queryParams}`, {
+    signal,
+    disableDuplicate: true,
+  })
   return res.data
 }
 
@@ -71,19 +80,35 @@ async function fetchLogStats<T>(
 // Common Log APIs
 // ============================================================================
 
-export const getAllLogs = (params: GetLogsParams = {}) =>
-  fetchLogs('/api/log', params, true)
+export const getAllLogs = (params: GetLogsParams = {}, signal?: AbortSignal) =>
+  fetchLogs('/api/log/', params, true, signal)
 
 export const getUserLogs = (
-  params: Omit<GetLogsParams, 'username' | 'channel'> = {}
-) => fetchLogs('/api/log', params, false)
+  params: Omit<GetLogsParams, 'username' | 'channel'> = {},
+  signal?: AbortSignal
+) => fetchLogs('/api/log', params, false, signal)
 
-export const getLogStats = (params: GetLogStatsParams = {}) =>
-  fetchLogStats('/api/log', params, true)
+export const getLogStats = (
+  params: GetLogStatsParams = {},
+  signal?: AbortSignal
+) => fetchLogStats('/api/log', params, true, signal)
 
 export const getUserLogStats = (
-  params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
-) => fetchLogStats('/api/log', params, false)
+  params: Omit<GetLogStatsParams, 'username' | 'channel'> = {},
+  signal?: AbortSignal
+) => fetchLogStats('/api/log', params, false, signal)
+
+export async function getLogExpressionSchema(
+  signal?: AbortSignal
+): Promise<GetLogExpressionSchemaResponse> {
+  const res = await api.get('/api/log/expr/schema', {
+    signal,
+    disableDuplicate: true,
+    skipBusinessError: true,
+    skipErrorHandler: true,
+  })
+  return res.data
+}
 
 export async function exportLogs(
   format: LogExportFormat,
@@ -135,18 +160,26 @@ export async function getUserInfo(
 // MjProxy (Drawing) Logs API
 // ============================================================================
 
-export const getAllMidjourneyLogs = (params: GetMidjourneyLogsParams) =>
-  fetchLogs('/api/mj', params, true)
+export const getAllMidjourneyLogs = (
+  params: GetMidjourneyLogsParams,
+  signal?: AbortSignal
+) => fetchLogs('/api/mj', params, true, signal)
 
-export const getUserMidjourneyLogs = (params: GetMidjourneyLogsParams) =>
-  fetchLogs('/api/mj', params, false)
+export const getUserMidjourneyLogs = (
+  params: GetMidjourneyLogsParams,
+  signal?: AbortSignal
+) => fetchLogs('/api/mj', params, false, signal)
 
 // ============================================================================
 // Task Logs API
 // ============================================================================
 
-export const getAllTaskLogs = (params: GetTaskLogsParams) =>
-  fetchLogs('/api/task', params, true)
+export const getAllTaskLogs = (
+  params: GetTaskLogsParams,
+  signal?: AbortSignal
+) => fetchLogs('/api/task', params, true, signal)
 
-export const getUserTaskLogs = (params: GetTaskLogsParams) =>
-  fetchLogs('/api/task', params, false)
+export const getUserTaskLogs = (
+  params: GetTaskLogsParams,
+  signal?: AbortSignal
+) => fetchLogs('/api/task', params, false, signal)

@@ -748,6 +748,7 @@ export function ChannelMutateDrawer({
   const currentProxy = form.watch('proxy')
   const currentSystemPrompt = form.watch('system_prompt')
   const currentSystemPromptOverride = form.watch('system_prompt_override')
+  const currentDenyCrossProtocol = form.watch('deny_cross_protocol')
   const currentAllowServiceTier = form.watch('allow_service_tier')
   const currentDisableStore = form.watch('disable_store')
   const currentAllowSafetyIdentifier = form.watch('allow_safety_identifier')
@@ -1017,6 +1018,7 @@ export function ChannelMutateDrawer({
   let fieldPassthroughConfigured = false
   if (currentType === 1 || currentType === 57) {
     fieldPassthroughConfigured = Boolean(
+      (currentType === 1 && currentDenyCrossProtocol) ||
       currentAllowServiceTier ||
       currentDisableStore ||
       currentAllowSafetyIdentifier ||
@@ -1025,6 +1027,7 @@ export function ChannelMutateDrawer({
     )
   } else if (currentType === 14) {
     fieldPassthroughConfigured = Boolean(
+      currentDenyCrossProtocol ||
       currentAllowServiceTier ||
       currentAllowInferenceGeo ||
       currentAllowSpeed ||
@@ -4265,7 +4268,7 @@ export function ChannelMutateDrawer({
                                     render={({ field }) => (
                                       <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
                                         <div className='space-y-0.5'>
-                                          <FormLabel className='text-sm'>
+                                          <FormLabel>
                                             {t(
                                               'Disallow cross-protocol conversion'
                                             )}

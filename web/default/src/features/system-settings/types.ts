@@ -316,10 +316,20 @@ export type BillingSettings = {
 }
 
 export type OperationsSettings = {
+  RetryTimes: number
   DefaultCollapseSidebar: boolean
   DemoSiteEnabled: boolean
   SelfUseModeEnabled: boolean
+  ChannelDisableThreshold: string
   QuotaRemindThreshold: string
+  AutomaticDisableChannelEnabled: boolean
+  AutomaticEnableChannelEnabled: boolean
+  AutomaticDisableKeywords: string
+  AutomaticDisableStatusCodes: string
+  AutomaticRetryStatusCodes: string
+  'monitor_setting.auto_test_channel_enabled': boolean
+  'monitor_setting.auto_test_channel_minutes': number
+  'active_request_setting.completed_retention_seconds': number
   SMTPServer: string
   SMTPPort: string
   SMTPAccount: string
@@ -334,7 +344,6 @@ export type OperationsSettings = {
   WorkerAllowHttpImageRequestEnabled: boolean
   LogConsumeEnabled: boolean
   LogExportPermission: '10' | '100'
-  'active_request_setting.completed_retention_seconds': number
   'performance_setting.disk_cache_enabled': boolean
   'performance_setting.disk_cache_threshold_mb': number
   'performance_setting.disk_cache_max_size_mb': number

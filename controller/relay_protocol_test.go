@@ -75,7 +75,7 @@ func TestProtocolMismatchErrorRetriesSelection(t *testing.T) {
 	require.True(t, types.IsChannelError(err))
 }
 
-func TestInitialContextChannelProtocolMismatchPreparesRetrySelection(t *testing.T) {
+func TestInitialContextChannelProtocolMismatchUsesOriginalFormatAndPreparesRetry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -85,9 +85,10 @@ func TestInitialContextChannelProtocolMismatchPreparesRetrySelection(t *testing.
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{DenyCrossProtocol: true})
 
 	info := &relaycommon.RelayInfo{
-		RelayFormat:            types.RelayFormatClaude,
-		RequestConversionChain: []types.RelayFormat{types.RelayFormatClaude},
-		OriginModelName:        "claude-sonnet-4",
+		RelayFormat:             types.RelayFormatClaude,
+		RequestConversionChain:  []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI},
+		FinalRequestRelayFormat: types.RelayFormatOpenAI,
+		OriginModelName:         "claude-sonnet-4",
 	}
 	retry := 0
 	retryParam := &service.RetryParam{Ctx: c, Retry: &retry}

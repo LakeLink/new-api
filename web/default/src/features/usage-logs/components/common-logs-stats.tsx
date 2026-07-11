@@ -18,14 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getLogStats, getUserLogStats } from '../api'
 import { DEFAULT_LOG_STATS } from '../constants'
+import { canReuseUsageLogsPlaceholder } from '../lib/query-keys'
 import { buildApiParams } from '../lib/utils'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
@@ -37,7 +40,7 @@ function StatBadge(props: {
   accent: string
 }) {
   return (
-    <span className='border-border/60 bg-muted/25 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs shadow-xs'>
+    <span className='border-border/60 bg-muted/25 shadow-xs inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs'>
       <span className={cn('h-3.5 w-0.5 rounded-full', props.accent)} />
       <span className='text-muted-foreground'>{props.label}</span>
       <span className='text-foreground/85 font-mono font-semibold tabular-nums'>
@@ -50,29 +53,47 @@ function StatBadge(props: {
 export function CommonLogsStats() {
   const { t } = useTranslation()
   const { isAdminView: isAdmin } = useLogsViewScope()
+  const currentUserId = useAuthStore((state) => state.auth.user?.id ?? 0)
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
-
-  const { data: stats, isLoading } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
-    queryFn: async () => {
-      const params = buildApiParams({
+  const statsParams = useMemo(
+    () =>
+      buildApiParams({
         page: 1,
         pageSize: 1,
         searchParams,
         columnFilters: [],
         isAdmin,
-      })
+      }),
+    [isAdmin, searchParams]
+  )
 
+  const { data: stats, isLoading } = useQuery({
+    queryKey: [
+      'usage-logs-stats',
+      'common',
+      currentUserId,
+      isAdmin,
+      statsParams,
+    ],
+    queryFn: async ({ signal }) => {
       const result = isAdmin
-        ? await getLogStats(params)
-        : await getUserLogStats(params)
+        ? await getLogStats(statsParams, signal)
+        : await getUserLogStats(statsParams, signal)
 
       return result.success
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData, previousQuery) =>
+      canReuseUsageLogsPlaceholder(
+        previousQuery?.queryKey,
+        'common',
+        currentUserId,
+        isAdmin
+      )
+        ? previousData
+        : undefined,
   })
 
   if (isLoading) {

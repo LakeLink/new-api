@@ -57,10 +57,10 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
-	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
+	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2;index:idx_user_created_at_id,priority:3;index:idx_type_created_at_id,priority:3"`
+	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1;index:idx_user_created_at_id,priority:1"`
+	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type;index:idx_user_created_at_id,priority:2;index:idx_type_created_at_id,priority:2"`
+	Type              int    `json:"type" gorm:"index:idx_created_at_type;index:idx_type_created_at_id,priority:1"`
 	Content           string `json:"content"`
 	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
 	TokenName         string `json:"token_name" gorm:"index;default:''"`
@@ -470,6 +470,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 }
 
 type LogQueryOptions struct {
+	Context            context.Context
 	LogType            int
 	StartTimestamp     int64
 	EndTimestamp       int64
@@ -486,6 +487,21 @@ type LogQueryOptions struct {
 	UserId             int
 	IncludeAdminFields bool
 	NoLimit            bool
+}
+
+func logQueryDB(opts LogQueryOptions) *gorm.DB {
+	if opts.Context == nil {
+		return LOG_DB
+	}
+	return LOG_DB.WithContext(opts.Context)
+}
+
+func publicLogQueryError(err error, operation string, message string) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	common.SysError(operation + ": " + err.Error())
+	return errors.New(message)
 }
 
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
@@ -507,14 +523,15 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 }
 
 func GetAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, total int64, err error) {
-	tx := LOG_DB.Model(&Log{})
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err = applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return nil, 0, err
 	}
+	tx := logQueryDB(opts).Model(&Log{})
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
 	err = tx.Model(&Log{}).Count(&total).Error
 	if err != nil {
 		return nil, 0, err
@@ -535,14 +552,14 @@ func GetAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, total int64, err 
 		assignDisplayLogIds(logs, opts.StartIdx)
 	}
 
-	if err = fillLogChannelNames(logs); err != nil {
+	if err = fillLogChannelNames(opts.Context, logs); err != nil {
 		return logs, total, err
 	}
 
 	return logs, total, err
 }
 
-func fillLogChannelNames(logs []*Log) error {
+func fillLogChannelNames(ctx context.Context, logs []*Log) error {
 	channelIds := types.NewSet[int]()
 	for _, log := range logs {
 		if log.ChannelId != 0 {
@@ -573,7 +590,11 @@ func fillLogChannelNames(logs []*Log) error {
 		}
 	} else {
 		// Bulk query channels from DB
-		if err := DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
+		db := DB
+		if ctx != nil {
+			db = db.WithContext(ctx)
+		}
+		if err := db.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
 			return err
 		}
 	}
@@ -610,18 +631,18 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 }
 
 func GetUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, total int64, err error) {
-	tx := LOG_DB.Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err = applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return nil, 0, err
 	}
+	tx := logQueryDB(opts).Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
 	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
 	if err != nil {
-		common.SysError("failed to count user logs: " + err.Error())
-		return nil, 0, errors.New("查询日志失败")
+		return nil, 0, publicLogQueryError(err, "failed to count user logs", "查询日志失败")
 	}
 	order := "logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
@@ -633,8 +654,7 @@ func GetUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, total int64, err
 	}
 	err = query.Find(&logs).Error
 	if err != nil {
-		common.SysError("failed to search user logs: " + err.Error())
-		return nil, 0, errors.New("查询日志失败")
+		return nil, 0, publicLogQueryError(err, "failed to search user logs", "查询日志失败")
 	}
 
 	formatUserLogs(logs, opts.StartIdx)
@@ -645,22 +665,30 @@ func ExportAllLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	opts.StartIdx = 0
 	normalizeLogExportLimit(&opts)
 
-	tx := LOG_DB.Model(&Log{})
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err = applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return nil, err
 	}
-	tx = tx.Order("logs.id desc")
+	tx := logQueryDB(opts).Model(&Log{})
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
+	order := "logs.id desc"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		order = clickHouseLogOrder("logs.")
+	}
+	tx = tx.Order(order)
 	if !opts.NoLimit {
 		tx = tx.Limit(opts.Num)
 	}
 	if err = tx.Find(&logs).Error; err != nil {
 		return nil, err
 	}
-	if err = fillLogChannelNames(logs); err != nil {
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		assignDisplayLogIds(logs, 0)
+	}
+	if err = fillLogChannelNames(opts.Context, logs); err != nil {
 		return logs, err
 	}
 	return logs, nil
@@ -670,21 +698,25 @@ func ExportUserLogsWithOptions(opts LogQueryOptions) (logs []*Log, err error) {
 	opts.StartIdx = 0
 	normalizeLogExportLimit(&opts)
 
-	tx := LOG_DB.Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err = applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return nil, err
 	}
-	tx = tx.Order("logs.id desc")
+	tx := logQueryDB(opts).Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
+	order := "logs.id desc"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		order = clickHouseLogOrder("logs.")
+	}
+	tx = tx.Order(order)
 	if !opts.NoLimit {
 		tx = tx.Limit(opts.Num)
 	}
 	if err = tx.Find(&logs).Error; err != nil {
-		common.SysError("failed to export user logs: " + err.Error())
-		return nil, errors.New("导出日志失败")
+		return nil, publicLogQueryError(err, "failed to export user logs", "导出日志失败")
 	}
 
 	formatUserLogs(logs, 0)
@@ -695,20 +727,24 @@ func StreamExportAllLogsWithOptions(opts LogQueryOptions, onReady LogExportReady
 	opts.StartIdx = 0
 	normalizeLogExportLimit(&opts)
 
-	tx := LOG_DB.Model(&Log{})
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err := applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return err
 	}
+	tx := logQueryDB(opts).Model(&Log{})
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
 
-	channelNames, err := newLogChannelNameResolver()
+	channelNames, err := newLogChannelNameResolver(opts.Context)
 	if err != nil {
 		return err
 	}
 	return streamExportLogs(tx, opts, onReady, func(index int, log *Log) error {
+		if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+			log.Id = index
+		}
 		channelNames.Fill(log)
 		return handle(log)
 	})
@@ -718,14 +754,15 @@ func StreamExportUserLogsWithOptions(opts LogQueryOptions, onReady LogExportRead
 	opts.StartIdx = 0
 	normalizeLogExportLimit(&opts)
 
-	tx := LOG_DB.Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
-	if opts.LogType != LogTypeUnknown {
-		tx = tx.Where("logs.type = ?", opts.LogType)
-	}
-	tx, err := applyLogFilters(tx, opts)
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
 	if err != nil {
 		return err
 	}
+	tx := logQueryDB(opts).Model(&Log{}).Where("logs.user_id = ?", opts.UserId)
+	if opts.LogType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", opts.LogType)
+	}
+	tx = applyLogFilters(tx, opts, exprFilter)
 
 	return streamExportLogs(tx, opts, onReady, func(index int, log *Log) error {
 		formatUserLog(log, index)
@@ -740,7 +777,11 @@ func normalizeLogExportLimit(opts *LogQueryOptions) {
 }
 
 func streamExportLogs(tx *gorm.DB, opts LogQueryOptions, onReady LogExportReadyHandler, handle func(index int, log *Log) error) error {
-	tx = tx.Select("logs.*").Order("logs.id desc")
+	order := "logs.id desc"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		order = clickHouseLogOrder("logs.")
+	}
+	tx = tx.Select("logs.*").Order(order)
 	if !opts.NoLimit {
 		tx = tx.Limit(opts.Num)
 	}
@@ -775,7 +816,7 @@ type logChannelNameResolver struct {
 	names map[int]string
 }
 
-func newLogChannelNameResolver() (*logChannelNameResolver, error) {
+func newLogChannelNameResolver(ctx context.Context) (*logChannelNameResolver, error) {
 	resolver := &logChannelNameResolver{
 		names: make(map[int]string),
 	}
@@ -783,7 +824,11 @@ func newLogChannelNameResolver() (*logChannelNameResolver, error) {
 		Id   int    `gorm:"column:id"`
 		Name string `gorm:"column:name"`
 	}
-	if err := DB.Table("channels").Select("id, name").Find(&channels).Error; err != nil {
+	db := DB
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
+	if err := db.Table("channels").Select("id, name").Find(&channels).Error; err != nil {
 		return nil, err
 	}
 	for _, channel := range channels {
@@ -818,10 +863,14 @@ func logContainsPattern(input string) (string, bool) {
 }
 
 func applyLogContainsFilter(tx *gorm.DB, column string, value string) *gorm.DB {
-	pattern, ok := logContainsPattern(value)
-	if !ok {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return tx
 	}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return tx.Where(column+" LIKE ?", "%"+escapeClickHouseLikeLiteral(value)+"%")
+	}
+	pattern, _ := logContainsPattern(value)
 	return tx.Where(column+" LIKE ? ESCAPE '!'", pattern)
 }
 
@@ -840,31 +889,31 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 }
 
 func SumUsedQuotaWithOptions(opts LogQueryOptions) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select(logCoalesceInt("sum(logs.quota)") + " quota")
+	exprFilter, err := compileLogExprFilter(opts.Expr, opts.IncludeAdminFields)
+	if err != nil {
+		return stat, err
+	}
+	db := logQueryDB(opts)
+	tx := db.Table("logs").Select(logCoalesceInt("sum(logs.quota)") + " quota")
 
 	// 为rpm和tpm创建单独的查询
 	tokensExpr := logCoalesceInt("sum(logs.prompt_tokens)") + " + " + logCoalesceInt("sum(logs.completion_tokens)")
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, " + tokensExpr + " tpm")
+	rpmTpmQuery := db.Table("logs").Select("count(*) rpm, " + tokensExpr + " tpm")
 
-	tx, err = applyLogStatFilters(tx, opts, true)
-	if err != nil {
-		return stat, err
-	}
-	rpmTpmQuery, err = applyLogStatFilters(rpmTpmQuery, opts, true)
-	if err != nil {
-		return stat, err
-	}
+	// The expression is parsed once above, including one consistent evaluation
+	// of today/yesterday, and the compiled parameterized predicate is then
+	// applied to both aggregate queries.
+	tx = applyLogStatFilters(tx, opts, true, exprFilter)
+	rpmTpmQuery = applyLogStatFilters(rpmTpmQuery, opts, true, exprFilter)
 	// 只统计最近60秒的rpm和tpm
 	rpmTpmQuery = rpmTpmQuery.Where("logs.created_at >= ?", time.Now().Add(-60*time.Second).Unix())
 
 	// 执行查询
 	if err := tx.Scan(&stat).Error; err != nil {
-		common.SysError("failed to query log stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
+		return stat, publicLogQueryError(err, "failed to query log stat", "查询统计数据失败")
 	}
 	if err := rpmTpmQuery.Scan(&stat).Error; err != nil {
-		common.SysError("failed to query rpm/tpm stat: " + err.Error())
-		return stat, errors.New("查询统计数据失败")
+		return stat, publicLogQueryError(err, "failed to query rpm/tpm stat", "查询统计数据失败")
 	}
 
 	return stat, nil

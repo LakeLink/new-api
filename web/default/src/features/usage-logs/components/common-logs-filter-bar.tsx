@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQueryClient, useIsFetching } from '@tanstack/react-query'
+import { useIsFetching } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import {
@@ -26,7 +26,7 @@ import {
   EyeOff,
   ListFilter,
 } from 'lucide-react'
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -34,7 +34,6 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -65,11 +64,20 @@ import {
   LOG_TYPE_ALL_VALUE,
   LOG_TYPE_FILTERS,
 } from '../constants'
+import {
+  enterLogExpressionMode,
+  mergeLogExpressionUrl,
+  regenerateLogExpressionForScopeChange,
+  resolveLogExpressionUrlChange,
+  type LogExpressionDraftOrigin,
+  type PendingLogExpressionNavigation,
+} from '../lib/expression-search'
 import { buildSearchParams } from '../lib/filter'
 import { buildApiParams, getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters, LogExportFormat } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
 import { CompactDateTimeRangePicker } from './compact-date-time-range-picker'
+import { ExpressionSearchHelpDialog } from './expression-search-help-dialog'
 import {
   LogsFilterField,
   LogsFilterInput,
@@ -94,248 +102,6 @@ const exportFormatOptions: Array<{
   { value: 'csv', label: 'Export CSV' },
 ]
 
-const exprFieldRows = [
-  {
-    fields: 'id',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Log record ID.',
-  },
-  {
-    fields: 'user_id',
-    type: 'Number',
-    scope: 'All users',
-    description: 'User ID that owns the log.',
-  },
-  {
-    fields: 'created_at, createdAt, timestamp',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Creation time as Unix seconds; date(...) is also accepted.',
-  },
-  {
-    fields: 'type, log_type',
-    type: 'Number',
-    scope: 'All users',
-    description:
-      'Log type code: 1 top-up, 2 consume, 3 manage, 4 system, 5 error, 6 refund.',
-  },
-  {
-    fields: 'content',
-    type: 'String',
-    scope: 'All users',
-    description: 'Main log content or error message text.',
-  },
-  {
-    fields: 'token_name, token',
-    type: 'String',
-    scope: 'All users',
-    description: 'API token name recorded on the log.',
-  },
-  {
-    fields: 'model_name, model',
-    type: 'String',
-    scope: 'All users',
-    description: 'Requested model name.',
-  },
-  {
-    fields: 'quota',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Charged quota amount.',
-  },
-  {
-    fields: 'prompt_tokens',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Prompt or input token count.',
-  },
-  {
-    fields: 'completion_tokens',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Completion or output token count.',
-  },
-  {
-    fields: 'use_time',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Response time in seconds.',
-  },
-  {
-    fields: 'is_stream, stream',
-    type: 'Boolean',
-    scope: 'All users',
-    description: 'Whether the request used streaming.',
-  },
-  {
-    fields: 'today, yesterday',
-    type: 'Boolean',
-    scope: 'All users',
-    description: 'Shortcut filters for the current or previous local day.',
-  },
-  {
-    fields: 'token_id',
-    type: 'Number',
-    scope: 'All users',
-    description: 'Numeric API token ID.',
-  },
-  {
-    fields: 'group',
-    type: 'String',
-    scope: 'All users',
-    description: 'Billing or request group name.',
-  },
-  {
-    fields: 'ip',
-    type: 'String',
-    scope: 'All users',
-    description: 'Client IP address if IP logging is enabled.',
-  },
-  {
-    fields: 'request_id, requestId',
-    type: 'String',
-    scope: 'All users',
-    description: 'Request ID for tracing one call.',
-  },
-  {
-    fields: 'upstream_request_id, upstreamRequestId',
-    type: 'String',
-    scope: 'All users',
-    description: 'Upstream provider request ID for tracing one call.',
-  },
-  {
-    fields: 'other',
-    type: 'String',
-    scope: 'All users',
-    description: 'Additional metadata saved with the log.',
-  },
-  {
-    fields: 'username',
-    type: 'String',
-    scope: 'Admins only',
-    description: 'Username associated with the log.',
-  },
-  {
-    fields: 'channel, channel_id',
-    type: 'Number',
-    scope: 'Admins only',
-    description: 'Channel ID used by the request.',
-  },
-  {
-    fields: 'channel_name, channelName',
-    type: 'String',
-    scope: 'Admins only',
-    description: 'Channel name used by the request.',
-  },
-] as const
-
-const exprOperatorRows = [
-  {
-    syntax: '&&, ||, !, and, or, not',
-    description: 'Combine conditions with boolean logic and parentheses.',
-  },
-  {
-    syntax: '==, !=, >, >=, <, <=',
-    description:
-      'Compare a field with a string, integer, boolean, nil, or date(...) literal.',
-  },
-  {
-    syntax: 'contains, startsWith, endsWith',
-    description: 'Match string fields with SQL LIKE using escaped wildcards.',
-  },
-  {
-    syntax: 'in, not in',
-    description: 'Match a field against a literal array with up to 100 values.',
-  },
-  {
-    syntax: 'nil',
-    description: 'Use nil only with == or != to check for null values.',
-  },
-] as const
-
-const exprExamples = [
-  {
-    title: 'GPT consumption logs',
-    expression: 'model_name contains "gpt" && type == 2',
-    description: 'Find consumption records for GPT-family models.',
-  },
-  {
-    title: 'GPT logs today',
-    expression: 'model_name contains "gpt-5.5" and today',
-    description: 'Find matching model logs from the current local day.',
-  },
-  {
-    title: 'One day by date',
-    expression:
-      'created_at >= date("2025-01-01") && created_at < date("2025-01-02")',
-    description:
-      'Use date(...) for readable day boundaries; add a timezone argument when needed.',
-  },
-  {
-    title: 'High quota usage',
-    expression: 'quota > 1000 && type == 2',
-    description: 'Find expensive consumption records.',
-  },
-  {
-    title: 'Large token requests',
-    expression: 'prompt_tokens > 8000 || completion_tokens > 2000',
-    description:
-      'Find calls with unusually large input or output token counts.',
-  },
-  {
-    title: 'Streaming Claude calls',
-    expression: 'is_stream == true && model_name contains "claude"',
-    description: 'Find streamed requests for Claude-family models.',
-  },
-  {
-    title: 'One request ID',
-    expression: 'request_id == "req_xxx"',
-    description: 'Jump to a single traced request.',
-  },
-  {
-    title: 'Specific groups',
-    expression: 'group in ["default", "vip"]',
-    description: 'Find records from one of several groups.',
-  },
-  {
-    title: 'Model families',
-    expression:
-      'model_name startsWith "gpt-4" || model_name startsWith "claude"',
-    description: 'Compare several model prefixes in one search.',
-  },
-  {
-    title: 'Errors and rate limits',
-    expression: 'content contains "timeout" || other contains "429"',
-    description: 'Look for timeout messages or upstream rate-limit metadata.',
-  },
-  {
-    title: 'Exclude embeddings',
-    expression: 'not (model_name contains "embedding") && type == 2',
-    description: 'Keep normal consumption logs while hiding embedding calls.',
-  },
-  {
-    title: 'Named tokens after a time',
-    expression: 'token_name != "" && created_at >= date("2025-01-01")',
-    description: 'Find logs that have a token name after a readable date.',
-  },
-  {
-    title: 'One client IP',
-    expression: 'ip == "1.2.3.4"',
-    description: 'Find requests recorded from one client IP address.',
-  },
-  {
-    title: 'Admin: user on channel',
-    expression: 'username == "alice" && channel == 12',
-    description: 'For admins, filter one user on a numeric channel ID.',
-  },
-  {
-    title: 'Admin: channel name',
-    expression: 'channel_name contains "openai" && type == 2',
-    description: 'For admins, filter by channel name and log type.',
-  },
-] as const
-
 function isLogTypeValue(value: string): value is LogTypeValue {
   return logTypeValueSet.has(value)
 }
@@ -349,7 +115,6 @@ export function CommonLogsFilterBar<TData>(
 ) {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const searchParams = route.useSearch()
   const { isAdminView: isAdmin } = useLogsViewScope()
   const userRole = useAuthStore((state) => state.auth.user?.role ?? 0)
@@ -363,6 +128,11 @@ export function CommonLogsFilterBar<TData>(
   })
   const [logType, setLogType] = useState<LogTypeValue>(LOG_TYPE_ALL_VALUE)
   const [exprMode, setExprMode] = useState(false)
+  const exprOriginRef = useRef<LogExpressionDraftOrigin>('generated')
+  const pendingExpressionUrlRef =
+    useRef<PendingLogExpressionNavigation>(undefined)
+  const lastUrlExpressionRef = useRef<string | undefined>(undefined)
+  const previousIsAdminRef = useRef(isAdmin)
   const [exprHelpOpen, setExprHelpOpen] = useState(false)
   const [exportingFormat, setExportingFormat] =
     useState<LogExportFormat | null>(null)
@@ -381,21 +151,53 @@ export function CommonLogsFilterBar<TData>(
 
   useEffect(() => {
     const { start, end } = getDefaultTimeRange()
-    setFilters({
-      startTime: searchParams.startTime
-        ? new Date(searchParams.startTime)
-        : start,
-      endTime: searchParams.endTime ? new Date(searchParams.endTime) : end,
-      channel: searchParams.channel || undefined,
-      model: searchParams.model || undefined,
-      token: searchParams.token || undefined,
-      group: searchParams.group || undefined,
-      username: searchParams.username || undefined,
-      requestId: searchParams.requestId || undefined,
-      expr: searchParams.expr || undefined,
-      upstreamRequestId: searchParams.upstreamRequestId || undefined,
+    const hasUrlTimeRange =
+      searchParams.startTime !== undefined || searchParams.endTime !== undefined
+    let routeStartTime: Date | undefined = start
+    let routeEndTime: Date | undefined = end
+    if (hasUrlTimeRange) {
+      routeStartTime =
+        searchParams.startTime !== undefined
+          ? new Date(searchParams.startTime)
+          : undefined
+      routeEndTime =
+        searchParams.endTime !== undefined
+          ? new Date(searchParams.endTime)
+          : undefined
+    }
+    const urlExpression = searchParams.expr || undefined
+    const previousUrlExpression = lastUrlExpressionRef.current
+    lastUrlExpressionRef.current = urlExpression
+    const resolvedUrlChange = resolveLogExpressionUrlChange({
+      urlExpression,
+      previousUrlExpression,
+      currentOrigin: exprOriginRef.current,
+      pendingNavigation: pendingExpressionUrlRef.current,
     })
-    setExprMode(!!searchParams.expr)
+    exprOriginRef.current = resolvedUrlChange.origin
+    pendingExpressionUrlRef.current = resolvedUrlChange.pendingNavigation
+    const isOwnExpressionNavigation = resolvedUrlChange.isOwnNavigation
+
+    setFilters((previousFilters) =>
+      mergeLogExpressionUrl({
+        previousFilters,
+        urlExpression,
+        origin: exprOriginRef.current,
+        isOwnNavigation: isOwnExpressionNavigation,
+        routeFilters: {
+          startTime: routeStartTime,
+          endTime: routeEndTime,
+          channel: searchParams.channel || undefined,
+          model: searchParams.model || undefined,
+          token: searchParams.token || undefined,
+          group: searchParams.group || undefined,
+          username: searchParams.username || undefined,
+          requestId: searchParams.requestId || undefined,
+          upstreamRequestId: searchParams.upstreamRequestId || undefined,
+        },
+      })
+    )
+    setExprMode(!!urlExpression)
 
     const typeArr = searchParams.type
     const nextLogType =
@@ -404,7 +206,7 @@ export function CommonLogsFilterBar<TData>(
       isLogTypeValue(typeArr[0])
         ? typeArr[0]
         : LOG_TYPE_ALL_VALUE
-    setLogType(nextLogType)
+    if (!isOwnExpressionNavigation) setLogType(nextLogType)
   }, [
     searchParams.startTime,
     searchParams.endTime,
@@ -419,12 +221,87 @@ export function CommonLogsFilterBar<TData>(
     searchParams.type,
   ])
 
+  useEffect(() => {
+    const previousIsAdmin = previousIsAdminRef.current
+    previousIsAdminRef.current = isAdmin
+    if (previousIsAdmin === isAdmin || !exprMode) return
+
+    const previousExpression = filters.expr || ''
+    const nextDraft = regenerateLogExpressionForScopeChange({
+      draft: {
+        origin: exprOriginRef.current,
+        value: previousExpression,
+      },
+      filters,
+      logType,
+      isAdmin,
+    })
+    if (!nextDraft || nextDraft.value === previousExpression) return
+
+    exprOriginRef.current = nextDraft.origin
+    setFilters((previousFilters) => ({
+      ...previousFilters,
+      expr: nextDraft.value,
+    }))
+
+    if (!searchParams.expr || searchParams.expr !== previousExpression) return
+
+    pendingExpressionUrlRef.current = nextDraft
+    navigate({
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
+      search: {
+        expr: nextDraft.value,
+        page: 1,
+        ...(searchParams.pageSize ? { pageSize: searchParams.pageSize } : {}),
+      },
+      replace: true,
+    })
+  }, [
+    exprMode,
+    filters,
+    isAdmin,
+    logType,
+    navigate,
+    searchParams.expr,
+    searchParams.pageSize,
+  ])
+
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
       setFilters((prev) => ({ ...prev, [field]: value }))
     },
     []
   )
+
+  const handleExpressionChange = useCallback((value: string) => {
+    exprOriginRef.current = 'user'
+    pendingExpressionUrlRef.current = undefined
+    setFilters((previousFilters) => ({ ...previousFilters, expr: value }))
+  }, [])
+
+  const handleModeToggle = useCallback(() => {
+    if (exprMode) {
+      setExprMode(false)
+      return
+    }
+
+    const nextDraft = enterLogExpressionMode({
+      draft: {
+        origin: exprOriginRef.current,
+        value: filters.expr || '',
+      },
+      filters,
+      logType,
+      isAdmin,
+    })
+    exprOriginRef.current = nextDraft.origin
+    setFilters((previousFilters) => ({
+      ...previousFilters,
+      expr: nextDraft.value,
+    }))
+    setExprMode(true)
+  }, [exprMode, filters, isAdmin, logType])
 
   const handleApply = useCallback(() => {
     const activeFilters = exprMode
@@ -433,6 +310,10 @@ export function CommonLogsFilterBar<TData>(
         }
       : { ...filters, expr: undefined }
     const filterParams = buildSearchParams(activeFilters, 'common')
+    pendingExpressionUrlRef.current =
+      exprMode && filters.expr && filters.expr !== searchParams.expr
+        ? { value: filters.expr, origin: exprOriginRef.current }
+        : undefined
     navigate({
       to: '/usage-logs/$section',
       params: { section: 'common' },
@@ -442,9 +323,7 @@ export function CommonLogsFilterBar<TData>(
         page: 1,
       },
     })
-    queryClient.invalidateQueries({ queryKey: ['logs'] })
-    queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [exprMode, filters, logType, navigate, queryClient])
+  }, [exprMode, filters, logType, navigate, searchParams.expr])
 
   const handleReset = useCallback(() => {
     const { start, end } = getDefaultTimeRange()
@@ -452,6 +331,8 @@ export function CommonLogsFilterBar<TData>(
     setFilters(resetFilters)
     setExprMode(false)
     setLogType(LOG_TYPE_ALL_VALUE)
+    exprOriginRef.current = 'generated'
+    pendingExpressionUrlRef.current = undefined
 
     navigate({
       to: '/usage-logs/$section',
@@ -463,9 +344,7 @@ export function CommonLogsFilterBar<TData>(
         endTime: end.getTime(),
       },
     })
-    queryClient.invalidateQueries({ queryKey: ['logs'] })
-    queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [navigate, queryClient])
+  }, [navigate])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -521,9 +400,10 @@ export function CommonLogsFilterBar<TData>(
       <TooltipTrigger
         render={
           <Button
+            type='button'
             variant={exprMode ? 'default' : 'outline'}
             size='icon'
-            onClick={() => setExprMode((prev) => !prev)}
+            onClick={handleModeToggle}
             aria-label={
               exprMode ? t('Use field filters') : t('Use expression search')
             }
@@ -558,6 +438,7 @@ export function CommonLogsFilterBar<TData>(
       <ExpressionSearchHelpDialog
         open={exprHelpOpen}
         onOpenChange={setExprHelpOpen}
+        isAdminView={isAdmin}
       />
     </>
   )
@@ -777,7 +658,7 @@ export function CommonLogsFilterBar<TData>(
           'Expression search, e.g. model_name contains "gpt" && type == 2'
         )}
         value={filters.expr || ''}
-        onChange={(e) => handleChange('expr', e.target.value)}
+        onChange={(e) => handleExpressionChange(e.target.value)}
         onKeyDown={handleKeyDown}
       />
     </LogsFilterField>
@@ -871,163 +752,6 @@ export function CommonLogsFilterBar<TData>(
       searchLoading={fetchingLogs > 0}
       onReset={handleReset}
     />
-  )
-}
-
-interface ExpressionSearchHelpDialogProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}
-
-function ExpressionSearchHelpDialog({
-  open,
-  onOpenChange,
-}: ExpressionSearchHelpDialogProps) {
-  const { t } = useTranslation()
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-h-[85vh] overflow-y-auto sm:max-w-4xl'>
-        <DialogHeader>
-          <DialogTitle>{t('Expression Search Reference')}</DialogTitle>
-          <DialogDescription>
-            {t(
-              'Expression search is parsed from the AST and translated into SQL with an allowed field list, placeholders, and escaped LIKE patterns.'
-            )}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className='space-y-5'>
-          <section className='space-y-2'>
-            <h3 className='text-sm font-medium'>{t('Quick Syntax')}</h3>
-            <ul className='text-muted-foreground list-disc space-y-1 ps-5 text-sm'>
-              <li>
-                {t(
-                  'Strings use double quotes, numbers are integers, booleans are true or false, and nil can check null values.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Use parentheses to group logic, for example not (model_name contains "embedding") && type == 2.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Boolean fields can be written directly, such as is_stream, or compared explicitly with true or false.'
-                )}
-              </li>
-            </ul>
-          </section>
-
-          <section className='space-y-2'>
-            <h3 className='text-sm font-medium'>{t('Available Fields')}</h3>
-            <div className='overflow-x-auto rounded-md border'>
-              <table className='w-full text-left text-sm'>
-                <thead className='bg-muted/50 text-muted-foreground'>
-                  <tr>
-                    <th className='px-3 py-2 font-medium'>{t('Field')}</th>
-                    <th className='px-3 py-2 font-medium'>{t('Type')}</th>
-                    <th className='px-3 py-2 font-medium'>
-                      {t('Availability')}
-                    </th>
-                    <th className='px-3 py-2 font-medium'>
-                      {t('Description')}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {exprFieldRows.map((field) => (
-                    <tr key={field.fields} className='border-t'>
-                      <td className='px-3 py-2 align-top'>
-                        <code className='bg-muted rounded px-1.5 py-0.5 font-mono text-xs'>
-                          {field.fields}
-                        </code>
-                      </td>
-                      <td className='px-3 py-2 align-top'>{t(field.type)}</td>
-                      <td className='px-3 py-2 align-top'>{t(field.scope)}</td>
-                      <td className='text-muted-foreground px-3 py-2 align-top'>
-                        {t(field.description)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className='space-y-2'>
-            <h3 className='text-sm font-medium'>{t('Operators')}</h3>
-            <div className='overflow-x-auto rounded-md border'>
-              <table className='w-full text-left text-sm'>
-                <thead className='bg-muted/50 text-muted-foreground'>
-                  <tr>
-                    <th className='px-3 py-2 font-medium'>{t('Operator')}</th>
-                    <th className='px-3 py-2 font-medium'>{t('Usage')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {exprOperatorRows.map((operator) => (
-                    <tr key={operator.syntax} className='border-t'>
-                      <td className='px-3 py-2 align-top'>
-                        <code className='bg-muted rounded px-1.5 py-0.5 font-mono text-xs'>
-                          {operator.syntax}
-                        </code>
-                      </td>
-                      <td className='text-muted-foreground px-3 py-2 align-top'>
-                        {t(operator.description)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className='space-y-2'>
-            <h3 className='text-sm font-medium'>{t('Useful Expressions')}</h3>
-            <div className='grid gap-3 md:grid-cols-2'>
-              {exprExamples.map((example) => (
-                <div key={example.title} className='rounded-md border p-3'>
-                  <div className='font-medium'>{t(example.title)}</div>
-                  <code className='bg-muted mt-2 block rounded px-2 py-1.5 font-mono text-xs break-all'>
-                    {example.expression}
-                  </code>
-                  <p className='text-muted-foreground mt-2 text-sm'>
-                    {t(example.description)}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className='space-y-2'>
-            <h3 className='text-sm font-medium'>{t('Safety and Limits')}</h3>
-            <ul className='text-muted-foreground list-disc space-y-1 ps-5 text-sm'>
-              <li>
-                {t(
-                  'Only the fields listed above are accepted; unknown identifiers are rejected before SQL is built.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Values are bound as SQL parameters, and LIKE searches escape %, _, and ! characters.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Expressions are limited to 4096 characters, string literals to 1024 characters, and in arrays to 100 items.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Regex matches, arithmetic, unsupported function calls, and field-to-field comparisons are not supported.'
-                )}
-              </li>
-            </ul>
-          </section>
-        </div>
-      </DialogContent>
-    </Dialog>
   )
 }
 

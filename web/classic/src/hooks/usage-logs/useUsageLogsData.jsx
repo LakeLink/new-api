@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '@douyinfe/semi-ui';
 import {
@@ -76,7 +76,15 @@ export const useLogsData = () => {
   const [logCount, setLogCount] = useState(0);
   const [pageSize, setPageSize] = useState(ITEMS_PER_PAGE);
   const [logType, setLogType] = useState(0);
-  const [exprMode, setExprMode] = useState(false);
+  const [exprMode, setExprModeState] = useState(false);
+  const exprModeRef = useRef(false);
+  const logRequestRef = useRef(null);
+  const statRequestRef = useRef(null);
+
+  const setExprMode = (nextExprMode) => {
+    exprModeRef.current = nextExprMode;
+    setExprModeState(nextExprMode);
+  };
 
   // User and admin
   const isAdminUser = isAdmin();
@@ -111,6 +119,7 @@ export const useLogsData = () => {
     channel: '',
     group: '',
     request_id: '',
+    upstream_request_id: '',
     expr_search: '',
     dateRange: [
       timestamp2string(getTodayStartTimestamp()),
@@ -270,13 +279,14 @@ export const useLogsData = () => {
       channel: formValues.channel || '',
       group: formValues.group || '',
       request_id: formValues.request_id || '',
+      upstream_request_id: formValues.upstream_request_id || '',
       expr_search: formValues.expr_search || '',
       logType: formValues.logType ? parseInt(formValues.logType) : 0,
     };
   };
 
   // Statistics functions
-  const getLogSelfStat = async () => {
+  const getLogSelfStat = async (signal) => {
     const {
       token_name,
       model_name,
@@ -284,6 +294,7 @@ export const useLogsData = () => {
       end_timestamp,
       group,
       request_id,
+      upstream_request_id,
       expr_search,
       logType: formLogType,
     } = getFormValues();
@@ -291,7 +302,7 @@ export const useLogsData = () => {
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
     const params = new URLSearchParams();
-    if (exprMode) {
+    if (exprModeRef.current) {
       if (expr_search) params.set('expr', expr_search);
     } else {
       params.set('start_timestamp', String(localStartTimestamp));
@@ -301,9 +312,16 @@ export const useLogsData = () => {
       if (model_name) params.set('model_name', model_name);
       if (group) params.set('group', group);
       if (request_id) params.set('request_id', request_id);
+      if (upstream_request_id) {
+        params.set('upstream_request_id', upstream_request_id);
+      }
     }
     let url = `/api/log/self/stat?${params.toString()}`;
-    let res = await API.get(url);
+    let res = await API.get(url, {
+      signal,
+      disableDuplicate: true,
+      skipErrorHandler: true,
+    });
     const { success, message, data } = res.data;
     if (success) {
       setStat(data);
@@ -312,7 +330,7 @@ export const useLogsData = () => {
     }
   };
 
-  const getLogStat = async () => {
+  const getLogStat = async (signal) => {
     const {
       username,
       token_name,
@@ -322,6 +340,7 @@ export const useLogsData = () => {
       channel,
       group,
       request_id,
+      upstream_request_id,
       expr_search,
       logType: formLogType,
     } = getFormValues();
@@ -329,7 +348,7 @@ export const useLogsData = () => {
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
     const params = new URLSearchParams();
-    if (exprMode) {
+    if (exprModeRef.current) {
       if (expr_search) params.set('expr', expr_search);
     } else {
       params.set('start_timestamp', String(localStartTimestamp));
@@ -341,9 +360,16 @@ export const useLogsData = () => {
       if (channel) params.set('channel', channel);
       if (group) params.set('group', group);
       if (request_id) params.set('request_id', request_id);
+      if (upstream_request_id) {
+        params.set('upstream_request_id', upstream_request_id);
+      }
     }
     let url = `/api/log/stat?${params.toString()}`;
-    let res = await API.get(url);
+    let res = await API.get(url, {
+      signal,
+      disableDuplicate: true,
+      skipErrorHandler: true,
+    });
     const { success, message, data } = res.data;
     if (success) {
       setStat(data);
@@ -353,17 +379,27 @@ export const useLogsData = () => {
   };
 
   const handleEyeClick = async () => {
-    if (loadingStat) {
-      return;
-    }
+    statRequestRef.current?.abort();
+    const controller = new AbortController();
+    statRequestRef.current = controller;
     setLoadingStat(true);
-    if (isAdminUser) {
-      await getLogStat();
-    } else {
-      await getLogSelfStat();
+    try {
+      if (isAdminUser) {
+        await getLogStat(controller.signal);
+      } else {
+        await getLogSelfStat(controller.signal);
+      }
+      if (statRequestRef.current === controller) setShowStat(true);
+    } catch (error) {
+      if (error?.code !== 'ERR_CANCELED') {
+        showError(error?.response?.data?.message || error?.message);
+      }
+    } finally {
+      if (statRequestRef.current === controller) {
+        statRequestRef.current = null;
+        setLoadingStat(false);
+      }
     }
-    setShowStat(true);
-    setLoadingStat(false);
   };
 
   // User info function
@@ -790,6 +826,9 @@ export const useLogsData = () => {
 
   // Load logs function
   const loadLogs = async (startIdx, pageSize, customLogType = null) => {
+    logRequestRef.current?.abort();
+    const controller = new AbortController();
+    logRequestRef.current = controller;
     setLoading(true);
 
     let url = '';
@@ -802,6 +841,7 @@ export const useLogsData = () => {
       channel,
       group,
       request_id,
+      upstream_request_id,
       expr_search,
       logType: formLogType,
     } = getFormValues();
@@ -819,7 +859,7 @@ export const useLogsData = () => {
       p: String(startIdx),
       page_size: String(pageSize),
     });
-    if (exprMode) {
+    if (exprModeRef.current) {
       if (expr_search) params.set('expr', expr_search);
     } else {
       params.set('start_timestamp', String(localStartTimestamp));
@@ -829,6 +869,9 @@ export const useLogsData = () => {
       if (model_name) params.set('model_name', model_name);
       if (group) params.set('group', group);
       if (request_id) params.set('request_id', request_id);
+      if (upstream_request_id) {
+        params.set('upstream_request_id', upstream_request_id);
+      }
       if (isAdminUser) {
         if (username) params.set('username', username);
         if (channel) params.set('channel', channel);
@@ -837,21 +880,36 @@ export const useLogsData = () => {
     if (isAdminUser) {
       url = `/api/log/?${params.toString()}`;
     } else {
-      url = `/api/log/self/?${params.toString()}`;
+      url = `/api/log/self?${params.toString()}`;
     }
-    const res = await API.get(url);
-    const { success, message, data } = res.data;
-    if (success) {
-      const newPageData = data.items;
-      setActivePage(data.page);
-      setPageSize(data.page_size);
-      setLogCount(data.total);
+    try {
+      const res = await API.get(url, {
+        signal: controller.signal,
+        disableDuplicate: true,
+        skipErrorHandler: true,
+      });
+      if (logRequestRef.current !== controller) return;
+      const { success, message, data } = res.data;
+      if (success) {
+        const newPageData = data.items;
+        setActivePage(data.page);
+        setPageSize(data.page_size);
+        setLogCount(data.total);
 
-      setLogsFormat(newPageData);
-    } else {
-      showError(message);
+        setLogsFormat(newPageData);
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      if (error?.code !== 'ERR_CANCELED') {
+        showError(error?.response?.data?.message || error?.message);
+      }
+    } finally {
+      if (logRequestRef.current === controller) {
+        logRequestRef.current = null;
+        setLoading(false);
+      }
     }
-    setLoading(false);
   };
 
   const exportLogs = async (format, exportLimit = '10000') => {
@@ -873,6 +931,7 @@ export const useLogsData = () => {
         channel,
         group,
         request_id,
+        upstream_request_id,
         expr_search,
         logType: formLogType,
       } = getFormValues();
@@ -884,7 +943,7 @@ export const useLogsData = () => {
         params.set('limit', exportLimit);
       }
 
-      if (exprMode) {
+      if (exprModeRef.current) {
         if (expr_search) params.set('expr', expr_search);
       } else {
         params.set('start_timestamp', String(localStartTimestamp));
@@ -894,6 +953,9 @@ export const useLogsData = () => {
         if (model_name) params.set('model_name', model_name);
         if (group) params.set('group', group);
         if (request_id) params.set('request_id', request_id);
+        if (upstream_request_id) {
+          params.set('upstream_request_id', upstream_request_id);
+        }
         if (isAdminUser) {
           if (username) params.set('username', username);
           if (channel) params.set('channel', channel);
@@ -933,7 +995,7 @@ export const useLogsData = () => {
     localStorage.setItem('page-size', size + '');
     setPageSize(size);
     setActivePage(1);
-    loadLogs(activePage, size)
+    loadLogs(1, size)
       .then()
       .catch((reason) => {
         showError(reason);
@@ -943,8 +1005,7 @@ export const useLogsData = () => {
   // Refresh function
   const refresh = async () => {
     setActivePage(1);
-    handleEyeClick();
-    await loadLogs(1, pageSize);
+    await Promise.all([handleEyeClick(), loadLogs(1, pageSize)]);
   };
 
   // Copy text function
@@ -968,6 +1029,14 @@ export const useLogsData = () => {
         showError(reason);
       });
   }, []);
+
+  useEffect(
+    () => () => {
+      logRequestRef.current?.abort();
+      statRequestRef.current?.abort();
+    },
+    [],
+  );
 
   // Initialize statistics when formApi is available
   useEffect(() => {

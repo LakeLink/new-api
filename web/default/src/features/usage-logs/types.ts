@@ -351,6 +351,53 @@ export interface GetLogStatsResponse {
   data?: LogStatistics
 }
 
+export interface LogExpressionSchemaField {
+  names: string[]
+  type: string
+  scope: 'all' | 'admin'
+  description: string
+  descriptionZh?: string
+}
+
+export interface LogExpressionSchemaOperator {
+  syntax: string
+  description: string
+  descriptionZh?: string
+}
+
+export interface LogExpressionSchemaExample {
+  title: string
+  titleZh?: string
+  expression: string
+  description: string
+  descriptionZh?: string
+  scope?: 'all' | 'admin'
+}
+
+export interface LogExpressionSchema {
+  intro?: string
+  introZh?: string
+  quickSyntax?: string
+  quickSyntaxZh?: string
+  safety?: string
+  safetyZh?: string
+  fields: LogExpressionSchemaField[]
+  operators: LogExpressionSchemaOperator[]
+  examples: LogExpressionSchemaExample[]
+  limits: {
+    maxLength: number
+    maxNodes: number
+    maxStringLength: number
+    maxInItems: number
+  }
+}
+
+export interface GetLogExpressionSchemaResponse {
+  success: boolean
+  message?: string
+  data?: LogExpressionSchema
+}
+
 // ============================================================================
 // Drawing Log Types
 // ============================================================================
@@ -391,6 +438,7 @@ export interface FetchLogsConfig {
   pageSize: number
   searchParams: Record<string, unknown>
   columnFilters: Array<{ id: string; value: unknown }>
+  signal?: AbortSignal
 }
 
 // ============================================================================

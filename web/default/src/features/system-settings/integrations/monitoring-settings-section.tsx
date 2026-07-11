@@ -1,6 +1,3 @@
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -19,13 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo, useRef } from 'react'
-import * as z from 'zod'
-import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useEffect, useMemo, useRef } from 'react'
+import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { parseHttpStatusCodeRules } from '@/lib/http-status-code-rules'
+import * as z from 'zod'
+
 import {
   Form,
   FormControl,
@@ -36,8 +33,18 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { parseHttpStatusCodeRules } from '@/lib/http-status-code-rules'
+
 import {
   SettingsForm,
   SettingsSwitchContent,
@@ -47,6 +54,7 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { safeNumberFieldProps } from '../utils/numeric-field'
 
 const numericString = z.string().refine((value) => {
   const trimmed = value.trim()
@@ -75,6 +83,12 @@ const monitoringSchema = z
         .number()
         .int()
         .min(0, 'Retention must be zero or greater'),
+    }),
+    perf_metrics_setting: z.object({
+      enabled: z.boolean(),
+      flush_interval: z.coerce.number().min(1),
+      bucket_time: z.enum(['minute', '5min', 'hour']),
+      retention_days: z.coerce.number().min(0),
     }),
   })
   .superRefine((values, ctx) => {
@@ -120,11 +134,15 @@ type MonitoringSettingsSectionProps = {
     'monitor_setting.auto_test_channel_enabled': boolean
     'monitor_setting.auto_test_channel_minutes': number
     'active_request_setting.completed_retention_seconds': number
+    'perf_metrics_setting.enabled': boolean
+    'perf_metrics_setting.flush_interval': number
+    'perf_metrics_setting.bucket_time': 'minute' | '5min' | 'hour'
+    'perf_metrics_setting.retention_days': number
   }
 }
 
 function normalizeLineEndings(value: string) {
-  return value.replace(/\r\n/g, '\n')
+  return value.replaceAll('\r\n', '\n')
 }
 
 type NormalizedMonitoringValues = {
@@ -138,6 +156,10 @@ type NormalizedMonitoringValues = {
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'active_request_setting.completed_retention_seconds': number
+  'perf_metrics_setting.enabled': boolean
+  'perf_metrics_setting.flush_interval': number
+  'perf_metrics_setting.bucket_time': 'minute' | '5min' | 'hour'
+  'perf_metrics_setting.retention_days': number
 }
 
 const buildFormDefaults = (
@@ -161,6 +183,12 @@ const buildFormDefaults = (
   active_request_setting: {
     completed_retention_seconds:
       defaults['active_request_setting.completed_retention_seconds'],
+  },
+  perf_metrics_setting: {
+    enabled: defaults['perf_metrics_setting.enabled'],
+    flush_interval: defaults['perf_metrics_setting.flush_interval'],
+    bucket_time: defaults['perf_metrics_setting.bucket_time'],
+    retention_days: defaults['perf_metrics_setting.retention_days'],
   },
 })
 
@@ -186,6 +214,13 @@ const normalizeDefaults = (
     defaults['monitor_setting.auto_test_channel_minutes'],
   'active_request_setting.completed_retention_seconds':
     defaults['active_request_setting.completed_retention_seconds'],
+  'perf_metrics_setting.enabled': defaults['perf_metrics_setting.enabled'],
+  'perf_metrics_setting.flush_interval':
+    defaults['perf_metrics_setting.flush_interval'],
+  'perf_metrics_setting.bucket_time':
+    defaults['perf_metrics_setting.bucket_time'],
+  'perf_metrics_setting.retention_days':
+    defaults['perf_metrics_setting.retention_days'],
 })
 
 const normalizeFormValues = (
@@ -210,6 +245,12 @@ const normalizeFormValues = (
     values.monitor_setting.auto_test_channel_minutes,
   'active_request_setting.completed_retention_seconds':
     values.active_request_setting.completed_retention_seconds,
+  'perf_metrics_setting.enabled': values.perf_metrics_setting.enabled,
+  'perf_metrics_setting.flush_interval':
+    values.perf_metrics_setting.flush_interval,
+  'perf_metrics_setting.bucket_time': values.perf_metrics_setting.bucket_time,
+  'perf_metrics_setting.retention_days':
+    values.perf_metrics_setting.retention_days,
 })
 
 export function MonitoringSettingsSection({
@@ -219,6 +260,9 @@ export function MonitoringSettingsSection({
   const updateOption = useUpdateOption()
   const baselineRef = useRef<NormalizedMonitoringValues>(
     normalizeDefaults(defaultValues)
+  )
+  const baselineSerializedRef = useRef(
+    JSON.stringify(normalizeDefaults(defaultValues))
   )
 
   const formDefaults = useMemo(
@@ -233,8 +277,17 @@ export function MonitoringSettingsSection({
 
   useResetForm(form, formDefaults)
 
+  useEffect(() => {
+    const normalized = normalizeDefaults(defaultValues)
+    const serialized = JSON.stringify(normalized)
+    if (serialized === baselineSerializedRef.current) return
+    baselineRef.current = normalized
+    baselineSerializedRef.current = serialized
+  }, [defaultValues])
+
   const autoDisableStatusCodes = form.watch('AutomaticDisableStatusCodes')
   const autoRetryStatusCodes = form.watch('AutomaticRetryStatusCodes')
+  const perfMetricsEnabled = form.watch('perf_metrics_setting.enabled')
   const autoDisableParsed = useMemo(
     () => parseHttpStatusCodeRules(autoDisableStatusCodes),
     [autoDisableStatusCodes]
@@ -264,6 +317,7 @@ export function MonitoringSettingsSection({
     }
 
     baselineRef.current = normalized
+    baselineSerializedRef.current = JSON.stringify(normalized)
   }
 
   return (
@@ -541,6 +595,111 @@ export function MonitoringSettingsSection({
                           {t('Normalized:')} {autoRetryParsed.normalized}
                         </span>
                       )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+
+          <div>
+            <h4 className='font-medium'>{t('Model performance metrics')}</h4>
+            <p className='text-muted-foreground mt-1 text-xs'>
+              {t(
+                'Collect relay latency and success-rate metrics for the model square.'
+              )}
+            </p>
+          </div>
+
+          <div className='grid grid-cols-1 gap-4 md:grid-cols-4'>
+            <FormField
+              control={form.control}
+              name='perf_metrics_setting.enabled'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>
+                      {t('Enable model performance metrics')}
+                    </FormLabel>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='perf_metrics_setting.flush_interval'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Flush interval (minutes)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      step={1}
+                      {...safeNumberFieldProps(field)}
+                      disabled={!perfMetricsEnabled}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='perf_metrics_setting.bucket_time'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Aggregation bucket')}</FormLabel>
+                  <Select
+                    items={[
+                      { value: 'minute', label: t('1 minute') },
+                      { value: '5min', label: t('5 minutes') },
+                      { value: 'hour', label: t('1 hour') },
+                    ]}
+                    value={field.value}
+                    onValueChange={field.onChange}
+                    disabled={!perfMetricsEnabled}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        <SelectItem value='minute'>{t('1 minute')}</SelectItem>
+                        <SelectItem value='5min'>{t('5 minutes')}</SelectItem>
+                        <SelectItem value='hour'>{t('1 hour')}</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='perf_metrics_setting.retention_days'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Retention days')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      step={1}
+                      {...safeNumberFieldProps(field)}
+                      disabled={!perfMetricsEnabled}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('0 means data is kept permanently')}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

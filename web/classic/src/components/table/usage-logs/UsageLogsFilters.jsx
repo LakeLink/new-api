@@ -17,243 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button, Form, Modal, Select, Tooltip } from '@douyinfe/semi-ui';
 import { IconDownload, IconHelpCircle, IconSearch } from '@douyinfe/semi-icons';
+import { useTranslation } from 'react-i18next';
 
 import { DATE_RANGE_PRESETS } from '../../../constants/console.constants';
-
-const exprFieldRows = [
-  {
-    fields: 'id',
-    type: '数字',
-    scope: '所有用户',
-    description: '日志记录 ID。',
-  },
-  {
-    fields: 'user_id',
-    type: '数字',
-    scope: '所有用户',
-    description: '拥有该日志的用户 ID。',
-  },
-  {
-    fields: 'created_at, createdAt, timestamp',
-    type: '数字',
-    scope: '所有用户',
-    description: '创建时间，支持 Unix 秒级时间戳或 date(...)。',
-  },
-  {
-    fields: 'type, log_type',
-    type: '数字',
-    scope: '所有用户',
-    description: '日志类型：1 充值，2 消费，3 管理，4 系统，5 错误，6 退款。',
-  },
-  {
-    fields: 'content',
-    type: '字符串',
-    scope: '所有用户',
-    description: '主要日志内容或错误消息文本。',
-  },
-  {
-    fields: 'token_name, token',
-    type: '字符串',
-    scope: '所有用户',
-    description: '日志中记录的 API 令牌名称。',
-  },
-  {
-    fields: 'model_name, model',
-    type: '字符串',
-    scope: '所有用户',
-    description: '请求的模型名称。',
-  },
-  {
-    fields: 'quota',
-    type: '数字',
-    scope: '所有用户',
-    description: '本次记录扣费额度。',
-  },
-  {
-    fields: 'prompt_tokens',
-    type: '数字',
-    scope: '所有用户',
-    description: '提示词或输入 token 数。',
-  },
-  {
-    fields: 'completion_tokens',
-    type: '数字',
-    scope: '所有用户',
-    description: '补全或输出 token 数。',
-  },
-  {
-    fields: 'use_time',
-    type: '数字',
-    scope: '所有用户',
-    description: '响应耗时，单位为秒。',
-  },
-  {
-    fields: 'is_stream, stream',
-    type: '布尔值',
-    scope: '所有用户',
-    description: '请求是否使用流式响应。',
-  },
-  {
-    fields: 'today, yesterday',
-    type: '布尔值',
-    scope: '所有用户',
-    description: '当前或上一个本地自然日的快捷筛选条件。',
-  },
-  {
-    fields: 'token_id',
-    type: '数字',
-    scope: '所有用户',
-    description: 'API 令牌的数字 ID。',
-  },
-  {
-    fields: 'group',
-    type: '字符串',
-    scope: '所有用户',
-    description: '计费或请求分组名称。',
-  },
-  {
-    fields: 'ip',
-    type: '字符串',
-    scope: '所有用户',
-    description: '开启 IP 记录后保存的客户端 IP 地址。',
-  },
-  {
-    fields: 'request_id, requestId',
-    type: '字符串',
-    scope: '所有用户',
-    description: '用于追踪单次调用的 Request ID。',
-  },
-  {
-    fields: 'other',
-    type: '字符串',
-    scope: '所有用户',
-    description: '随日志保存的额外元数据。',
-  },
-  {
-    fields: 'username',
-    type: '字符串',
-    scope: '仅管理员',
-    description: '日志关联的用户名。',
-  },
-  {
-    fields: 'channel, channel_id',
-    type: '数字',
-    scope: '仅管理员',
-    description: '请求使用的渠道 ID。',
-  },
-  {
-    fields: 'channel_name, channelName',
-    type: '字符串',
-    scope: '仅管理员',
-    description: '请求使用的渠道名称。',
-  },
-];
-
-const exprOperatorRows = [
-  {
-    syntax: '&&, ||, !, and, or, not',
-    description: '使用布尔逻辑和括号组合多个条件。',
-  },
-  {
-    syntax: '==, !=, >, >=, <, <=',
-    description: '将字段与字符串、整数、布尔值、nil 或 date(...) 字面量比较。',
-  },
-  {
-    syntax: 'contains, startsWith, endsWith',
-    description: '对字符串字段执行 SQL LIKE 匹配，并自动转义通配符。',
-  },
-  {
-    syntax: 'in, not in',
-    description: '将字段与最多 100 个字面量组成的数组进行匹配。',
-  },
-  {
-    syntax: 'nil',
-    description: 'nil 只能与 == 或 != 一起用于空值判断。',
-  },
-];
-
-const exprExamples = [
-  {
-    title: 'GPT 消费日志',
-    expression: 'model_name contains "gpt" && type == 2',
-    description: '查找 GPT 系列模型的消费记录。',
-  },
-  {
-    title: '今日 GPT 日志',
-    expression: 'model_name contains "gpt-5.5" and today',
-    description: '查找当前本地自然日内匹配该模型的日志。',
-  },
-  {
-    title: '按一天日期筛选',
-    expression:
-      'created_at >= date("2025-01-01") && created_at < date("2025-01-02")',
-    description: '使用 date(...) 写可读日期；需要时可添加时区参数。',
-  },
-  {
-    title: '高额度消费',
-    expression: 'quota > 1000 && type == 2',
-    description: '查找额度消耗较高的消费记录。',
-  },
-  {
-    title: '大 token 请求',
-    expression: 'prompt_tokens > 8000 || completion_tokens > 2000',
-    description: '查找输入或输出 token 数异常大的调用。',
-  },
-  {
-    title: '流式 Claude 调用',
-    expression: 'is_stream == true && model_name contains "claude"',
-    description: '查找 Claude 系列模型的流式请求。',
-  },
-  {
-    title: '单个 Request ID',
-    expression: 'request_id == "req_xxx"',
-    description: '直接定位一条可追踪请求。',
-  },
-  {
-    title: '指定分组',
-    expression: 'group in ["default", "vip"]',
-    description: '查找属于多个分组之一的记录。',
-  },
-  {
-    title: '模型家族',
-    expression:
-      'model_name startsWith "gpt-4" || model_name startsWith "claude"',
-    description: '在同一次搜索中比较多个模型前缀。',
-  },
-  {
-    title: '错误和限流',
-    expression: 'content contains "timeout" || other contains "429"',
-    description: '查找超时消息或上游限流元数据。',
-  },
-  {
-    title: '排除 Embedding',
-    expression: 'not (model_name contains "embedding") && type == 2',
-    description: '保留普通消费日志并隐藏 embedding 调用。',
-  },
-  {
-    title: '某时间后的具名令牌',
-    expression: 'token_name != "" && created_at >= date("2025-01-01")',
-    description: '查找某个可读日期之后带令牌名称的日志。',
-  },
-  {
-    title: '单个客户端 IP',
-    expression: 'ip == "1.2.3.4"',
-    description: '查找来自某个客户端 IP 的请求。',
-  },
-  {
-    title: '管理员：用户和渠道',
-    expression: 'username == "alice" && channel == 12',
-    description: '管理员可按用户名和数字渠道 ID 筛选。',
-  },
-  {
-    title: '管理员：渠道名称',
-    expression: 'channel_name contains "openai" && type == 2',
-    description: '管理员可按渠道名称和日志类型筛选。',
-  },
-];
+import { API } from '../../../helpers';
+import { buildLogFilterExpression } from '../../../helpers/log-expression';
 
 const exportFormatOptions = [
   { value: 'jsonl', label: '导出 JSONL' },
@@ -270,6 +41,25 @@ const exportRowOptions = [
   '20000',
   'all',
 ];
+
+function expressionFieldNames(field) {
+  return Array.isArray(field.names)
+    ? field.names.join(', ')
+    : field.names || field.fields;
+}
+
+function expressionFieldTypeKey(type) {
+  if (type === 'Number') return '数字';
+  if (type === 'String') return '字符串';
+  if (type === 'Boolean') return '布尔值';
+  return type;
+}
+
+function expressionFieldScopeKey(scope) {
+  if (scope === 'admin') return '仅管理员';
+  if (scope === 'all') return '所有用户';
+  return scope;
+}
 
 const LogsFilters = ({
   formInitValues,
@@ -291,6 +81,88 @@ const LogsFilters = ({
   const [exportDialogVisible, setExportDialogVisible] = useState(false);
   const [exportFormat, setExportFormat] = useState('jsonl');
   const [exportRowLimit, setExportRowLimit] = useState('10000');
+  const [expressionSchema, setExpressionSchema] = useState(null);
+  const [expressionSchemaRole, setExpressionSchemaRole] = useState(null);
+  const [expressionSchemaLoading, setExpressionSchemaLoading] = useState(false);
+  const [expressionSchemaError, setExpressionSchemaError] = useState(false);
+  const [expressionSchemaReload, setExpressionSchemaReload] = useState(0);
+  const generatedExpressionRef = useRef(null);
+  const expressionEditedRef = useRef(false);
+
+  useEffect(() => {
+    const role = isAdminUser ? 'admin' : 'user';
+    if (
+      !exprHelpVisible ||
+      (expressionSchema && expressionSchemaRole === role)
+    ) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    setExpressionSchemaLoading(true);
+    setExpressionSchemaError(false);
+    API.get('/api/log/expr/schema', {
+      signal: controller.signal,
+      disableDuplicate: true,
+      skipErrorHandler: true,
+    })
+      .then((response) => {
+        if (!cancelled && response.data?.success && response.data.data) {
+          setExpressionSchema(response.data.data);
+          setExpressionSchemaRole(role);
+        } else if (!cancelled) {
+          setExpressionSchemaError(true);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled && error?.code !== 'ERR_CANCELED') {
+          setExpressionSchemaError(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setExpressionSchemaLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    exprHelpVisible,
+    expressionSchema,
+    expressionSchemaReload,
+    expressionSchemaRole,
+    isAdminUser,
+  ]);
+
+  const handleExpressionModeToggle = () => {
+    if (exprMode) {
+      setExprMode(false);
+      return;
+    }
+
+    if (!expressionEditedRef.current && formApi) {
+      const values = formApi.getValues();
+      const generated = buildLogFilterExpression(
+        values,
+        isAdminUser,
+        formInitValues.dateRange,
+      );
+      generatedExpressionRef.current = generated;
+      formApi.setValue('expr_search', generated);
+    }
+    setExprMode(true);
+  };
+
+  const handleExpressionEdited = (value) => {
+    if (value === generatedExpressionRef.current) {
+      generatedExpressionRef.current = null;
+      return;
+    }
+    expressionEditedRef.current = true;
+    generatedExpressionRef.current = null;
+  };
 
   const handleExportConfirm = async () => {
     const success = await exportLogs(exportFormat, exportRowLimit);
@@ -329,6 +201,7 @@ const LogsFilters = ({
                 showClear
                 pure
                 size='small'
+                onChange={handleExpressionEdited}
               />
             ) : (
               <>
@@ -387,6 +260,15 @@ const LogsFilters = ({
                   size='small'
                 />
 
+                <Form.Input
+                  field='upstream_request_id'
+                  prefix={<IconSearch />}
+                  placeholder={t('Upstream Request ID')}
+                  showClear
+                  pure
+                  size='small'
+                />
+
                 {isAdminUser && (
                   <>
                     <Form.Input
@@ -437,6 +319,7 @@ const LogsFilters = ({
                   <Form.Select.Option value='4'>{t('系统')}</Form.Select.Option>
                   <Form.Select.Option value='5'>{t('错误')}</Form.Select.Option>
                   <Form.Select.Option value='6'>{t('退款')}</Form.Select.Option>
+                  <Form.Select.Option value='7'>{t('登录')}</Form.Select.Option>
                 </Form.Select>
               )}
             </div>
@@ -444,7 +327,7 @@ const LogsFilters = ({
             <div className='flex gap-2 w-full sm:w-auto justify-end'>
               <Button
                 type={exprMode ? 'primary' : 'tertiary'}
-                onClick={() => setExprMode(!exprMode)}
+                onClick={handleExpressionModeToggle}
                 size='small'
               >
                 {exprMode ? t('字段搜索') : t('表达式搜索')}
@@ -482,6 +365,8 @@ const LogsFilters = ({
                 onClick={() => {
                   if (formApi) {
                     formApi.reset();
+                    generatedExpressionRef.current = null;
+                    expressionEditedRef.current = false;
                     setLogType(0);
                     setExprMode(false);
                     setTimeout(() => {
@@ -508,6 +393,15 @@ const LogsFilters = ({
       <ExpressionSearchHelpModal
         visible={exprHelpVisible}
         onCancel={() => setExprHelpVisible(false)}
+        schema={
+          expressionSchemaRole === (isAdminUser ? 'admin' : 'user')
+            ? expressionSchema
+            : null
+        }
+        loading={expressionSchemaLoading}
+        loadError={expressionSchemaError}
+        onRetry={() => setExpressionSchemaReload((value) => value + 1)}
+        isAdminUser={isAdminUser}
         t={t}
       />
 
@@ -579,7 +473,55 @@ const tableCellStyle = {
   borderTop: '1px solid var(--semi-color-border)',
 };
 
-function ExpressionSearchHelpModal({ visible, onCancel, t }) {
+function ExpressionSearchHelpModal({
+  visible,
+  onCancel,
+  schema,
+  loading,
+  loadError,
+  onRetry,
+  isAdminUser,
+  t,
+}) {
+  const { i18n } = useTranslation();
+  const schemaText = (english, chinese) => {
+    if (i18n.resolvedLanguage?.startsWith('zh')) {
+      return chinese || english;
+    }
+    if (chinese) {
+      const translated = t(chinese);
+      if (translated !== chinese) return translated;
+    }
+    return english;
+  };
+  const fields = (schema?.fields || []).filter(
+    (field) => field.scope !== 'admin' || isAdminUser,
+  );
+  const examples = (schema?.examples || []).filter(
+    (example) => example.scope !== 'admin' || isAdminUser,
+  );
+
+  if (!schema) {
+    return (
+      <Modal
+        title={t('表达式搜索参考')}
+        visible={visible}
+        onCancel={onCancel}
+        footer={null}
+        width={920}
+      >
+        <div className='flex min-h-32 items-center justify-center gap-3'>
+          <span>{t(loadError ? '加载失败' : '加载中...')}</span>
+          {loadError && (
+            <Button type='tertiary' loading={loading} onClick={onRetry}>
+              {t('重试')}
+            </Button>
+          )}
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal
       title={t('表达式搜索参考')}
@@ -592,31 +534,15 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
       <div className='space-y-5 text-sm'>
         <section className='space-y-2'>
           <p className='text-gray-500'>
-            {t(
-              '表达式搜索会从 AST 解析表达式，并使用允许字段列表、SQL 参数占位符和转义后的 LIKE 模式生成查询。',
-            )}
+            {schemaText(schema.intro, schema.introZh)}
           </p>
         </section>
 
         <section className='space-y-2'>
           <h3 className='font-medium'>{t('快速语法')}</h3>
-          <ul className='list-disc space-y-1 pl-5 text-gray-500'>
-            <li>
-              {t(
-                '字符串使用双引号，数字为整数，布尔值为 true 或 false，nil 可用于空值判断。',
-              )}
-            </li>
-            <li>
-              {t(
-                '使用括号组合逻辑，例如 not (model_name contains "embedding") && type == 2。',
-              )}
-            </li>
-            <li>
-              {t(
-                '布尔字段可以直接写 is_stream，也可以显式比较 true 或 false。',
-              )}
-            </li>
-          </ul>
+          <p className='text-gray-500'>
+            {schemaText(schema.quickSyntax, schema.quickSyntaxZh)}
+          </p>
         </section>
 
         <section className='space-y-2'>
@@ -652,24 +578,24 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
                 </tr>
               </thead>
               <tbody>
-                {exprFieldRows.map((field) => (
-                  <tr key={field.fields}>
+                {fields.map((field) => (
+                  <tr key={expressionFieldNames(field)}>
                     <td className='px-3 py-2 align-top' style={tableCellStyle}>
                       <code className='rounded bg-gray-100 px-1.5 py-0.5 text-xs'>
-                        {field.fields}
+                        {expressionFieldNames(field)}
                       </code>
                     </td>
                     <td className='px-3 py-2 align-top' style={tableCellStyle}>
-                      {t(field.type)}
+                      {t(expressionFieldTypeKey(field.type))}
                     </td>
                     <td className='px-3 py-2 align-top' style={tableCellStyle}>
-                      {t(field.scope)}
+                      {t(expressionFieldScopeKey(field.scope))}
                     </td>
                     <td
                       className='px-3 py-2 align-top text-gray-500'
                       style={tableCellStyle}
                     >
-                      {t(field.description)}
+                      {schemaText(field.description, field.descriptionZh)}
                     </td>
                   </tr>
                 ))}
@@ -699,7 +625,7 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
                 </tr>
               </thead>
               <tbody>
-                {exprOperatorRows.map((operator) => (
+                {(schema?.operators || []).map((operator) => (
                   <tr key={operator.syntax}>
                     <td className='px-3 py-2 align-top' style={tableCellStyle}>
                       <code className='rounded bg-gray-100 px-1.5 py-0.5 text-xs'>
@@ -710,7 +636,7 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
                       className='px-3 py-2 align-top text-gray-500'
                       style={tableCellStyle}
                     >
-                      {t(operator.description)}
+                      {schemaText(operator.description, operator.descriptionZh)}
                     </td>
                   </tr>
                 ))}
@@ -722,16 +648,20 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
         <section className='space-y-2'>
           <h3 className='font-medium'>{t('常用表达式')}</h3>
           <div className='grid grid-cols-1 gap-3 md:grid-cols-2'>
-            {exprExamples.map((example) => (
+            {examples.map((example) => (
               <div
                 key={example.title}
                 className='rounded-md border border-gray-200 p-3'
               >
-                <div className='font-medium'>{t(example.title)}</div>
+                <div className='font-medium'>
+                  {schemaText(example.title, example.titleZh)}
+                </div>
                 <code className='mt-2 block break-all rounded bg-gray-100 px-2 py-1.5 text-xs'>
                   {example.expression}
                 </code>
-                <p className='mt-2 text-gray-500'>{t(example.description)}</p>
+                <p className='mt-2 text-gray-500'>
+                  {schemaText(example.description, example.descriptionZh)}
+                </p>
               </div>
             ))}
           </div>
@@ -740,23 +670,11 @@ function ExpressionSearchHelpModal({ visible, onCancel, t }) {
         <section className='space-y-2'>
           <h3 className='font-medium'>{t('安全和限制')}</h3>
           <ul className='list-disc space-y-1 pl-5 text-gray-500'>
+            <li>{schemaText(schema.safety, schema.safetyZh)}</li>
             <li>
-              {t('只接受上方列出的字段，未知标识符会在生成 SQL 前被拒绝。')}
-            </li>
-            <li>
-              {t(
-                '所有值都会作为 SQL 参数绑定，LIKE 搜索会转义 %、_ 和 ! 字符。',
-              )}
-            </li>
-            <li>
-              {t(
-                '表达式最多 4096 个字符，字符串字面量最多 1024 个字符，in 数组最多 100 项。',
-              )}
-            </li>
-            <li>
-              {t(
-                '不支持正则 matches、算术运算、未支持的函数调用和字段之间的比较。'
-              )}
+              {i18n.resolvedLanguage?.startsWith('zh')
+                ? `表达式最多 ${schema.limits.maxLength} 个字符，语法树最多 ${schema.limits.maxNodes} 个节点，字符串字面量最多 ${schema.limits.maxStringLength} 个字符，in 数组最多 ${schema.limits.maxInItems} 项。`
+                : `Expressions are limited to ${schema.limits.maxLength} characters and ${schema.limits.maxNodes} syntax nodes; string literals are limited to ${schema.limits.maxStringLength} characters and in arrays to ${schema.limits.maxInItems} items.`}
             </li>
           </ul>
         </section>

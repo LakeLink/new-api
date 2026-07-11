@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"net/http"
@@ -23,15 +24,12 @@ func setupLogExportControllerTestDB(t *testing.T) *gorm.DB {
 	gin.SetMode(gin.TestMode)
 	oldDB := model.DB
 	oldLogDB := model.LOG_DB
-	oldUsingSQLite := common.UsingSQLite
-	oldUsingMySQL := common.UsingMySQL
-	oldUsingPostgreSQL := common.UsingPostgreSQL
+	oldMainDatabaseType := common.MainDatabaseType()
+	oldLogDatabaseType := common.LogDatabaseType()
 	oldRedisEnabled := common.RedisEnabled
 	oldLogExportPermission := common.LogExportPermission
 
-	common.UsingSQLite = true
-	common.UsingMySQL = false
-	common.UsingPostgreSQL = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
 	common.LogExportPermission = common.RoleAdminUser
 
@@ -50,9 +48,7 @@ func setupLogExportControllerTestDB(t *testing.T) *gorm.DB {
 		_ = sqlDB.Close()
 		model.DB = oldDB
 		model.LOG_DB = oldLogDB
-		common.UsingSQLite = oldUsingSQLite
-		common.UsingMySQL = oldUsingMySQL
-		common.UsingPostgreSQL = oldUsingPostgreSQL
+		common.SetDatabaseTypes(oldMainDatabaseType, oldLogDatabaseType)
 		common.RedisEnabled = oldRedisEnabled
 		common.LogExportPermission = oldLogExportPermission
 	})
@@ -84,13 +80,14 @@ func seedControllerLogExportData(t *testing.T, db *gorm.DB) {
 		Other:     `{"admin_info":{"node":"hidden"},"stream_status":"debug","safe":"old"}`,
 	}).Error)
 	require.NoError(t, db.Create(&model.Log{
-		UserId:    7,
-		CreatedAt: 1002,
-		Type:      model.LogTypeConsume,
-		Username:  "bob",
-		ModelName: "claude",
-		ChannelId: 22,
-		RequestId: "req_2",
+		UserId:            7,
+		CreatedAt:         1002,
+		Type:              model.LogTypeConsume,
+		Username:          "bob",
+		ModelName:         "claude",
+		ChannelId:         22,
+		RequestId:         "req_2",
+		UpstreamRequestId: "up_req_2",
 	}).Error)
 	require.NoError(t, db.Create(&model.Log{
 		UserId:    42,
@@ -148,6 +145,107 @@ func TestGetLogQueryOptionsParsesExportLimit(t *testing.T) {
 	}
 }
 
+func TestGetLogQueryOptionsCarriesRequestContext(t *testing.T) {
+	ctx, _ := newLogExportContext("/api/log/export")
+
+	opts := getLogQueryOptions(ctx)
+
+	assert.Equal(t, ctx.Request.Context(), opts.Context)
+}
+
+func TestGetLogExprSchemaScopesAdminFieldsByRole(t *testing.T) {
+	adminContext, adminRecorder := newLogExportContext("/api/log/expr/schema")
+	GetLogExprSchema(adminContext)
+
+	require.Equal(t, http.StatusOK, adminRecorder.Code)
+	var adminResponse struct {
+		Success bool                `json:"success"`
+		Data    model.LogExprSchema `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(adminRecorder.Body.Bytes(), &adminResponse))
+	require.True(t, adminResponse.Success)
+	assert.True(t, logExprSchemaResponseHasField(adminResponse.Data, "other"))
+
+	userContext, userRecorder := newLogExportContext("/api/log/expr/schema")
+	userContext.Set("role", common.RoleCommonUser)
+	GetLogExprSchema(userContext)
+
+	require.Equal(t, http.StatusOK, userRecorder.Code)
+	var userResponse struct {
+		Success bool                `json:"success"`
+		Data    model.LogExprSchema `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(userRecorder.Body.Bytes(), &userResponse))
+	require.True(t, userResponse.Success)
+	assert.False(t, logExprSchemaResponseHasField(userResponse.Data, "other"))
+}
+
+func logExprSchemaResponseHasField(schema model.LogExprSchema, name string) bool {
+	for _, field := range schema.Fields {
+		for _, alias := range field.Names {
+			if alias == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestGetAllLogsRejectsNonPositivePageSize(t *testing.T) {
+	for _, pageSize := range []string{"0", "-1"} {
+		t.Run(pageSize, func(t *testing.T) {
+			ctx, recorder := newLogExportContext("/api/log?page_size=" + pageSize)
+
+			GetAllLogs(ctx)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var response struct {
+				Success bool   `json:"success"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.False(t, response.Success)
+			assert.Contains(t, response.Message, "page and page_size must be positive integers")
+		})
+	}
+}
+
+func TestGetUserLogsRejectsNonPositivePage(t *testing.T) {
+	for _, page := range []string{"0", "-1"} {
+		t.Run(page, func(t *testing.T) {
+			ctx, recorder := newLogExportContext("/api/log/self?p=" + page)
+			ctx.Set("id", 42)
+
+			GetUserLogs(ctx)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var response struct {
+				Success bool   `json:"success"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.False(t, response.Success)
+			assert.Contains(t, response.Message, "page and page_size must be positive integers")
+		})
+	}
+}
+
+func TestGetAllLogsRejectsPageOffsetOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	ctx, recorder := newLogExportContext(fmt.Sprintf("/api/log?p=%d&page_size=100", maxInt))
+
+	GetAllLogs(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Contains(t, response.Message, "page offset is too large")
+}
+
 func TestExportAllLogsStreamsJSONLWithNoLimit(t *testing.T) {
 	db := setupLogExportControllerTestDB(t)
 	seedControllerLogExportData(t, db)
@@ -188,9 +286,11 @@ func TestExportAllLogsStreamsCSVWithSelectedLimit(t *testing.T) {
 	rows[0][0] = strings.TrimPrefix(rows[0][0], "\ufeff")
 	assert.Equal(t, "id", rows[0][0])
 	assert.Equal(t, "request_id", rows[0][17])
+	assert.Equal(t, "upstream_request_id", rows[0][len(rows[0])-1])
 	assert.Equal(t, "req_3", rows[1][17])
 	assert.Equal(t, "req_2", rows[2][17])
 	assert.Equal(t, "backup-claude", rows[2][13])
+	assert.Equal(t, "up_req_2", rows[2][len(rows[2])-1])
 }
 
 func TestExportUserLogsStreamsJSONAndScrubsAdminFields(t *testing.T) {
@@ -233,4 +333,16 @@ func TestExportAllLogsRejectsUnsupportedFormatBeforeStreaming(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.False(t, response.Success)
 	assert.Contains(t, response.Message, "unsupported export format")
+}
+
+func TestExportAllLogsTreatsRequestCancellationAsNormalTermination(t *testing.T) {
+	setupLogExportControllerTestDB(t)
+	ctx, recorder := newLogExportContext("/api/log/export?format=jsonl&limit=all")
+	requestContext, cancel := context.WithCancel(ctx.Request.Context())
+	cancel()
+	ctx.Request = ctx.Request.WithContext(requestContext)
+
+	ExportAllLogs(ctx)
+
+	assert.Empty(t, recorder.Body.String())
 }

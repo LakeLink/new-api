@@ -400,6 +400,9 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
+	if err := syncClickHouseLogIndexes(); err != nil {
+		return err
+	}
 	return syncClickHouseLogTTL(ttlDays)
 }
 
@@ -448,11 +451,34 @@ CREATE TABLE IF NOT EXISTS logs (
 	ip String DEFAULT '',
 	request_id String DEFAULT '',
 	upstream_request_id String DEFAULT '',
-	other String DEFAULT ''
+	other String DEFAULT '',
+	INDEX idx_logs_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 1,
+	INDEX idx_logs_type type TYPE set(16) GRANULARITY 1,
+	INDEX idx_logs_request_id request_id TYPE bloom_filter(0.01) GRANULARITY 1
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+func syncClickHouseLogIndexes() error {
+	// ADD INDEX is metadata-only for existing parts and safe to run at startup.
+	// Do not MATERIALIZE here: rebuilding historical parts can be an expensive
+	// operator-controlled maintenance task on a large log database.
+	for _, statement := range clickHouseLogIndexMigrationStatements() {
+		if err := LOG_DB.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clickHouseLogIndexMigrationStatements() []string {
+	return []string{
+		"ALTER TABLE logs ADD INDEX IF NOT EXISTS idx_logs_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 1",
+		"ALTER TABLE logs ADD INDEX IF NOT EXISTS idx_logs_type type TYPE set(16) GRANULARITY 1",
+		"ALTER TABLE logs ADD INDEX IF NOT EXISTS idx_logs_request_id request_id TYPE bloom_filter(0.01) GRANULARITY 1",
+	}
 }
 
 func syncClickHouseLogTTL(ttlDays int) error {

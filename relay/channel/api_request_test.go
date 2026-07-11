@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,27 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetRelayCtxUsesRelayCancellationAndRequestFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(requestCtx)
+
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	cancelRelay()
+	got := getRelayCtx(ctx, &relaycommon.RelayInfo{RelayCancelCtx: relayCtx})
+	require.ErrorIs(t, got.Err(), context.Canceled)
+	require.NoError(t, requestCtx.Err())
+
+	cancelRequest()
+	got = getRelayCtx(ctx, &relaycommon.RelayInfo{})
+	require.ErrorIs(t, got.Err(), context.Canceled)
+
+	got = getRelayCtx(nil, nil)
+	require.NoError(t, got.Err())
+}
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 	t.Parallel()

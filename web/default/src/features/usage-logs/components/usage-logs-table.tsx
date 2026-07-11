@@ -18,7 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { type ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -30,6 +31,7 @@ import {
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import {
   DEFAULT_LOGS_DATA,
@@ -38,7 +40,8 @@ import {
 } from '../constants'
 import { useColumnsByCategory } from '../lib/columns'
 import { parseLogOther } from '../lib/format'
-import { fetchLogsByCategory } from '../lib/utils'
+import { canReuseUsageLogsPlaceholder } from '../lib/query-keys'
+import { buildApiParams, fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { TaskLogsFilterBar } from './task-logs-filter-bar'
@@ -46,6 +49,7 @@ import { UsageLogsMobileList } from './usage-logs-mobile-card'
 import { useLogsViewScope } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
+const EMPTY_COLUMN_FILTERS: ColumnFiltersState = []
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
@@ -64,7 +68,12 @@ function getColumnVisibilityStorageKey(
 }
 
 function deserializeLogTypeFilter(value: unknown): unknown[] {
-  const values = Array.isArray(value) ? value : value ? [value] : []
+  let values: unknown[] = []
+  if (Array.isArray(value)) {
+    values = value
+  } else if (value) {
+    values = [value]
+  }
   return values.filter((item) => String(item) !== LOG_TYPE_ALL_VALUE)
 }
 
@@ -75,6 +84,7 @@ interface UsageLogsTableProps {
 export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const { t } = useTranslation()
   const { isAdminView: isAdmin } = useLogsViewScope()
+  const currentUserId = useAuthStore((state) => state.auth.user?.id ?? 0)
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
 
@@ -115,26 +125,54 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         : []),
     ],
   })
+  const effectiveColumnFilters = searchParams.expr
+    ? EMPTY_COLUMN_FILTERS
+    : columnFilters
+
+  const commonApiParams = useMemo(() => {
+    if (logCategory !== 'common') return null
+
+    return buildApiParams({
+      page: pagination.pageIndex + 1,
+      pageSize: pagination.pageSize,
+      searchParams,
+      columnFilters: effectiveColumnFilters,
+      isAdmin,
+    })
+  }, [
+    isAdmin,
+    effectiveColumnFilters,
+    logCategory,
+    pagination.pageIndex,
+    pagination.pageSize,
+    searchParams,
+  ])
+
+  const logsQueryKey = commonApiParams
+    ? ['logs', logCategory, currentUserId, isAdmin, commonApiParams]
+    : [
+        'logs',
+        logCategory,
+        currentUserId,
+        isAdmin,
+        pagination.pageIndex + 1,
+        pagination.pageSize,
+        columnFilters,
+        searchParams,
+      ]
 
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: [
-      'logs',
-      logCategory,
-      isAdmin,
-      pagination.pageIndex + 1,
-      pagination.pageSize,
-      columnFilters,
-      searchParams,
-      t,
-    ],
-    queryFn: async () => {
+    queryKey: logsQueryKey,
+    queryFn: async ({ signal }) => {
       const result = await fetchLogsByCategory({
         logCategory,
         isAdmin,
         page: pagination.pageIndex + 1,
         pageSize: pagination.pageSize,
         searchParams,
-        columnFilters,
+        columnFilters:
+          logCategory === 'common' ? effectiveColumnFilters : columnFilters,
+        signal,
       })
 
       if (!result?.success) {
@@ -145,7 +183,14 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       return result.data || DEFAULT_LOGS_DATA
     },
     placeholderData: (previousData, previousQuery) => {
-      if (previousQuery?.queryKey[1] === logCategory) {
+      if (
+        canReuseUsageLogsPlaceholder(
+          previousQuery?.queryKey,
+          logCategory,
+          currentUserId,
+          isAdmin
+        )
+      ) {
         return previousData
       }
       return undefined

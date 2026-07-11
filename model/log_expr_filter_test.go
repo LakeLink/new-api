@@ -1,10 +1,12 @@
 package model
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -189,6 +191,97 @@ func TestBuildLogExprSQLEscapesLikePattern(t *testing.T) {
 	assert.Equal(t, []any{"%gpt!_!%!!%"}, args)
 }
 
+func TestBuildLogExprStringMatchConditionAcrossLogDatabases(t *testing.T) {
+	originalDatabaseType := common.LogDatabaseType()
+	t.Cleanup(func() {
+		common.SetLogDatabaseType(originalDatabaseType)
+	})
+
+	tests := []struct {
+		name          string
+		databaseType  common.DatabaseType
+		op            string
+		negate        bool
+		wantCondition string
+		wantPattern   string
+	}{
+		{name: "sqlite contains", databaseType: common.DatabaseTypeSQLite, op: "contains", wantCondition: "logs.model_name LIKE ? ESCAPE '!'", wantPattern: `%gpt!_!%!!\mini%`},
+		{name: "mysql starts with", databaseType: common.DatabaseTypeMySQL, op: "startsWith", wantCondition: "logs.model_name LIKE ? ESCAPE '!'", wantPattern: `gpt!_!%!!\mini%`},
+		{name: "postgres ends with", databaseType: common.DatabaseTypePostgreSQL, op: "endsWith", wantCondition: "logs.model_name LIKE ? ESCAPE '!'", wantPattern: `%gpt!_!%!!\mini`},
+		{name: "postgres negated", databaseType: common.DatabaseTypePostgreSQL, op: "contains", negate: true, wantCondition: "logs.model_name NOT LIKE ? ESCAPE '!'", wantPattern: `%gpt!_!%!!\mini%`},
+		{name: "clickhouse contains", databaseType: common.DatabaseTypeClickHouse, op: "contains", wantCondition: "logs.model_name LIKE ?", wantPattern: `%gpt\_\%!\\mini%`},
+		{name: "clickhouse starts with", databaseType: common.DatabaseTypeClickHouse, op: "startsWith", wantCondition: "logs.model_name LIKE ?", wantPattern: `gpt\_\%!\\mini%`},
+		{name: "clickhouse ends with", databaseType: common.DatabaseTypeClickHouse, op: "endsWith", wantCondition: "logs.model_name LIKE ?", wantPattern: `%gpt\_\%!\\mini`},
+		{name: "clickhouse negated", databaseType: common.DatabaseTypeClickHouse, op: "contains", negate: true, wantCondition: "logs.model_name NOT LIKE ?", wantPattern: `%gpt\_\%!\\mini%`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			common.SetLogDatabaseType(test.databaseType)
+
+			condition, pattern := buildLogExprStringMatchCondition("logs.model_name", test.op, `gpt_%!\mini`, test.negate)
+
+			assert.Equal(t, test.wantCondition, condition)
+			assert.Equal(t, test.wantPattern, pattern)
+		})
+	}
+}
+
+func TestBuildLogExprSQLUsesClickHouseStringEscaping(t *testing.T) {
+	originalDatabaseType := common.LogDatabaseType()
+	t.Cleanup(func() {
+		common.SetLogDatabaseType(originalDatabaseType)
+	})
+	common.SetLogDatabaseType(common.DatabaseTypeClickHouse)
+
+	where, args, _, err := buildLogExprSQL(`model_name contains "gpt_%"`, false)
+
+	require.NoError(t, err)
+	assert.Equal(t, "logs.model_name LIKE ?", where)
+	assert.Equal(t, []any{`%gpt\_\%%`}, args)
+}
+
+func TestBuildLogExprSQLKeepsRawOtherAdminOnly(t *testing.T) {
+	_, _, _, err := buildLogExprSQL(`other contains "admin_info"`, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `不支持的日志字段 "other"`)
+
+	where, args, _, err := buildLogExprSQL(`other contains "admin_info"`, true)
+	require.NoError(t, err)
+	assert.Contains(t, where, "logs.other LIKE ?")
+	assert.Equal(t, []any{"%admin!_info%"}, args)
+}
+
+func TestBuildLogExprSQLKeepsPersistentIDAdminOnly(t *testing.T) {
+	originalDatabaseType := common.LogDatabaseType()
+	t.Cleanup(func() {
+		common.SetLogDatabaseType(originalDatabaseType)
+	})
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+
+	_, _, _, err := buildLogExprSQL(`id == 123`, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `不支持的日志字段 "id"`)
+
+	where, args, _, err := buildLogExprSQL(`id == 123`, true)
+	require.NoError(t, err)
+	assert.Equal(t, "logs.id = ?", where)
+	assert.Equal(t, []any{123}, args)
+}
+
+func TestBuildLogExprSQLRejectsClickHouseDisplayOnlyID(t *testing.T) {
+	originalDatabaseType := common.LogDatabaseType()
+	t.Cleanup(func() {
+		common.SetLogDatabaseType(originalDatabaseType)
+	})
+	common.SetLogDatabaseType(common.DatabaseTypeClickHouse)
+
+	_, _, _, err := buildLogExprSQL(`id == 1`, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `不支持的日志字段 "id"`)
+}
+
 func TestBuildLogExprSQLRejectsUnsupportedExpressions(t *testing.T) {
 	longString := strings.Repeat("x", maxLogExprStringLength+1)
 	largeInList := `model_name in [`
@@ -271,4 +364,104 @@ func TestGetAllLogsWithExprFilterUsesGeneratedSQL(t *testing.T) {
 	require.Len(t, logs, 1)
 	assert.Equal(t, "req_match", logs[0].RequestId)
 	assert.True(t, strings.HasPrefix(logs[0].ChannelName, "primary"))
+}
+
+func TestLogQueriesHonorCanceledContext(t *testing.T) {
+	truncateTables(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := GetAllLogsWithOptions(LogQueryOptions{Context: ctx, Num: 10, IncludeAdminFields: true})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, _, err = GetUserLogsWithOptions(LogQueryOptions{Context: ctx, UserId: 1, Num: 10})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = SumUsedQuotaWithOptions(LogQueryOptions{Context: ctx, IncludeAdminFields: true})
+	require.ErrorIs(t, err, context.Canceled)
+
+	readyCalled := false
+	err = StreamExportAllLogsWithOptions(
+		LogQueryOptions{Context: ctx, Num: 10, IncludeAdminFields: true},
+		func() error {
+			readyCalled = true
+			return nil
+		},
+		func(log *Log) error { return nil },
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, readyCalled)
+
+	readyCalled = false
+	err = StreamExportUserLogsWithOptions(
+		LogQueryOptions{Context: ctx, UserId: 1, Num: 10},
+		func() error {
+			readyCalled = true
+			return nil
+		},
+		func(log *Log) error { return nil },
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, readyCalled)
+}
+
+func TestSumUsedQuotaWithOptionsAnchorsSelfStatsByUserID(t *testing.T) {
+	useTestLogGroupCol(t)
+	truncateTables(t)
+	require.NoError(t, LOG_DB.Create(&Log{UserId: 42, Username: "shared", CreatedAt: time.Now().Unix(), Type: LogTypeConsume, Quota: 100}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{UserId: 7, Username: "shared", CreatedAt: time.Now().Unix(), Type: LogTypeConsume, Quota: 900}).Error)
+
+	stat, err := SumUsedQuotaWithOptions(LogQueryOptions{UserId: 42})
+
+	require.NoError(t, err)
+	assert.Equal(t, 100, stat.Quota)
+	assert.Equal(t, 1, stat.Rpm)
+}
+
+func TestSelfLogExpressionORCannotEscapeUserScope(t *testing.T) {
+	useTestLogGroupCol(t)
+	truncateTables(t)
+	now := time.Now().Unix()
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:    42,
+		CreatedAt: now,
+		Type:      LogTypeConsume,
+		ModelName: "own",
+		Quota:     100,
+		RequestId: "req_own",
+		TokenName: "self-token",
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:    7,
+		CreatedAt: now,
+		Type:      LogTypeConsume,
+		ModelName: "other",
+		Quota:     900,
+		RequestId: "req_other",
+		TokenName: "other-token",
+	}).Error)
+	expr := `model_name == "own" || quota == 900`
+
+	logs, total, err := GetUserLogsWithOptions(LogQueryOptions{
+		UserId: 42,
+		Num:    10,
+		Expr:   expr,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, total)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "req_own", logs[0].RequestId)
+
+	stat, err := SumUsedQuotaWithOptions(LogQueryOptions{
+		UserId: 42,
+		Expr:   expr,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 100, stat.Quota)
+	assert.Equal(t, 1, stat.Rpm)
+}
+
+func TestLogPerformanceIndexesExist(t *testing.T) {
+	require.True(t, LOG_DB.Migrator().HasIndex(&Log{}, "idx_user_created_at_id"))
+	require.True(t, LOG_DB.Migrator().HasIndex(&Log{}, "idx_type_created_at_id"))
 }

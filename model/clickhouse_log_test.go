@@ -83,11 +83,26 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
 	assert.Contains(t, withoutTTL, "ENGINE = MergeTree()")
 	assert.Contains(t, withoutTTL, "PARTITION BY toYYYYMM(toDateTime(created_at))")
 	assert.Contains(t, withoutTTL, "ORDER BY (created_at, request_id)")
+	assert.Contains(t, withoutTTL, "INDEX idx_logs_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 1")
+	assert.Contains(t, withoutTTL, "INDEX idx_logs_type type TYPE set(16) GRANULARITY 1")
+	assert.Contains(t, withoutTTL, "INDEX idx_logs_request_id request_id TYPE bloom_filter(0.01) GRANULARITY 1")
 	assert.NotContains(t, withoutTTL, "TTL ")
 
 	withTTL := clickHouseLogCreateTableSQL(30)
 	assert.Contains(t, withTTL, "ORDER BY (created_at, request_id)")
 	assert.Contains(t, withTTL, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
+}
+
+func TestClickHouseLogIndexMigrationStatementsAreIdempotent(t *testing.T) {
+	statements := clickHouseLogIndexMigrationStatements()
+
+	require.Len(t, statements, 3)
+	for _, statement := range statements {
+		assert.Contains(t, statement, "ALTER TABLE logs ADD INDEX IF NOT EXISTS")
+	}
+	assert.Contains(t, statements[0], "idx_logs_user_id")
+	assert.Contains(t, statements[1], "idx_logs_type")
+	assert.Contains(t, statements[2], "idx_logs_request_id")
 }
 
 func TestClickHouseCreateTableHasTTL(t *testing.T) {

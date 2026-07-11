@@ -15,6 +15,7 @@ import (
 )
 
 const maxLogExprLength = 4096
+const maxLogExprNodes = 256
 const maxLogExprInItems = 100
 const maxLogExprStringLength = 1024
 
@@ -43,7 +44,6 @@ type logExprCompiler struct {
 // AST-only and avoiding runtime evaluation of user input.
 func newLogExprCompiler(includeAdminFields bool, variables map[string]logExprSQL) logExprCompiler {
 	fields := map[string]logExprField{
-		"id":                  {Column: "logs.id", Kind: logExprFieldInt},
 		"user_id":             {Column: "logs.user_id", Kind: logExprFieldInt},
 		"created_at":          {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
 		"createdAt":           {Column: "logs.created_at", Kind: logExprFieldInt, Timestamp: true},
@@ -68,22 +68,37 @@ func newLogExprCompiler(includeAdminFields bool, variables map[string]logExprSQL
 		"requestId":           {Column: "logs.request_id", Kind: logExprFieldString},
 		"upstream_request_id": {Column: "logs.upstream_request_id", Kind: logExprFieldString},
 		"upstreamRequestId":   {Column: "logs.upstream_request_id", Kind: logExprFieldString},
-		"other":               {Column: "logs.other", Kind: logExprFieldString},
 	}
 	if includeAdminFields {
+		// Self-service responses replace the persisted row ID with a page-local
+		// display ID, and ClickHouse has no persisted auto-incrementing ID at all.
+		// Only relational-database admins can filter the real row ID consistently.
+		if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+			fields["id"] = logExprField{Column: "logs.id", Kind: logExprFieldInt}
+		}
 		fields["username"] = logExprField{Column: "logs.username", Kind: logExprFieldString}
 		fields["channel"] = logExprField{Column: "logs.channel_id", Kind: logExprFieldInt}
 		fields["channel_id"] = logExprField{Column: "logs.channel_id", Kind: logExprFieldInt}
 		fields["channel_name"] = logExprField{Column: "channels.name", Kind: logExprFieldString}
 		fields["channelName"] = logExprField{Column: "channels.name", Kind: logExprFieldString}
+		// Other can contain admin_info and audit_info. User log responses scrub those
+		// objects after querying, so allowing self-service expressions to inspect the
+		// raw JSON would create a blind information-disclosure oracle.
+		fields["other"] = logExprField{Column: "logs.other", Kind: logExprFieldString}
 	}
 	return logExprCompiler{fields: fields, variables: variables}
 }
 
-func applyLogExprFilter(tx *gorm.DB, exprStr string, includeAdminFields bool) (*gorm.DB, error) {
+type compiledLogExprFilter struct {
+	where            string
+	args             []any
+	needsChannelJoin bool
+}
+
+func compileLogExprFilter(exprStr string, includeAdminFields bool) (*compiledLogExprFilter, error) {
 	exprStr = strings.TrimSpace(exprStr)
 	if exprStr == "" {
-		return tx, nil
+		return nil, nil
 	}
 	where, args, needsChannelJoin, err := buildLogExprSQL(exprStr, includeAdminFields)
 	if err != nil {
@@ -93,9 +108,30 @@ func applyLogExprFilter(tx *gorm.DB, exprStr string, includeAdminFields bool) (*
 		if !logExprCanJoinChannels() {
 			return nil, errors.New("channel_name 表达式筛选需要连接渠道表，独立日志数据库模式下不支持，请改用 channel 或 channel_id 筛选")
 		}
+	}
+	return &compiledLogExprFilter{
+		where:            where,
+		args:             args,
+		needsChannelJoin: needsChannelJoin,
+	}, nil
+}
+
+func (filter *compiledLogExprFilter) apply(tx *gorm.DB) *gorm.DB {
+	if filter == nil {
+		return tx
+	}
+	if filter.needsChannelJoin {
 		tx = tx.Joins("LEFT JOIN channels ON channels.id = logs.channel_id")
 	}
-	return tx.Where(where, args...), nil
+	return tx.Where(filter.where, filter.args...)
+}
+
+func applyLogExprFilter(tx *gorm.DB, exprStr string, includeAdminFields bool) (*gorm.DB, error) {
+	filter, err := compileLogExprFilter(exprStr, includeAdminFields)
+	if err != nil {
+		return nil, err
+	}
+	return filter.apply(tx), nil
 }
 
 func buildLogExprSQL(exprStr string, includeAdminFields bool) (where string, args []any, needsChannelJoin bool, err error) {
@@ -108,7 +144,7 @@ func buildLogExprSQLAt(exprStr string, includeAdminFields bool, now time.Time) (
 	}
 
 	cfg := conf.CreateNew()
-	cfg.MaxNodes = 256
+	cfg.MaxNodes = maxLogExprNodes
 	tree, err := parser.ParseWithConfig(exprStr, cfg)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("表达式解析失败: %w", err)
@@ -257,7 +293,21 @@ func (c logExprCompiler) compileStringMatch(field logExprResolvedField, op strin
 		return logExprSQL{}, errors.New("matches 正则匹配无法跨数据库转换为 SQL，请使用 contains/startsWith/endsWith")
 	}
 
-	pattern := escapeLogExprLikePattern(literal.value.(string))
+	condition, pattern := buildLogExprStringMatchCondition(field.Column, op, literal.value.(string), negate)
+	return logExprSQL{
+		sql:              condition,
+		args:             []any{pattern},
+		needsChannelJoin: field.needsChannelJoin,
+	}, nil
+}
+
+func buildLogExprStringMatchCondition(column string, op string, value string, negate bool) (string, string) {
+	pattern := value
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		pattern = escapeClickHouseLikeLiteral(pattern)
+	} else {
+		pattern = escapeLogExprLikePattern(pattern)
+	}
 	switch op {
 	case "contains":
 		pattern = "%" + pattern + "%"
@@ -271,11 +321,10 @@ func (c logExprCompiler) compileStringMatch(field logExprResolvedField, op strin
 	if negate {
 		operator = "NOT LIKE"
 	}
-	return logExprSQL{
-		sql:              fmt.Sprintf("%s %s ? ESCAPE '!'", field.Column, operator),
-		args:             []any{pattern},
-		needsChannelJoin: field.needsChannelJoin,
-	}, nil
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return fmt.Sprintf("%s %s ?", column, operator), pattern
+	}
+	return fmt.Sprintf("%s %s ? ESCAPE '!'", column, operator), pattern
 }
 
 func (c logExprCompiler) compileIn(left ast.Node, right ast.Node, negate bool) (logExprSQL, error) {
@@ -646,6 +695,13 @@ func escapeLogExprLikePattern(value string) string {
 	return value
 }
 
+func escapeClickHouseLikeLiteral(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
+}
+
 func logExprFieldNeedsChannelJoin(field logExprField) bool {
 	return strings.HasPrefix(field.Column, "channels.")
 }
@@ -654,7 +710,7 @@ func logExprCanJoinChannels() bool {
 	return LOG_DB == DB
 }
 
-func applyLogFilters(tx *gorm.DB, opts LogQueryOptions) (*gorm.DB, error) {
+func applyLogFilters(tx *gorm.DB, opts LogQueryOptions, exprFilter *compiledLogExprFilter) *gorm.DB {
 	tx = applyLogContainsFilter(tx, "logs.model_name", opts.ModelName)
 	if opts.IncludeAdminFields {
 		tx = applyLogContainsFilter(tx, "logs.username", opts.Username)
@@ -680,10 +736,13 @@ func applyLogFilters(tx *gorm.DB, opts LogQueryOptions) (*gorm.DB, error) {
 	if opts.Group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", opts.Group)
 	}
-	return applyLogExprFilter(tx, opts.Expr, opts.IncludeAdminFields)
+	return exprFilter.apply(tx)
 }
 
-func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool) (*gorm.DB, error) {
+func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool, exprFilter *compiledLogExprFilter) *gorm.DB {
+	if opts.UserId != 0 {
+		tx = tx.Where("logs.user_id = ?", opts.UserId)
+	}
 	if opts.IncludeAdminFields {
 		tx = applyLogContainsFilter(tx, "logs.username", opts.Username)
 	} else if opts.Username != "" {
@@ -712,7 +771,7 @@ func applyLogStatFilters(tx *gorm.DB, opts LogQueryOptions, includeType bool) (*
 	if includeType {
 		tx = tx.Where("logs.type = ?", LogTypeConsume)
 	}
-	return applyLogExprFilter(tx, opts.Expr, opts.IncludeAdminFields)
+	return exprFilter.apply(tx)
 }
 
 func logDBType() common.DatabaseType {

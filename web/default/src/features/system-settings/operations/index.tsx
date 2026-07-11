@@ -1,6 +1,3 @@
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -20,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useStatus } from '@/hooks/use-status'
+
 import { SettingsPage } from '../components/settings-page'
 import type { OperationsSettings } from '../types'
 import {
@@ -50,6 +48,8 @@ const defaultOperationsSettings: OperationsSettings = {
   SMTPFrom: '',
   SMTPToken: '',
   SMTPSSLEnabled: false,
+  SMTPStartTLSEnabled: false,
+  SMTPInsecureSkipVerify: false,
   SMTPForceAuthLogin: false,
   WorkerUrl: '',
   WorkerValidKey: '',

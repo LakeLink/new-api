@@ -39,6 +39,9 @@ import type {
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
 } from '../types'
+import { getDefaultTimeRange } from './time-range'
+
+export { getDefaultTimeRange } from './time-range'
 
 // ============================================================================
 // Type Checkers & Utilities
@@ -73,40 +76,10 @@ export function isPerCallBilling(modelPrice?: number): boolean {
 }
 
 /**
- * Get default time range (today 00:00:00 to now + 1 hour)
- */
-export function getDefaultTimeRange(): { start: Date; end: Date } {
-  const now = new Date()
-  const start = new Date(now)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(now.getTime() + 3600 * 1000) // +1 hour
-
-  return { start, end }
-}
-
-/**
  * Convert milliseconds timestamp to seconds for API
  */
 function timestampToSeconds(ms: number): number {
   return Math.floor(ms / 1000)
-}
-
-/**
- * Build query parameters from filters
- */
-export function buildQueryParams(
-  params: Record<string, unknown>
-): URLSearchParams {
-  const queryParams = new URLSearchParams()
-
-  Object.entries(params).forEach(([key, value]) => {
-    // Keep 0 as a valid value, only filter out undefined, null, and empty string
-    if (value !== undefined && value !== null && value !== '') {
-      queryParams.append(key, String(value))
-    }
-  })
-
-  return queryParams
 }
 
 /**
@@ -274,8 +247,15 @@ export function buildApiParams(config: {
 export async function fetchLogsByCategory(
   config: FetchLogsConfig
 ): Promise<GetLogsResponse> {
-  const { logCategory, isAdmin, page, pageSize, searchParams, columnFilters } =
-    config
+  const {
+    logCategory,
+    isAdmin,
+    page,
+    pageSize,
+    searchParams,
+    columnFilters,
+    signal,
+  } = config
 
   if (logCategory === 'common') {
     const params = buildApiParams({
@@ -285,7 +265,9 @@ export async function fetchLogsByCategory(
       columnFilters,
       isAdmin,
     })
-    return isAdmin ? await getAllLogs(params) : await getUserLogs(params)
+    return isAdmin
+      ? await getAllLogs(params, signal)
+      : await getUserLogs(params, signal)
   }
 
   // For drawing and task logs
@@ -308,12 +290,18 @@ export async function fetchLogsByCategory(
 
   if (logCategory === 'drawing') {
     return isAdmin
-      ? await getAllMidjourneyLogs(paramsWithFilter as GetMidjourneyLogsParams)
-      : await getUserMidjourneyLogs(paramsWithFilter as GetMidjourneyLogsParams)
+      ? await getAllMidjourneyLogs(
+          paramsWithFilter as GetMidjourneyLogsParams,
+          signal
+        )
+      : await getUserMidjourneyLogs(
+          paramsWithFilter as GetMidjourneyLogsParams,
+          signal
+        )
   }
 
   // task logs
   return isAdmin
-    ? await getAllTaskLogs(paramsWithFilter as GetTaskLogsParams)
-    : await getUserTaskLogs(paramsWithFilter as GetTaskLogsParams)
+    ? await getAllTaskLogs(paramsWithFilter as GetTaskLogsParams, signal)
+    : await getUserTaskLogs(paramsWithFilter as GetTaskLogsParams, signal)
 }

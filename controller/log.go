@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -18,6 +19,10 @@ import (
 
 func GetAllLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
+	if err := validateLogPagination(c, pageInfo); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -30,6 +35,7 @@ func GetAllLogs(c *gin.Context) {
 	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	logs, total, err := model.GetAllLogsWithOptions(model.LogQueryOptions{
+		Context:            c.Request.Context(),
 		LogType:            logType,
 		StartTimestamp:     startTimestamp,
 		EndTimestamp:       endTimestamp,
@@ -66,6 +72,10 @@ func ExportAllLogs(c *gin.Context) {
 
 func GetUserLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
+	if err := validateLogPagination(c, pageInfo); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	userId := c.GetInt("id")
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -77,6 +87,7 @@ func GetUserLogs(c *gin.Context) {
 	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	logs, total, err := model.GetUserLogsWithOptions(model.LogQueryOptions{
+		Context:           c.Request.Context(),
 		UserId:            userId,
 		LogType:           logType,
 		StartTimestamp:    startTimestamp,
@@ -98,6 +109,27 @@ func GetUserLogs(c *gin.Context) {
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
+}
+
+func validateLogPagination(c *gin.Context, pageInfo *common.PageInfo) error {
+	for _, name := range []string{"p", "page_size"} {
+		raw := strings.TrimSpace(c.Query(name))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return errors.New("page and page_size must be positive integers")
+		}
+	}
+	if pageInfo.GetPage() < 1 || pageInfo.GetPageSize() <= 0 {
+		return errors.New("page and page_size must be positive integers")
+	}
+	maxInt := int(^uint(0) >> 1)
+	if pageInfo.GetPage() > 1 && pageInfo.GetPage()-1 > maxInt/pageInfo.GetPageSize() {
+		return errors.New("page offset is too large")
+	}
+	return nil
 }
 
 func ExportUserLogs(c *gin.Context) {
@@ -164,6 +196,7 @@ func GetLogsStat(c *gin.Context) {
 	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	stat, err := model.SumUsedQuotaWithOptions(model.LogQueryOptions{
+		Context:            c.Request.Context(),
 		LogType:            logType,
 		StartTimestamp:     startTimestamp,
 		EndTimestamp:       endTimestamp,
@@ -195,7 +228,7 @@ func GetLogsStat(c *gin.Context) {
 }
 
 func GetLogsSelfStat(c *gin.Context) {
-	username := c.GetString("username")
+	userId := c.GetInt("id")
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -207,11 +240,12 @@ func GetLogsSelfStat(c *gin.Context) {
 	upstreamRequestId := c.Query("upstream_request_id")
 	expr := c.Query("expr")
 	quotaNum, err := model.SumUsedQuotaWithOptions(model.LogQueryOptions{
+		Context:           c.Request.Context(),
+		UserId:            userId,
 		LogType:           logType,
 		StartTimestamp:    startTimestamp,
 		EndTimestamp:      endTimestamp,
 		ModelName:         modelName,
-		Username:          username,
 		TokenName:         tokenName,
 		Channel:           channel,
 		Group:             group,
@@ -275,6 +309,7 @@ func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 		limit = model.LogExportLimit
 	}
 	return model.LogQueryOptions{
+		Context:           c.Request.Context(),
 		LogType:           logType,
 		StartTimestamp:    startTimestamp,
 		EndTimestamp:      endTimestamp,
@@ -289,6 +324,11 @@ func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 		Num:               limit,
 		NoLimit:           exportAll,
 	}
+}
+
+func GetLogExprSchema(c *gin.Context) {
+	includeAdminFields := c.GetInt("role") >= common.RoleAdminUser
+	common.ApiSuccess(c, model.GetLogExprSchema(includeAdminFields))
 }
 
 func checkLogExportPermission(c *gin.Context) bool {
@@ -384,6 +424,9 @@ func streamLogExport(c *gin.Context, opts model.LogQueryOptions, isAdmin bool) {
 		err = model.StreamExportUserLogsWithOptions(opts, onReady, onRow)
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		if streamStarted || c.Writer.Written() {
 			common.SysError("failed to stream log export: " + err.Error())
 		} else {
@@ -469,6 +512,7 @@ func writeLogCSVHeader(writer *csv.Writer) error {
 		"request_id",
 		"content",
 		"other",
+		"upstream_request_id",
 	})
 }
 
@@ -494,6 +538,7 @@ func writeLogCSVRow(writer *csv.Writer, log *model.Log) error {
 		csvSafeCell(log.RequestId),
 		csvSafeCell(log.Content),
 		csvSafeCell(log.Other),
+		csvSafeCell(log.UpstreamRequestId),
 	})
 }
 

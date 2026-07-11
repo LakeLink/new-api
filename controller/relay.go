@@ -365,10 +365,10 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	if info.ChannelMeta == nil {
 		channelType := c.GetInt("channel_type")
 		channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
-		finalRequestFormat := info.GetFinalRequestRelayFormat()
-		if shouldRejectCrossProtocol(channelType, channelSetting, finalRequestFormat) {
+		requestFormat := info.RelayFormat
+		if shouldRejectCrossProtocol(channelType, channelSetting, requestFormat) {
 			info.InitChannelMeta(c)
-			return nil, newChannelProtocolMismatchError(channelType, finalRequestFormat)
+			return nil, newChannelProtocolMismatchError(channelType, requestFormat)
 		}
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
@@ -399,9 +399,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	}
 
 	channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
-	finalRequestFormat := info.GetFinalRequestRelayFormat()
-	if shouldRejectCrossProtocol(channel.Type, channelSetting, finalRequestFormat) {
-		return nil, newChannelProtocolMismatchError(channel.Type, finalRequestFormat)
+	requestFormat := info.RelayFormat
+	if shouldRejectCrossProtocol(channel.Type, channelSetting, requestFormat) {
+		return nil, newChannelProtocolMismatchError(channel.Type, requestFormat)
 	}
 	return channel, nil
 }
