@@ -305,13 +305,11 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 }
 
 func getRelayCtx(c *gin.Context, info *common.RelayInfo) context.Context {
-	if info != nil && info.RelayCancelCtx != nil {
-		return info.RelayCancelCtx
-	}
+	var fallback context.Context
 	if c != nil && c.Request != nil {
-		return c.Request.Context()
+		fallback = c.Request.Context()
 	}
-	return context.Background()
+	return info.GetRelayContext(fallback)
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
@@ -485,9 +483,23 @@ func sendPingData(c *gin.Context, mutex *sync.Mutex) error {
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	return doRequest(c, req, info)
 }
+
+func bindRelayContext(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Request, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	return req.WithContext(getRelayCtx(c, info)), nil
+}
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	var client *http.Client
 	var err error
+	req, err = bindRelayContext(c, req, info)
+	if err != nil {
+		return nil, err
+	}
+	// Some provider adaptors construct requests manually. Rebind every request
+	// here so admin termination and relay cancellation cover those paths too.
+	var client *http.Client
 	if info.ChannelSetting.Proxy != "" {
 		client, err = service.NewProxyHttpClient(info.ChannelSetting.Proxy)
 		if err != nil {

@@ -8,11 +8,15 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/active_request_setting"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestActiveRequestsRouteIsRegistered(t *testing.T) {
@@ -24,10 +28,22 @@ func TestActiveRequestsRouteIsRegistered(t *testing.T) {
 	setting := active_request_setting.GetActiveRequestSetting()
 	oldRetentionSeconds := setting.CompletedRetentionSeconds
 	setting.CompletedRetentionSeconds = 10
+	oldDB := model.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.Create(&model.User{
+		Id:       1,
+		Username: "admin",
+		Role:     common.RoleAdminUser,
+		Status:   common.UserStatusEnabled,
+	}).Error)
+	model.DB = db
 
 	t.Cleanup(func() {
 		service.GlobalActiveRequestTracker = oldTracker
 		setting.CompletedRetentionSeconds = oldRetentionSeconds
+		model.DB = oldDB
 	})
 
 	router := gin.New()

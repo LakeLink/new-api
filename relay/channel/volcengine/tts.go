@@ -1,7 +1,6 @@
 package volcengine
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -209,7 +208,8 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	header := http.Header{}
 	header.Set("Authorization", fmt.Sprintf("Bearer;%s", token))
 
-	conn, resp, dialErr := websocket.DefaultDialer.DialContext(context.Background(), requestURL, header)
+	relayCtx := info.GetRelayContext(c.Request.Context())
+	conn, resp, dialErr := websocket.DefaultDialer.DialContext(relayCtx, requestURL, header)
 	if dialErr != nil {
 		if resp != nil {
 			return nil, types.NewErrorWithStatusCode(
@@ -225,6 +225,15 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 		)
 	}
 	defer conn.Close()
+	connectionDone := make(chan struct{})
+	defer close(connectionDone)
+	go func() {
+		select {
+		case <-relayCtx.Done():
+			_ = conn.Close()
+		case <-connectionDone:
+		}
+	}()
 
 	payload, marshalErr := json.Marshal(volcRequest)
 	if marshalErr != nil {
@@ -250,6 +259,9 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	for {
 		msg, recvErr := ReceiveMessage(conn)
 		if recvErr != nil {
+			if relayCtx.Err() != nil {
+				return nil, types.NewError(relayCtx.Err(), types.ErrorCodeDoRequestFailed)
+			}
 			if websocket.IsCloseError(recvErr, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				break
 			}
@@ -277,6 +289,9 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 						types.ErrorCodeBadResponse,
 						http.StatusInternalServerError,
 					)
+				}
+				if info.OnOutputChunk != nil {
+					info.OnOutputChunk()
 				}
 				c.Writer.Flush()
 			}

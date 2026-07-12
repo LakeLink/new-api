@@ -1,11 +1,26 @@
 package common
 
 import (
+	"context"
 	"testing"
 
 	"github.com/QuantumNous/new-api/types"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRelayInfoGetRelayContextPrefersRelayCancellation(t *testing.T) {
+	fallback, cancelFallback := context.WithCancel(context.Background())
+	defer cancelFallback()
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	info := &RelayInfo{RelayCancelCtx: relayCtx}
+
+	cancelRelay()
+	require.ErrorIs(t, info.GetRelayContext(fallback).Err(), context.Canceled)
+	require.NoError(t, fallback.Err())
+
+	var nilInfo *RelayInfo
+	require.Equal(t, fallback, nilInfo.GetRelayContext(fallback))
+}
 
 func TestRelayInfoGetFinalRequestRelayFormatPrefersExplicitFinal(t *testing.T) {
 	info := &RelayInfo{

@@ -6,6 +6,9 @@ import "github.com/casbin/casbin/v2"
 // short-circuits to allow. Otherwise a per-user override wins, then the union of
 // the subject's role baselines applies.
 func Can(userID int, systemRole int, permission Permission) bool {
+	if isUserFailClosed(userID) {
+		return false
+	}
 	roles := resolveSubjectRoles(userID, systemRole)
 	if len(roles) == 0 {
 		return false

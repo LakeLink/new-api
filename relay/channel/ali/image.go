@@ -197,7 +197,7 @@ func updateTask(info *relaycommon.RelayInfo, taskID string) (*AliResponse, error
 
 	var aliResponse AliResponse
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(info.GetRelayContext(nil), "GET", url, nil)
 	if err != nil {
 		return &aliResponse, err, nil
 	}
@@ -232,7 +232,9 @@ func asyncTaskWait(c *gin.Context, info *relaycommon.RelayInfo, taskID string) (
 	var taskResponse AliResponse
 	var responseBody []byte
 
-	time.Sleep(time.Duration(5) * time.Second)
+	if err := waitForAliRelay(info, 5*time.Second); err != nil {
+		return nil, nil, err
+	}
 
 	for {
 		logger.LogDebug(c, "asyncTaskWait step %d/%d, wait %d seconds", step, maxStep, waitSeconds)
@@ -241,7 +243,9 @@ func asyncTaskWait(c *gin.Context, info *relaycommon.RelayInfo, taskID string) (
 		responseBody = body
 		if err != nil {
 			logger.LogWarn(c, "asyncTaskWait UpdateTask err: "+err.Error())
-			time.Sleep(time.Duration(waitSeconds) * time.Second)
+			if err := waitForAliRelay(info, time.Duration(waitSeconds)*time.Second); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 
@@ -262,10 +266,23 @@ func asyncTaskWait(c *gin.Context, info *relaycommon.RelayInfo, taskID string) (
 		if step >= maxStep {
 			break
 		}
-		time.Sleep(time.Duration(waitSeconds) * time.Second)
+		if err := waitForAliRelay(info, time.Duration(waitSeconds)*time.Second); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return nil, nil, fmt.Errorf("aliAsyncTaskWait timeout")
+}
+
+func waitForAliRelay(info *relaycommon.RelayInfo, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-info.GetRelayContext(nil).Done():
+		return info.GetRelayContext(nil).Err()
+	}
 }
 
 func responseAli2OpenAIImage(c *gin.Context, response *AliResponse, originBody []byte, info *relaycommon.RelayInfo, responseFormat string) *dto.ImageResponse {

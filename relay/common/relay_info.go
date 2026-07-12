@@ -201,6 +201,18 @@ type RelayInfo struct {
 	*TaskRelayInfo
 }
 
+// GetRelayContext returns the cancellation context owned by the relay request,
+// falling back to the caller-provided context for non-relay usages.
+func (info *RelayInfo) GetRelayContext(fallback context.Context) context.Context {
+	if info != nil && info.RelayCancelCtx != nil {
+		return info.RelayCancelCtx
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
+}
+
 func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)

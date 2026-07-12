@@ -229,6 +229,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
+		service.GlobalActiveRequestTracker.UpdateChannel(requestId, channel.Id, channel.Type, channel.Name)
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {

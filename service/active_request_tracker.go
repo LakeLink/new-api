@@ -180,6 +180,20 @@ func (t *ActiveRequestTracker) UpdateInputTokens(requestId string, tokens int) {
 	}
 }
 
+// UpdateChannel refreshes the channel shown by the monitor after a retry or
+// fallback selects a different upstream channel.
+func (t *ActiveRequestTracker) UpdateChannel(requestId string, channelId int, channelType int, channelName string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	req, ok := t.entries[requestId]
+	if !ok {
+		return
+	}
+	req.ChannelId = channelId
+	req.ChannelType = channelType
+	req.ChannelName = channelName
+}
+
 // List returns a snapshot of all active and recently completed requests.
 func (t *ActiveRequestTracker) List() []ActiveRequestSnapshot {
 	now := time.Now()

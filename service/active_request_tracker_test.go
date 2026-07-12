@@ -86,3 +86,25 @@ func TestActiveRequestTrackerPrunesCompletedRequests(t *testing.T) {
 		t.Fatalf("List() returned %d snapshots after prune, want 0", len(snapshots))
 	}
 }
+
+func TestActiveRequestTrackerUpdatesChannelAfterRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyChannelId, 11)
+	common.SetContextKey(c, constant.ContextKeyChannelType, 1)
+	common.SetContextKey(c, constant.ContextKeyChannelName, "primary")
+
+	tracker := &ActiveRequestTracker{}
+	tracker.Register(&relaycommon.RelayInfo{RequestId: "req-retry"}, c)
+	tracker.UpdateChannel("req-retry", 22, 14, "fallback")
+
+	snapshots := tracker.List()
+	if len(snapshots) != 1 {
+		t.Fatalf("List() returned %d snapshots, want 1", len(snapshots))
+	}
+	if got := snapshots[0]; got.ChannelId != 22 || got.ChannelType != 14 || got.ChannelName != "fallback" {
+		t.Fatalf("channel snapshot = %+v, want fallback channel", got)
+	}
+}

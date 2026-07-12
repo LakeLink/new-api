@@ -10,6 +10,7 @@ const semiUiDir = path.resolve(
   path.dirname(require.resolve('@douyinfe/semi-ui')),
   '../..',
 )
+const semiDateFnsDir = path.resolve(semiUiDir, 'node_modules/date-fns')
 
 export default defineConfig(({ envMode }) => {
   const env = loadEnv({ mode: envMode, prefixes: ['VITE_'] })
@@ -43,6 +44,10 @@ export default defineConfig(({ envMode }) => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
+        // Semi's date-fns-tz v1 imports date-fns v2 subpaths. The workspace
+        // root also contains date-fns v4 for Default, so pin Classic's resolver
+        // to the v2 copy installed alongside Semi.
+        'date-fns': semiDateFnsDir,
         '@douyinfe/semi-ui/dist/css/semi.css': path.resolve(
           semiUiDir,
           'dist/css/semi.css',

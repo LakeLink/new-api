@@ -40,6 +40,7 @@ func authHelper(c *gin.Context, minRole int) {
 	role := session.Get("role")
 	id := session.Get("id")
 	status := session.Get("status")
+	group := session.Get("group")
 	useAccessToken := false
 	if username == nil {
 		// Check access token
@@ -121,6 +122,35 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
+	// Cookie sessions contain a role/status snapshot that cannot be revoked
+	// server-side. Re-read privileged sessions before every admin/root request so
+	// a committed demotion or disable takes effect immediately even when the old
+	// browser cookie is still present.
+	if !useAccessToken && minRole >= common.RoleAdminUser {
+		if model.DB == nil {
+			common.SysLog(fmt.Sprintf("cannot refresh privileged session for user %d: database is not initialized", apiUserId))
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+			})
+			c.Abort()
+			return
+		}
+		currentUser, currentErr := model.GetUserById(apiUserId, false)
+		if currentErr != nil {
+			common.SysLog(fmt.Sprintf("failed to refresh privileged session for user %d: %v", apiUserId, currentErr))
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+			})
+			c.Abort()
+			return
+		}
+		username = currentUser.Username
+		role = currentUser.Role
+		status = currentUser.Status
+		group = currentUser.Group
+	}
 	if status.(int) == common.UserStatusDisabled {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -150,12 +180,12 @@ func authHelper(c *gin.Context, minRole int) {
 	c.Set("username", username)
 	c.Set("role", role)
 	c.Set("id", id)
-	c.Set("group", session.Get("group"))
-	c.Set("user_group", session.Get("group"))
+	c.Set("group", group)
+	c.Set("user_group", group)
 	c.Set("use_access_token", useAccessToken)
-	if group, ok := session.Get("group").(string); ok {
-		common.SetContextKey(c, constant.ContextKeyUserGroup, group)
-		common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+	if groupName, ok := group.(string); ok {
+		common.SetContextKey(c, constant.ContextKeyUserGroup, groupName)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, groupName)
 	}
 
 	// 管理/root 写操作审计兜底：内聚在鉴权链路里，保证任何经过 AdminAuth/RootAuth

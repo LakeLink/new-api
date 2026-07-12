@@ -699,9 +699,9 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	if authzTouched {
+		authz.MarkUserFailClosed(updatedUser.Id)
 		if err := authz.ReloadPolicy(); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(fmt.Sprintf("failed to reload authz policy after updating user %d; permissions remain fail-closed: %s", updatedUser.Id, err.Error()))
 		}
 	}
 	if err := model.InvalidateUserCache(updatedUser.Id); err != nil {
@@ -989,9 +989,9 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 	if authzTouched {
+		authz.MarkUserFailClosed(cleanUser.Id)
 		if err := authz.ReloadPolicy(); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(fmt.Sprintf("failed to reload authz policy after creating user %d; permissions remain fail-closed: %s", cleanUser.Id, err.Error()))
 		}
 	}
 	cleanUser.FinishInsert(0)
@@ -1159,9 +1159,9 @@ func ManageUser(c *gin.Context) {
 			return
 		}
 		if authzTouched {
+			authz.MarkUserFailClosed(user.Id)
 			if err := authz.ReloadPolicy(); err != nil {
-				common.ApiError(c, err)
-				return
+				common.SysError(fmt.Sprintf("failed to reload authz policy after demoting user %d; permissions remain fail-closed: %s", user.Id, err.Error()))
 			}
 		}
 	} else {

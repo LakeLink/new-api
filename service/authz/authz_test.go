@@ -158,6 +158,31 @@ func TestClearUserAuthorizationRemovesOverrides(t *testing.T) {
 	assert.False(t, Can(90, common.RoleCommonUser, ChannelRead))
 }
 
+func TestFailClosedUserRemainsDeniedUntilPolicyReloadSucceeds(t *testing.T) {
+	db := newAuthzTestDB(t)
+	require.NoError(t, Init(db))
+
+	assert.True(t, Can(91, common.RoleAdminUser, ChannelRead))
+	MarkUserFailClosed(91)
+	assert.False(t, Can(91, common.RoleAdminUser, ChannelRead))
+	assert.False(t, Can(91, common.RoleRootUser, ChannelSensitiveWrite))
+
+	require.NoError(t, ReloadPolicy())
+	assert.True(t, Can(91, common.RoleAdminUser, ChannelRead))
+}
+
+func TestFailClosedSnapshotDoesNotClearNewerMutation(t *testing.T) {
+	resetFailClosedUsers()
+	t.Cleanup(resetFailClosedUsers)
+
+	MarkUserFailClosed(92)
+	snapshot := snapshotFailClosedUsers()
+	MarkUserFailClosed(92)
+	clearReloadedFailClosedUsers(snapshot)
+
+	assert.True(t, isUserFailClosed(92))
+}
+
 func TestSetUserPermissionsInTxDoesNotMutateEnforcerBeforeReload(t *testing.T) {
 	db := newAuthzTestDB(t)
 	require.NoError(t, Init(db))

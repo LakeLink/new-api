@@ -12,8 +12,11 @@ import (
 )
 
 var (
-	enforcerMu sync.RWMutex
-	enforcer   *casbin.SyncedEnforcer
+	enforcerMu      sync.RWMutex
+	enforcer        *casbin.SyncedEnforcer
+	failClosedMu    sync.RWMutex
+	failClosedUsers = make(map[int]uint64)
+	failClosedEpoch uint64
 )
 
 const modelText = `
@@ -53,6 +56,7 @@ func Init(db *gorm.DB) error {
 	enforcerMu.Lock()
 	enforcer = e
 	enforcerMu.Unlock()
+	resetFailClosedUsers()
 
 	if !common.IsMasterNode {
 		return nil
@@ -72,7 +76,60 @@ func ReloadPolicy() error {
 	if enforcer == nil {
 		return fmt.Errorf("authz enforcer is not initialized")
 	}
-	return enforcer.LoadPolicy()
+	failClosedSnapshot := snapshotFailClosedUsers()
+	if err := enforcer.LoadPolicy(); err != nil {
+		return err
+	}
+	clearReloadedFailClosedUsers(failClosedSnapshot)
+	return nil
+}
+
+// MarkUserFailClosed denies all managed permissions for a user until a full
+// policy reload succeeds. Callers use this before reloading after a committed
+// authorization mutation so a transient adapter failure cannot leave stale
+// grants active in the old in-memory policy snapshot.
+func MarkUserFailClosed(userID int) {
+	if userID <= 0 {
+		return
+	}
+	failClosedMu.Lock()
+	failClosedEpoch++
+	failClosedUsers[userID] = failClosedEpoch
+	failClosedMu.Unlock()
+}
+
+func isUserFailClosed(userID int) bool {
+	failClosedMu.RLock()
+	_, denied := failClosedUsers[userID]
+	failClosedMu.RUnlock()
+	return denied
+}
+
+func snapshotFailClosedUsers() map[int]uint64 {
+	failClosedMu.RLock()
+	snapshot := make(map[int]uint64, len(failClosedUsers))
+	for userID, epoch := range failClosedUsers {
+		snapshot[userID] = epoch
+	}
+	failClosedMu.RUnlock()
+	return snapshot
+}
+
+func clearReloadedFailClosedUsers(snapshot map[int]uint64) {
+	failClosedMu.Lock()
+	for userID, epoch := range snapshot {
+		if failClosedUsers[userID] == epoch {
+			delete(failClosedUsers, userID)
+		}
+	}
+	failClosedMu.Unlock()
+}
+
+func resetFailClosedUsers() {
+	failClosedMu.Lock()
+	clear(failClosedUsers)
+	failClosedEpoch = 0
+	failClosedMu.Unlock()
 }
 
 // StartPolicySync periodically reloads the authorization policy from the database.

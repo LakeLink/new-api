@@ -611,6 +611,8 @@ func fillLogChannelNames(ctx context.Context, logs []*Log) error {
 const logSearchCountLimit = 10000
 const LogExportLimit = 20000
 
+var logExportBatchSize = 1000
+
 type LogExportRowHandler func(log *Log) error
 type LogExportReadyHandler func() error
 
@@ -778,38 +780,96 @@ func normalizeLogExportLimit(opts *LogQueryOptions) {
 
 func streamExportLogs(tx *gorm.DB, opts LogQueryOptions, onReady LogExportReadyHandler, handle func(index int, log *Log) error) error {
 	order := "logs.id desc"
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+	usingClickHouse := common.UsingLogDatabase(common.DatabaseTypeClickHouse)
+	if usingClickHouse {
 		order = clickHouseLogOrder("logs.")
 	}
-	tx = tx.Select("logs.*").Order(order)
-	if !opts.NoLimit {
-		tx = tx.Limit(opts.Num)
-	}
+	tx = tx.Select("logs.*")
 
-	rows, err := tx.Rows()
-	if err != nil {
-		return err
+	batchSize := logExportBatchSize
+	if batchSize <= 0 {
+		batchSize = 1000
 	}
-	defer rows.Close()
-
-	if onReady != nil {
-		if err := onReady(); err != nil {
-			return err
-		}
+	remaining := opts.Num
+	if !opts.NoLimit && remaining < batchSize {
+		batchSize = remaining
 	}
 
 	index := 0
-	for rows.Next() {
-		var log Log
-		if err := LOG_DB.ScanRows(rows, &log); err != nil {
+	ready := false
+	var cursorId int
+	var cursorCreatedAt int64
+	var cursorRequestId string
+	hasCursor := false
+
+	for {
+		if opts.Context != nil {
+			if err := opts.Context.Err(); err != nil {
+				return err
+			}
+		}
+
+		pageSize := batchSize
+		if !opts.NoLimit && remaining < pageSize {
+			pageSize = remaining
+		}
+		if pageSize <= 0 {
+			break
+		}
+
+		pageQuery := tx
+		if hasCursor {
+			if usingClickHouse {
+				pageQuery = pageQuery.Where(
+					"(logs.created_at < ?) OR (logs.created_at = ? AND logs.request_id < ?)",
+					cursorCreatedAt,
+					cursorCreatedAt,
+					cursorRequestId,
+				)
+			} else {
+				pageQuery = pageQuery.Where("logs.id < ?", cursorId)
+			}
+		}
+
+		var page []*Log
+		if err := pageQuery.Order(order).Limit(pageSize).Find(&page).Error; err != nil {
 			return err
 		}
-		index++
-		if err := handle(index, &log); err != nil {
-			return err
+		if !ready {
+			ready = true
+			if onReady != nil {
+				if err := onReady(); err != nil {
+					return err
+				}
+			}
+		}
+		if len(page) == 0 {
+			break
+		}
+		last := page[len(page)-1]
+		nextCursorId := last.Id
+		nextCursorCreatedAt := last.CreatedAt
+		nextCursorRequestId := last.RequestId
+
+		for _, log := range page {
+			index++
+			if err := handle(index, log); err != nil {
+				return err
+			}
+		}
+
+		cursorId = nextCursorId
+		cursorCreatedAt = nextCursorCreatedAt
+		cursorRequestId = nextCursorRequestId
+		hasCursor = true
+		if !opts.NoLimit {
+			remaining -= len(page)
+		}
+		if len(page) < pageSize {
+			break
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 type logChannelNameResolver struct {

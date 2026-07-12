@@ -54,6 +54,9 @@ func TestStreamExportAllLogsWithOptionsHonorsLimitAndFillsChannelNames(t *testin
 
 func TestStreamExportAllLogsWithOptionsNoLimitStreamsEveryMatch(t *testing.T) {
 	resetLogExportTables(t)
+	originalBatchSize := logExportBatchSize
+	logExportBatchSize = 1
+	t.Cleanup(func() { logExportBatchSize = originalBatchSize })
 
 	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1001, Type: LogTypeConsume, RequestId: "req_1"})
 	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1002, Type: LogTypeConsume, RequestId: "req_2"})
@@ -71,6 +74,34 @@ func TestStreamExportAllLogsWithOptionsNoLimitStreamsEveryMatch(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"req_2", "req_1"}, requestIds)
+}
+
+func TestStreamExportAllLogsWithOptionsKeysetPaginationExcludesNewerRows(t *testing.T) {
+	resetLogExportTables(t)
+	originalBatchSize := logExportBatchSize
+	logExportBatchSize = 2
+	t.Cleanup(func() { logExportBatchSize = originalBatchSize })
+
+	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1001, Type: LogTypeConsume, RequestId: "req_1"})
+	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1002, Type: LogTypeConsume, RequestId: "req_2"})
+	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1003, Type: LogTypeConsume, RequestId: "req_3"})
+	seedLogExportLog(t, Log{UserId: 1, CreatedAt: 1004, Type: LogTypeConsume, RequestId: "req_4"})
+
+	var requestIds []string
+	err := StreamExportAllLogsWithOptions(
+		LogQueryOptions{NoLimit: true, IncludeAdminFields: true},
+		nil,
+		func(log *Log) error {
+			requestIds = append(requestIds, log.RequestId)
+			if len(requestIds) == 2 {
+				seedLogExportLog(t, Log{UserId: 1, CreatedAt: 2000, Type: LogTypeConsume, RequestId: "req_new"})
+			}
+			return nil
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"req_4", "req_3", "req_2", "req_1"}, requestIds)
 }
 
 func TestStreamExportUserLogsWithOptionsScrubsAdminFieldsAndUsesDisplayIds(t *testing.T) {
