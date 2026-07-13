@@ -1,7 +1,10 @@
 package relay
 
 import (
+	"io"
 	"math"
+	"net/http"
+	"strings"
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -25,6 +28,35 @@ func TestIsResponsesEventStreamContentType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isResponsesEventStreamContentType(tt.contentType))
+		})
+	}
+}
+
+func TestIsResponsesEventStream(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        bool
+	}{
+		{name: "content type", contentType: "text/event-stream", body: "", want: true},
+		{name: "headerless event", body: "event: response.created\ndata: {}\n\n", want: true},
+		{name: "headerless data", body: "data: {\"type\":\"response.created\"}\n\n", want: true},
+		{name: "json", body: "{\"id\":\"resp_123\"}", want: false},
+		{name: "empty", body: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				Header: http.Header{"Content-Type": []string{tt.contentType}},
+				Body:   io.NopCloser(strings.NewReader(tt.body)),
+			}
+
+			require.Equal(t, tt.want, isResponsesEventStream(resp))
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tt.body, string(body))
 		})
 	}
 }
