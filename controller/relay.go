@@ -311,6 +311,9 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 		} else {
 			meta.MaxTokens = int(maxTokens)
 		}
+		if n := lo.FromPtrOr(r.N, 1); n > 1 {
+			meta.MaxTokens *= n
+		}
 	case *dto.OpenAIResponsesRequest:
 		meta.MaxTokens = int(lo.FromPtrOr(r.MaxOutputTokens, uint(0)))
 	case *dto.ClaudeRequest:

@@ -138,9 +138,9 @@ func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	if strings.HasPrefix(i.Model, "dall-e") {
 		// Size
 		if i.Size == "256x256" {
-			sizeRatio = 0.4
+			sizeRatio = 0.8
 		} else if i.Size == "512x512" {
-			sizeRatio = 0.45
+			sizeRatio = 0.9
 		} else if i.Size == "1024x1024" {
 			sizeRatio = 1
 		} else if i.Size == "1024x1792" || i.Size == "1792x1024" {

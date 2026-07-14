@@ -295,7 +295,7 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 	}
 
 	if relayMode == relayconstant.RelayModeModerations && textRequest.Model == "" {
-		textRequest.Model = "text-moderation-latest"
+		textRequest.Model = "omni-moderation-latest"
 	}
 	if relayMode == relayconstant.RelayModeEmbeddings && textRequest.Model == "" {
 		textRequest.Model = c.Param("model")
@@ -303,6 +303,9 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 
 	if exceedsMaxTokensLimit(textRequest.MaxTokens, textRequest.MaxCompletionTokens) {
 		return nil, errors.New("max_tokens is invalid")
+	}
+	if textRequest.N != nil && (*textRequest.N < 1 || *textRequest.N > dto.MaxChatCompletionsN) {
+		return nil, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxChatCompletionsN)
 	}
 	if textRequest.Model == "" {
 		return nil, errors.New("model is required")

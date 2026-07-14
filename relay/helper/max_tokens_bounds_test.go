@@ -69,4 +69,32 @@ func TestMaxTokensBounds(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "max_output_tokens is invalid")
 	})
+
+	t.Run("chat completion count must be positive", func(t *testing.T) {
+		c := newJSONContext(t, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"n":0}`)
+		_, err := GetAndValidateTextRequest(c, relayconstant.RelayModeChatCompletions)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "n must be an integer between")
+	})
+
+	t.Run("chat completion count is bounded", func(t *testing.T) {
+		c := newJSONContext(t, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"n":129}`)
+		_, err := GetAndValidateTextRequest(c, relayconstant.RelayModeChatCompletions)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "n must be an integer between")
+	})
+
+	t.Run("chat completion count multiplies pre-consume output", func(t *testing.T) {
+		c := newJSONContext(t, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":2,"n":3}`)
+		req, err := GetAndValidateTextRequest(c, relayconstant.RelayModeChatCompletions)
+		require.NoError(t, err)
+		require.Equal(t, 6, req.GetTokenCountMeta().MaxTokens)
+	})
+
+	t.Run("maximum chat completion count is accepted", func(t *testing.T) {
+		c := newJSONContext(t, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"n":128}`)
+		req, err := GetAndValidateTextRequest(c, relayconstant.RelayModeChatCompletions)
+		require.NoError(t, err)
+		require.Equal(t, 128, req.GetTokenCountMeta().MaxTokens)
+	})
 }

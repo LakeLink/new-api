@@ -13,7 +13,60 @@ const (
 	USD2RMB = 7.3 // 暂定 1 USD = 7.3 RMB
 	USD     = 500 // $0.002 = 1 -> $1 = 500
 	RMB     = USD / USD2RMB
+
+	// OpenAILongContextThreshold is the prompt-token boundary after which
+	// OpenAI charges supported 1M-context models at long-context rates.
+	OpenAILongContextThreshold = 272000
 )
+
+type OpenAIPriorityPriceRatios struct {
+	ModelRatio         float64
+	CompletionRatio    float64
+	CacheRatio         float64
+	CacheCreationRatio float64
+}
+
+func GetOpenAIPriorityPriceRatios(model string) (OpenAIPriorityPriceRatios, bool) {
+	var input, cached, cacheWrite, output float64
+	switch {
+	case model == "gpt-5.6" || model == "gpt-5.6-sol":
+		input, cached, cacheWrite, output = 10, 1, 12.5, 60
+	case model == "gpt-5.6-terra":
+		input, cached, cacheWrite, output = 5, 0.5, 6.25, 30
+	case model == "gpt-5.6-luna":
+		input, cached, cacheWrite, output = 2, 0.2, 2.5, 12
+	case model == "gpt-5.5" || model == "gpt-5.5-2026-04-23":
+		input, cached, output = 12.5, 1.25, 75
+	case model == "gpt-5.4" || model == "gpt-5.4-2026-03-05":
+		input, cached, output = 5, 0.5, 30
+	case model == "gpt-5.4-mini":
+		input, cached, output = 1.5, 0.15, 9
+	default:
+		return OpenAIPriorityPriceRatios{}, false
+	}
+
+	ratios := OpenAIPriorityPriceRatios{
+		ModelRatio:      input / 2,
+		CompletionRatio: output / input,
+		CacheRatio:      cached / input,
+	}
+	if cacheWrite > 0 {
+		ratios.CacheCreationRatio = cacheWrite / input
+	}
+	return ratios, true
+}
+
+func IsOpenAILongContextModel(model string) bool {
+	return model == "gpt-5.4" || model == "gpt-5.4-2026-03-05" ||
+		model == "gpt-5.4-pro" || model == "gpt-5.4-pro-2026-03-05" ||
+		model == "gpt-5.5" || model == "gpt-5.5-2026-04-23" || model == "gpt-5.5-pro" ||
+		model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+}
+
+func IsOpenAIRegionalProcessingUpliftModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-5.4") || strings.HasPrefix(model, "gpt-5.5") ||
+		strings.HasPrefix(model, "gpt-5.6") || strings.HasPrefix(model, "gpt-image-2")
+}
 
 // modelRatio
 // https://platform.openai.com/docs/models/model-endpoint-compatibility
@@ -48,6 +101,7 @@ var defaultModelRatio = map[string]float64{
 	"gpt-4o-realtime-preview":                   2.5,
 	"gpt-4o-realtime-preview-2024-10-01":        2.5,
 	"gpt-4o-realtime-preview-2024-12-17":        2.5,
+	"gpt-4o-realtime-preview-2025-06-03":        2.5,
 	"gpt-4o-mini-realtime-preview":              0.3,
 	"gpt-4o-mini-realtime-preview-2024-12-17":   0.3,
 	"gpt-4.1":                                   1.0,  // $2 / 1M tokens
@@ -96,7 +150,35 @@ var defaultModelRatio = map[string]float64{
 	"gpt-5-mini-2025-08-07":                     0.125,
 	"gpt-5-nano":                                0.025,
 	"gpt-5-nano-2025-08-07":                     0.025,
+	"gpt-5-codex":                               0.625,
+	"gpt-5-pro":                                 7.5,
+	"gpt-5-pro-2025-10-06":                      7.5,
+	"gpt-5-search-api":                          0.625,
+	"gpt-5-search-api-2025-10-14":               0.625,
+	"gpt-5.1":                                   0.625,
+	"gpt-5.1-2025-11-13":                        0.625,
+	"gpt-5.1-chat-latest":                       0.625,
+	"gpt-5.1-codex":                             0.625,
+	"gpt-5.1-codex-mini":                        0.125,
+	"gpt-5.1-codex-max":                         0.625,
+	"gpt-5.2":                                   0.875,
+	"gpt-5.2-2025-12-11":                        0.875,
+	"gpt-5.2-chat-latest":                       0.875,
+	"gpt-5.2-codex":                             0.875,
+	"gpt-5.2-pro":                               10.5,
+	"gpt-5.2-pro-2025-12-11":                    10.5,
+	"gpt-5.3-chat-latest":                       0.875,
+	"gpt-5.3-codex":                             0.875,
+	"gpt-5.4":                                   1.25,
+	"gpt-5.4-2026-03-05":                        1.25,
+	"gpt-5.4-mini":                              0.375,
+	"gpt-5.4-nano":                              0.1,
+	"gpt-5.4-pro":                               15,
+	"gpt-5.4-pro-2026-03-05":                    15,
 	"gpt-5.5":                                   2.5, // $5 / 1M tokens
+	"gpt-5.5-2026-04-23":                        2.5,
+	"gpt-5.5-pro":                               15,
+	"gpt-5.6":                                   2.5,
 	"gpt-5.6-sol":                               2.5,
 	"gpt-5.6-terra":                             1.25,
 	"gpt-5.6-luna":                              0.5,
@@ -105,14 +187,20 @@ var defaultModelRatio = map[string]float64{
 	"gpt-3.5-turbo-16k":                         1.5, // $0.003 / 1K tokens
 	"gpt-3.5-turbo-16k-0613":                    1.5,
 	"gpt-3.5-turbo-instruct":                    0.75, // $0.0015 / 1K tokens
-	"gpt-3.5-turbo-1106":                        0.5,  // $0.001 / 1K tokens
+	"gpt-3.5-turbo-instruct-0914":               0.75,
+	"gpt-3.5-turbo-1106":                        0.5, // $0.001 / 1K tokens
 	"gpt-3.5-turbo-0125":                        0.25,
 	"text-ada-001":                              0.2,
 	"text-babbage-001":                          0.25,
 	"text-curie-001":                            1,
 	"text-davinci-edit-001":                     10,
 	"code-davinci-edit-001":                     10,
-	"whisper-1":                                 15,  // $0.006 / minute -> $0.006 / 150 words -> $0.006 / 200 tokens -> $0.03 / 1k tokens
+	"whisper-1":                                 3, // $0.006 / minute at 1,000 duration tokens/minute
+	"gpt-4o-transcribe":                         3,
+	"gpt-4o-transcribe-diarize":                 3,
+	"gpt-4o-mini-transcribe":                    1.5,
+	"gpt-4o-mini-transcribe-2025-03-20":         1.5,
+	"gpt-4o-mini-transcribe-2025-12-15":         1.5,
 	"tts-1":                                     7.5, // 1k characters -> $0.015
 	"tts-1-1106":                                7.5, // 1k characters -> $0.015
 	"tts-1-hd":                                  15,  // 1k characters -> $0.03
@@ -123,8 +211,42 @@ var defaultModelRatio = map[string]float64{
 	"text-embedding-3-large":                    0.065,
 	"text-embedding-ada-002":                    0.05,
 	"text-search-ada-doc-001":                   10,
-	"text-moderation-stable":                    0.1,
-	"text-moderation-latest":                    0.1,
+	"text-moderation-stable":                    0,
+	"text-moderation-latest":                    0,
+	"omni-moderation-latest":                    0,
+	"omni-moderation-2024-09-26":                0,
+	"gpt-4o-search-preview":                     1.25,
+	"gpt-4o-search-preview-2025-03-11":          1.25,
+	"gpt-4o-mini-search-preview":                0.075,
+	"gpt-4o-mini-search-preview-2025-03-11":     0.075,
+	"computer-use-preview":                      1.5,
+	"computer-use-preview-2025-03-11":           1.5,
+	"gpt-4o-audio-preview-2024-12-17":           1.25,
+	"gpt-4o-audio-preview-2025-06-03":           1.25,
+	"gpt-4o-mini-audio-preview":                 0.3,
+	"gpt-4o-mini-audio-preview-2024-12-17":      0.3,
+	"gpt-4o-mini-tts":                           0.3,
+	"gpt-4o-mini-tts-2025-03-20":                0.3,
+	"gpt-4o-mini-tts-2025-12-15":                0.3,
+	"gpt-audio":                                 1.25,
+	"gpt-audio-2025-08-28":                      1.25,
+	"gpt-audio-1.5":                             1.25,
+	"gpt-audio-mini":                            0.3,
+	"gpt-audio-mini-2025-10-06":                 0.3,
+	"gpt-audio-mini-2025-12-15":                 0.3,
+	"gpt-realtime":                              2,
+	"gpt-realtime-2025-08-28":                   2,
+	"gpt-realtime-1.5":                          2,
+	"gpt-realtime-mini":                         0.3,
+	"gpt-realtime-mini-2025-10-06":              0.3,
+	"gpt-realtime-mini-2025-12-15":              0.3,
+	"gpt-image-1-mini":                          1,
+	"gpt-image-1.5":                             2.5,
+	"chatgpt-image-latest":                      2.5,
+	"gpt-image-2":                               2.5,
+	"gpt-image-2-2026-04-21":                    2.5,
+	"babbage-002":                               0.2,
+	"davinci-002":                               1,
 	"claude-3-haiku-20240307":                   0.125, // $0.25 / 1M tokens
 	"claude-3-5-haiku-20241022":                 0.5,   // $1 / 1M tokens
 	"claude-haiku-4-5-20251001":                 0.5,   // $1 / 1M tokens
@@ -273,6 +395,7 @@ var defaultModelPrice = map[string]float64{
 	"suno_music":                     0.1,
 	"suno_lyrics":                    0.01,
 	"dall-e-3":                       0.04,
+	"dall-e-2":                       0.02,
 	"imagen-3.0-generate-002":        0.03,
 	"black-forest-labs/flux-1.1-pro": 0.04,
 	"gpt-4-gizmo-*":                  0.1,
@@ -296,7 +419,6 @@ var defaultModelPrice = map[string]float64{
 	"mj_upload":                      0.05,
 	"sora-2":                         0.3,
 	"sora-2-pro":                     0.5,
-	"gpt-4o-mini-tts":                0.3,
 	"veo-3.0-generate-001":           0.4,
 	"veo-3.0-fast-generate-001":      0.15,
 	"veo-3.1-generate-preview":       0.4,
@@ -304,21 +426,69 @@ var defaultModelPrice = map[string]float64{
 }
 
 var defaultAudioRatio = map[string]float64{
-	"gpt-4o-audio-preview":         16,
-	"gpt-4o-mini-audio-preview":    66.67,
-	"gpt-4o-realtime-preview":      8,
-	"gpt-4o-mini-realtime-preview": 16.67,
-	"gpt-4o-mini-tts":              25,
+	"gpt-4o-audio-preview":                    16,
+	"gpt-4o-audio-preview-2024-10-01":         16,
+	"gpt-4o-audio-preview-2024-12-17":         16,
+	"gpt-4o-audio-preview-2025-06-03":         16,
+	"gpt-4o-mini-audio-preview":               16.6666666667,
+	"gpt-4o-mini-audio-preview-2024-12-17":    16.6666666667,
+	"gpt-4o-realtime-preview":                 8,
+	"gpt-4o-realtime-preview-2024-10-01":      8,
+	"gpt-4o-realtime-preview-2024-12-17":      8,
+	"gpt-4o-realtime-preview-2025-06-03":      8,
+	"gpt-4o-mini-realtime-preview":            16.67,
+	"gpt-4o-mini-realtime-preview-2024-12-17": 16.67,
+	"gpt-4o-mini-tts":                         1,
+	"gpt-4o-mini-tts-2025-03-20":              1,
+	"gpt-4o-mini-tts-2025-12-15":              1,
+	"gpt-audio":                               16,
+	"gpt-audio-2025-08-28":                    16,
+	"gpt-audio-1.5":                           12.8,
+	"gpt-audio-mini":                          16.6666666667,
+	"gpt-audio-mini-2025-10-06":               16.6666666667,
+	"gpt-audio-mini-2025-12-15":               16.6666666667,
+	"gpt-realtime":                            8,
+	"gpt-realtime-2025-08-28":                 8,
+	"gpt-realtime-1.5":                        8,
+	"gpt-realtime-mini":                       16.6666666667,
+	"gpt-realtime-mini-2025-10-06":            16.6666666667,
+	"gpt-realtime-mini-2025-12-15":            16.6666666667,
 }
 
 var defaultAudioCompletionRatio = map[string]float64{
-	"gpt-4o-realtime":      2,
-	"gpt-4o-mini-realtime": 2,
-	"gpt-4o-mini-tts":      1,
-	"tts-1":                0,
-	"tts-1-hd":             0,
-	"tts-1-1106":           0,
-	"tts-1-hd-1106":        0,
+	"gpt-4o-realtime":                         2,
+	"gpt-4o-mini-realtime":                    2,
+	"gpt-4o-audio-preview":                    2,
+	"gpt-4o-audio-preview-2024-10-01":         2,
+	"gpt-4o-audio-preview-2024-12-17":         2,
+	"gpt-4o-audio-preview-2025-06-03":         2,
+	"gpt-4o-mini-audio-preview":               2,
+	"gpt-4o-mini-audio-preview-2024-12-17":    2,
+	"gpt-4o-realtime-preview":                 2,
+	"gpt-4o-realtime-preview-2024-10-01":      2,
+	"gpt-4o-realtime-preview-2024-12-17":      2,
+	"gpt-4o-realtime-preview-2025-06-03":      2,
+	"gpt-4o-mini-realtime-preview":            2,
+	"gpt-4o-mini-realtime-preview-2024-12-17": 2,
+	"gpt-4o-mini-tts":                         20,
+	"gpt-4o-mini-tts-2025-03-20":              20,
+	"gpt-4o-mini-tts-2025-12-15":              20,
+	"gpt-audio":                               2,
+	"gpt-audio-2025-08-28":                    2,
+	"gpt-audio-1.5":                           2,
+	"gpt-audio-mini":                          2,
+	"gpt-audio-mini-2025-10-06":               2,
+	"gpt-audio-mini-2025-12-15":               2,
+	"gpt-realtime":                            2,
+	"gpt-realtime-2025-08-28":                 2,
+	"gpt-realtime-1.5":                        2,
+	"gpt-realtime-mini":                       2,
+	"gpt-realtime-mini-2025-10-06":            2,
+	"gpt-realtime-mini-2025-12-15":            2,
+	"tts-1":                                   0,
+	"tts-1-hd":                                0,
+	"tts-1-1106":                              0,
+	"tts-1-hd-1106":                           0,
 }
 
 var modelPriceMap = types.NewRWMap[string, float64]()
@@ -326,10 +496,29 @@ var modelRatioMap = types.NewRWMap[string, float64]()
 var completionRatioMap = types.NewRWMap[string, float64]()
 
 var defaultCompletionRatio = map[string]float64{
-	"gpt-4-gizmo-*":  2,
-	"gpt-4o-gizmo-*": 3,
-	"gpt-4-all":      2,
-	"gpt-image-1":    8,
+	"gpt-4-gizmo-*":          2,
+	"gpt-4o-gizmo-*":         3,
+	"gpt-4-all":              2,
+	"gpt-image-1":            8,
+	"gpt-image-1-mini":       4,
+	"gpt-image-1.5":          6.4,
+	"chatgpt-image-latest":   6.4,
+	"gpt-image-2":            6,
+	"gpt-image-2-2026-04-21": 6,
+	"gpt-5.1":                8,
+	"gpt-5.1-2025-11-13":     8,
+	"gpt-5.1-chat-latest":    8,
+	"gpt-5.1-codex":          8,
+	"gpt-5.1-codex-mini":     8,
+	"gpt-5.1-codex-max":      8,
+	"gpt-5.2":                8,
+	"gpt-5.2-2025-12-11":     8,
+	"gpt-5.2-chat-latest":    8,
+	"gpt-5.2-codex":          8,
+	"gpt-5.2-pro":            8,
+	"gpt-5.2-pro-2025-12-11": 8,
+	"gpt-5.3-chat-latest":    8,
+	"gpt-5.3-codex":          8,
 }
 
 // InitRatioSettings initializes all model related settings maps
@@ -423,6 +612,18 @@ func GetDefaultModelRatioMap() map[string]float64 {
 
 func GetDefaultModelPriceMap() map[string]float64 {
 	return defaultModelPrice
+}
+
+func GetDefaultCompletionRatio(name string) float64 {
+	name = FormatMatchingModelName(name)
+	hardCodedRatio, locked := getHardcodedCompletionModelRatio(name)
+	if locked {
+		return hardCodedRatio
+	}
+	if ratio, ok := defaultCompletionRatio[name]; ok {
+		return ratio
+	}
+	return hardCodedRatio
 }
 
 func CompletionRatio2JSONString() string {
@@ -653,7 +854,12 @@ func ModelRatio2JSONString() string {
 }
 
 var defaultImageRatio = map[string]float64{
-	"gpt-image-1": 2,
+	"gpt-image-1":            2,
+	"gpt-image-1-mini":       1.25,
+	"gpt-image-1.5":          1.6,
+	"chatgpt-image-latest":   1.6,
+	"gpt-image-2":            1.6,
+	"gpt-image-2-2026-04-21": 1.6,
 }
 var imageRatioMap = types.NewRWMap[string, float64]()
 var audioRatioMap = types.NewRWMap[string, float64]()

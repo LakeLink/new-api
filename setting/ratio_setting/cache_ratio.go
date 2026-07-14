@@ -36,6 +36,36 @@ var defaultCacheRatio = map[string]float64{
 	"gpt-5-mini-2025-08-07":               0.1,
 	"gpt-5-nano":                          0.1,
 	"gpt-5-nano-2025-08-07":               0.1,
+	"gpt-5-codex":                         0.1,
+	"gpt-5-search-api":                    0.1,
+	"gpt-5-search-api-2025-10-14":         0.1,
+	"gpt-5.1":                             0.1,
+	"gpt-5.1-2025-11-13":                  0.1,
+	"gpt-5.1-chat-latest":                 0.1,
+	"gpt-5.1-codex":                       0.1,
+	"gpt-5.1-codex-mini":                  0.1,
+	"gpt-5.1-codex-max":                   0.1,
+	"gpt-5.2":                             0.1,
+	"gpt-5.2-2025-12-11":                  0.1,
+	"gpt-5.2-chat-latest":                 0.1,
+	"gpt-5.2-codex":                       0.1,
+	"gpt-5.3-chat-latest":                 0.1,
+	"gpt-5.3-codex":                       0.1,
+	"gpt-5.4":                             0.1,
+	"gpt-5.4-2026-03-05":                  0.1,
+	"gpt-5.4-mini":                        0.1,
+	"gpt-5.4-nano":                        0.1,
+	"gpt-5.5":                             0.1,
+	"gpt-5.5-2026-04-23":                  0.1,
+	"gpt-5.6":                             0.1,
+	"gpt-5.6-sol":                         0.1,
+	"gpt-5.6-terra":                       0.1,
+	"gpt-5.6-luna":                        0.1,
+	"gpt-image-1-mini":                    0.1,
+	"gpt-image-1.5":                       0.25,
+	"chatgpt-image-latest":                0.25,
+	"gpt-image-2":                         0.25,
+	"gpt-image-2-2026-04-21":              0.25,
 	"deepseek-chat":                       0.25,
 	"deepseek-reasoner":                   0.25,
 	"deepseek-coder":                      0.25,
@@ -81,6 +111,7 @@ var defaultCacheRatio = map[string]float64{
 }
 
 var defaultCreateCacheRatio = map[string]float64{
+	"gpt-5.6":                             1.25,
 	"gpt-5.6-sol":                         1.25,
 	"gpt-5.6-terra":                       1.25,
 	"gpt-5.6-luna":                        1.25,
@@ -170,6 +201,20 @@ func GetCreateCacheRatio(name string) (float64, bool) {
 		return 1.25, false // Default to 1.25 if not found
 	}
 	return ratio, true
+}
+
+func GetDefaultCacheRatio(name string) float64 {
+	if ratio, ok := defaultCacheRatio[name]; ok {
+		return ratio
+	}
+	return 1
+}
+
+func GetDefaultCreateCacheRatio(name string) float64 {
+	if ratio, ok := defaultCreateCacheRatio[name]; ok {
+		return ratio
+	}
+	return 1.25
 }
 
 func GetCacheRatioCopy() map[string]float64 {

@@ -181,6 +181,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))
+	applyOpenAIUsagePricing(info, usage, lastStreamResponseServiceTier(lastStreamData))
 
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 
@@ -251,6 +252,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	applyUsagePostProcessing(info, &simpleResponse.Usage, responseBody)
+	applyOpenAIUsagePricing(info, &simpleResponse.Usage, simpleResponse.ServiceTier)
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:

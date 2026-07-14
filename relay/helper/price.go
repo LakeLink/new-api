@@ -2,10 +2,12 @@ package helper
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -161,11 +163,8 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	var audioRatio float64
 	var audioCompletionRatio float64
 	var freeModel bool
+	regionalProcessingRatio := 1.0
 	if !usePrice {
-		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
-		if meta.MaxTokens != 0 {
-			preConsumedTokens += meta.MaxTokens
-		}
 		var success bool
 		var matchName string
 		modelRatio, success, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
@@ -187,8 +186,58 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		imageRatio, _ = ratio_setting.GetImageRatio(info.OriginModelName)
 		audioRatio = ratio_setting.GetAudioRatio(info.OriginModelName)
 		audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(info.OriginModelName)
-		ratio := modelRatio * groupRatioInfo.GroupRatio
-		quota, err := common.QuotaFromFloatStrict(float64(preConsumedTokens) * ratio)
+
+		preConsumeModelRatio := modelRatio
+		preConsumeCompletionRatio := completionRatio
+		inputMultiplier := 1.0
+		outputMultiplier := 1.0
+		defaultRatio, usesBuiltInOpenAIPricing := ratio_setting.GetDefaultModelRatioMap()[info.OriginModelName]
+		usesBuiltInOpenAIPricing = usesBuiltInOpenAIPricing && modelRatio == defaultRatio &&
+			common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenAI
+
+		if usesBuiltInOpenAIPricing {
+			channelOtherSettings, ok := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
+			if ok && channelOtherSettings.AllowServiceTier {
+				requestedServiceTier := ""
+				switch request := info.Request.(type) {
+				case *dto.GeneralOpenAIRequest:
+					if len(request.ServiceTier) > 0 {
+						_ = common.Unmarshal(request.ServiceTier, &requestedServiceTier)
+					}
+				case *dto.OpenAIResponsesRequest:
+					requestedServiceTier = request.ServiceTier
+				case *dto.OpenAIResponsesCompactionRequest:
+					requestedServiceTier = request.ServiceTier
+				}
+				if strings.EqualFold(requestedServiceTier, "priority") {
+					if priorityRatios, ok := ratio_setting.GetOpenAIPriorityPriceRatios(info.OriginModelName); ok {
+						preConsumeModelRatio = priorityRatios.ModelRatio
+						preConsumeCompletionRatio = priorityRatios.CompletionRatio
+					}
+				}
+			}
+
+			if preConsumeModelRatio == modelRatio && promptTokens > ratio_setting.OpenAILongContextThreshold &&
+				ratio_setting.IsOpenAILongContextModel(info.OriginModelName) {
+				inputMultiplier = 2
+				outputMultiplier = 1.5
+			}
+
+			if ratio_setting.IsOpenAIRegionalProcessingUpliftModel(info.OriginModelName) {
+				if parsedBaseURL, err := url.Parse(common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl)); err == nil {
+					host := strings.ToLower(parsedBaseURL.Hostname())
+					if host == "us.api.openai.com" || host == "eu.api.openai.com" {
+						regionalProcessingRatio = 1.1
+					}
+				}
+			}
+		}
+
+		preConsumedPromptTokens := common.Max(promptTokens, common.PreConsumedQuota)
+		preConsumeUnits := float64(preConsumedPromptTokens)*inputMultiplier +
+			float64(meta.MaxTokens)*preConsumeCompletionRatio*outputMultiplier
+		preConsumeRatio := preConsumeModelRatio * groupRatioInfo.GroupRatio * regionalProcessingRatio
+		quota, err := common.QuotaFromFloatStrict(preConsumeUnits * preConsumeRatio)
 		if err != nil {
 			return types.PriceData{}, err
 		}
@@ -233,6 +282,9 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		CacheCreation5mRatio: cacheCreationRatio5m,
 		CacheCreation1hRatio: cacheCreationRatio1h,
 		QuotaToPreConsume:    preConsumedQuota,
+	}
+	if regionalProcessingRatio != 1 {
+		priceData.AddOtherRatio("openai_regional_processing", regionalProcessingRatio)
 	}
 	if usePrice {
 		for name, ratio := range meta.BillingRatios {

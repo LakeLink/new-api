@@ -101,3 +101,13 @@ func TestInitialContextChannelProtocolMismatchUsesOriginalFormatAndPreparesRetry
 	require.NotNil(t, info.ChannelMeta)
 	require.Equal(t, constant.ChannelTypeOpenAI, info.ChannelMeta.ChannelType)
 }
+
+func TestFastTokenCountMetaAccountsForAllChatChoices(t *testing.T) {
+	maxTokens := uint(50)
+	n := 4
+	request := &dto.GeneralOpenAIRequest{MaxTokens: &maxTokens, N: &n}
+
+	meta := fastTokenCountMetaForPricing(request)
+
+	require.Equal(t, 200, meta.MaxTokens)
+}

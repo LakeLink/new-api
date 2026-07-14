@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting"
@@ -604,4 +605,61 @@ func TestModelPriceHelperRequestBillingRatiosOnlyApplyToFixedPrice(t *testing.T)
 	require.Equal(t, "QuotaFromFloat", clamp.Op)
 	require.Equal(t, common.QuotaClampOverflow, clamp.Kind)
 	require.Nil(t, info.Billing)
+}
+
+func TestModelPriceHelperPreConsumesOpenAIDynamicRates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	savedModelPrices := ratio_setting.ModelPrice2JSONString()
+	savedModelRatios := ratio_setting.ModelRatio2JSONString()
+	savedCompletionRatios := ratio_setting.CompletionRatio2JSONString()
+	savedCacheRatios := ratio_setting.CacheRatio2JSONString()
+	savedCreateCacheRatios := ratio_setting.CreateCacheRatio2JSONString()
+	savedGroupRatios := ratio_setting.GroupRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedModelPrices))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedModelRatios))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(savedCompletionRatios))
+		require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(savedCacheRatios))
+		require.NoError(t, ratio_setting.UpdateCreateCacheRatioByJSONString(savedCreateCacheRatios))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(savedGroupRatios))
+	})
+
+	ratio_setting.InitRatioSettings()
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+
+	t.Run("requested priority and regional processing reserve the full rate", func(t *testing.T) {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Set("group", "default")
+		common.SetContextKey(ctx, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+		common.SetContextKey(ctx, constant.ContextKeyChannelBaseUrl, "https://eu.api.openai.com/v1")
+		common.SetContextKey(ctx, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{AllowServiceTier: true})
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-5.5",
+			UserGroup:       "default",
+			UsingGroup:      "default",
+			Request:         &dto.OpenAIResponsesRequest{ServiceTier: "priority"},
+		}
+
+		priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{MaxTokens: 100})
+
+		require.NoError(t, err)
+		require.Equal(t, 11000, priceData.QuotaToPreConsume)
+		require.Equal(t, 1.1, priceData.OtherRatios()["openai_regional_processing"])
+	})
+
+	t.Run("long context reserves doubled input and one-and-a-half output", func(t *testing.T) {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Set("group", "default")
+		common.SetContextKey(ctx, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-5.5",
+			UserGroup:       "default",
+			UsingGroup:      "default",
+		}
+
+		priceData, err := ModelPriceHelper(ctx, info, ratio_setting.OpenAILongContextThreshold+1, &types.TokenCountMeta{MaxTokens: 100})
+
+		require.NoError(t, err)
+		require.Equal(t, 1362255, priceData.QuotaToPreConsume)
+	})
 }

@@ -108,6 +108,11 @@ type GeneralOpenAIRequest struct {
 	ReasoningSplit json.RawMessage `json:"reasoning_split,omitempty"`
 }
 
+// MaxChatCompletionsN caps the number of generated choices. OpenAI bills the
+// output tokens across every choice, so this field is also a billing
+// multiplier when max_tokens is used for pre-consume estimation.
+const MaxChatCompletionsN = 128
+
 func (r *GeneralOpenAIRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	var tokenCountMeta types.TokenCountMeta
 	var texts = make([]string, 0)
@@ -139,6 +144,9 @@ func (r *GeneralOpenAIRequest) GetTokenCountMeta() *types.TokenCountMeta {
 		tokenCountMeta.MaxTokens = int(maxCompletionTokens)
 	} else {
 		tokenCountMeta.MaxTokens = int(maxTokens)
+	}
+	if n := lo.FromPtrOr(r.N, 1); n > 1 {
+		tokenCountMeta.MaxTokens *= n
 	}
 
 	for _, message := range r.Messages {
