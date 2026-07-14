@@ -54,6 +54,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
+	if request.TopK != nil && (*request.TopK < 1 || *request.TopK > 6) {
+		return nil, errors.New("top_k must be an integer between 1 and 6 for Xunfei Spark")
+	}
 	a.request = request
 	return request, nil
 }

@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/types"
-	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -31,29 +29,39 @@ import (
 
 func requestOpenAI2Xunfei(request dto.GeneralOpenAIRequest, xunfeiAppId string, domain string) *XunfeiChatRequest {
 	messages := make([]XunfeiMessage, 0, len(request.Messages))
-	shouldCovertSystemMessage := !strings.HasSuffix(request.Model, "3.5")
+	supportsSystemMessage := domain == "generalv3.5" || domain == "max-32k" || domain == "4.0Ultra"
+	pendingSystem := make([]string, 0)
 	for _, message := range request.Messages {
-		if message.Role == "system" && shouldCovertSystemMessage {
-			messages = append(messages, XunfeiMessage{
-				Role:    "user",
-				Content: message.StringContent(),
-			})
-			messages = append(messages, XunfeiMessage{
-				Role:    "assistant",
-				Content: "Okay",
-			})
-		} else {
-			messages = append(messages, XunfeiMessage{
-				Role:    message.Role,
-				Content: message.StringContent(),
-			})
+		role := message.Role
+		if role == "system" && !supportsSystemMessage {
+			pendingSystem = append(pendingSystem, message.StringContent())
+			continue
 		}
+		content := message.StringContent()
+		if len(pendingSystem) > 0 {
+			systemContent := strings.Join(pendingSystem, "\n\n")
+			if role == "user" {
+				content = systemContent + "\n\n" + content
+			} else {
+				messages = append(messages, XunfeiMessage{Role: "user", Content: systemContent})
+			}
+			pendingSystem = pendingSystem[:0]
+		}
+		messages = append(messages, XunfeiMessage{
+			Role:    role,
+			Content: content,
+		})
+	}
+	if len(pendingSystem) > 0 {
+		messages = append(messages, XunfeiMessage{Role: "user", Content: strings.Join(pendingSystem, "\n\n")})
 	}
 	xunfeiRequest := XunfeiChatRequest{}
 	xunfeiRequest.Header.AppId = xunfeiAppId
 	xunfeiRequest.Parameter.Chat.Domain = domain
 	xunfeiRequest.Parameter.Chat.Temperature = request.Temperature
-	xunfeiRequest.Parameter.Chat.TopK = lo.FromPtrOr(request.N, 0)
+	if request.TopK != nil {
+		xunfeiRequest.Parameter.Chat.TopK = *request.TopK
+	}
 	xunfeiRequest.Parameter.Chat.MaxTokens = request.GetMaxTokens()
 	xunfeiRequest.Payload.Message.Text = messages
 	return &xunfeiRequest
@@ -135,39 +143,69 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 func xunfeiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
 	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
 	relayCtx := info.GetRelayContext(c.Request.Context())
-	dataChan, stopChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
+	resultChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
 	}
+
+	var first xunfeiResult
+	select {
+	case result, ok := <-resultChan:
+		if !ok {
+			return nil, types.NewOpenAIError(errors.New("xunfei upstream closed without a response"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+		if result.Err != nil {
+			return nil, types.NewOpenAIError(result.Err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+		first = result
+	case <-relayCtx.Done():
+		return nil, types.NewError(relayCtx.Err(), types.ErrorCodeDoRequestFailed)
+	}
+
 	helper.SetEventStreamHeaders(c)
 	var usage dto.Usage
+	pendingFirst := true
 	c.Stream(func(w io.Writer) bool {
-		select {
-		case xunfeiResponse, ok := <-dataChan:
-			if !ok {
-				c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
+		var result xunfeiResult
+		if pendingFirst {
+			result = first
+			pendingFirst = false
+		} else {
+			select {
+			case next, ok := <-resultChan:
+				if !ok {
+					helper.Done(c)
+					return false
+				}
+				result = next
+			case <-relayCtx.Done():
 				return false
 			}
-			usage.PromptTokens += xunfeiResponse.Payload.Usage.Text.PromptTokens
-			usage.CompletionTokens += xunfeiResponse.Payload.Usage.Text.CompletionTokens
-			usage.TotalTokens += xunfeiResponse.Payload.Usage.Text.TotalTokens
-			response := streamResponseXunfei2OpenAI(&xunfeiResponse)
-			jsonResponse, err := json.Marshal(response)
-			if err != nil {
-				common.SysLog("error marshalling stream response: " + err.Error())
-				return true
-			}
-			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
-			if info.OnOutputChunk != nil {
-				info.OnOutputChunk()
-			}
-			return true
-		case <-stopChan:
-			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
-			return false
-		case <-relayCtx.Done():
+		}
+
+		if result.Err != nil {
+			_ = writeXunfeiStreamError(c, result.Err.Error())
+			helper.Done(c)
 			return false
 		}
+		xunfeiResponse := result.Response
+		usage.PromptTokens += xunfeiResponse.Payload.Usage.Text.PromptTokens
+		usage.CompletionTokens += xunfeiResponse.Payload.Usage.Text.CompletionTokens
+		usage.TotalTokens += xunfeiResponse.Payload.Usage.Text.TotalTokens
+		response := streamResponseXunfei2OpenAI(&xunfeiResponse)
+		jsonResponse, err := common.Marshal(response)
+		if err != nil {
+			_ = writeXunfeiStreamError(c, "failed to encode Xunfei response")
+			helper.Done(c)
+			return false
+		}
+		if err := helper.StringData(c, string(jsonResponse)); err != nil {
+			return false
+		}
+		if info.OnOutputChunk != nil {
+			info.OnOutputChunk()
+		}
+		return true
 	})
 	return &usage, nil
 }
@@ -175,22 +213,28 @@ func xunfeiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, textReques
 func xunfeiHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
 	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
 	relayCtx := info.GetRelayContext(c.Request.Context())
-	dataChan, stopChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
+	resultChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
 	}
 	var usage dto.Usage
 	var content string
 	var xunfeiResponse XunfeiChatResponse
-	stop := false
-	for !stop {
+	receivedResponse := false
+	for {
 		select {
-		case response, ok := <-dataChan:
+		case result, ok := <-resultChan:
 			if !ok {
-				stop = true
-				continue
+				if !receivedResponse {
+					return nil, types.NewOpenAIError(errors.New("xunfei upstream closed without a response"), types.ErrorCodeBadResponse, http.StatusBadGateway)
+				}
+				goto complete
 			}
-			xunfeiResponse = response
+			if result.Err != nil {
+				return nil, types.NewOpenAIError(result.Err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+			}
+			receivedResponse = true
+			xunfeiResponse = result.Response
 			if len(xunfeiResponse.Payload.Choices.Text) == 0 {
 				continue
 			}
@@ -198,12 +242,12 @@ func xunfeiHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.
 			usage.PromptTokens += xunfeiResponse.Payload.Usage.Text.PromptTokens
 			usage.CompletionTokens += xunfeiResponse.Payload.Usage.Text.CompletionTokens
 			usage.TotalTokens += xunfeiResponse.Payload.Usage.Text.TotalTokens
-		case <-stopChan:
-			stop = true
 		case <-relayCtx.Done():
 			return nil, types.NewError(relayCtx.Err(), types.ErrorCodeDoRequestFailed)
 		}
 	}
+
+complete:
 	if len(xunfeiResponse.Payload.Choices.Text) == 0 {
 		xunfeiResponse.Payload.Choices.Text = []XunfeiChatResponseTextItem{
 			{
@@ -214,7 +258,7 @@ func xunfeiHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.
 	xunfeiResponse.Payload.Choices.Text[0].Content = content
 
 	response := responseXunfei2OpenAI(&xunfeiResponse)
-	jsonResponse, err := json.Marshal(response)
+	jsonResponse, err := common.Marshal(response)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
@@ -223,60 +267,74 @@ func xunfeiHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.
 	return &usage, nil
 }
 
-func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest, domain, authUrl, appId string) (<-chan XunfeiChatResponse, <-chan struct{}, error) {
+type xunfeiResult struct {
+	Response XunfeiChatResponse
+	Err      error
+}
+
+func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest, domain, authUrl, appId string) (<-chan xunfeiResult, error) {
 	d := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
 	conn, resp, err := d.DialContext(ctx, authUrl, nil)
 	if err != nil {
-		return nil, nil, err
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, err
 	}
 	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		if conn != nil {
 			_ = conn.Close()
 		}
 		if resp == nil {
-			return nil, nil, errors.New("xunfei websocket handshake returned no response")
+			return nil, errors.New("xunfei websocket handshake returned no response")
 		}
-		return nil, nil, fmt.Errorf("xunfei websocket handshake returned status %d", resp.StatusCode)
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, fmt.Errorf("xunfei websocket handshake returned status %d", resp.StatusCode)
 	}
 
 	data := requestOpenAI2Xunfei(textRequest, appId, domain)
-	err = conn.WriteJSON(data)
+	requestBody, err := common.Marshal(data)
 	if err != nil {
-		return nil, nil, err
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, requestBody); err != nil {
+		_ = conn.Close()
+		return nil, err
 	}
 
-	dataChan := make(chan XunfeiChatResponse)
-	stopChan := make(chan struct{})
+	resultChan := make(chan xunfeiResult)
 	connectionDone := make(chan struct{})
 	go func() {
 		defer conn.Close()
-		defer close(dataChan)
-		defer close(stopChan)
+		defer close(resultChan)
 		defer close(connectionDone)
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				common.SysLog("error reading stream response: " + err.Error())
-				break
+				if ctx.Err() == nil {
+					sendXunfeiResult(ctx, resultChan, xunfeiResult{Err: fmt.Errorf("xunfei websocket read failed: %w", err)})
+				}
+				return
 			}
 			var response XunfeiChatResponse
-			err = json.Unmarshal(msg, &response)
-			if err != nil {
-				common.SysLog("error unmarshalling stream response: " + err.Error())
-				break
+			if err := common.Unmarshal(msg, &response); err != nil {
+				sendXunfeiResult(ctx, resultChan, xunfeiResult{Err: fmt.Errorf("xunfei response decode failed: %w", err)})
+				return
 			}
-			select {
-			case dataChan <- response:
-			case <-ctx.Done():
+			if err := xunfeiResponseError(&response); err != nil {
+				sendXunfeiResult(ctx, resultChan, xunfeiResult{Err: err})
+				return
+			}
+			if !sendXunfeiResult(ctx, resultChan, xunfeiResult{Response: response}) {
 				return
 			}
 			if response.Payload.Choices.Status == 2 {
-				if err != nil {
-					common.SysLog("error closing websocket connection: " + err.Error())
-				}
-				break
+				return
 			}
 		}
 	}()
@@ -288,7 +346,48 @@ func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest
 		}
 	}()
 
-	return dataChan, stopChan, nil
+	return resultChan, nil
+}
+
+func sendXunfeiResult(ctx context.Context, resultChan chan<- xunfeiResult, result xunfeiResult) bool {
+	select {
+	case resultChan <- result:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func xunfeiResponseError(response *XunfeiChatResponse) error {
+	if response == nil || response.Header.Code == 0 {
+		return nil
+	}
+	message := strings.TrimSpace(response.Header.Message)
+	if message == "" {
+		message = "unknown upstream error"
+	}
+	if response.Header.Sid != "" {
+		return fmt.Errorf("xunfei upstream error %d: %s (sid: %s)", response.Header.Code, message, response.Header.Sid)
+	}
+	return fmt.Errorf("xunfei upstream error %d: %s", response.Header.Code, message)
+}
+
+func writeXunfeiStreamError(c *gin.Context, message string) error {
+	payload := struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}{}
+	payload.Error.Message = message
+	payload.Error.Type = "upstream_error"
+	payload.Error.Code = "xunfei_error"
+	data, err := common.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return helper.StringData(c, string(data))
 }
 
 func apiVersion2domain(apiVersion string) string {
