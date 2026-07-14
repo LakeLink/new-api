@@ -1,10 +1,12 @@
 package service
 
 import (
+	"math"
 	"net/http"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 
@@ -110,4 +112,34 @@ func TestPreConsumeBillingRejectsNegativeQuotaBeforeDeduction(t *testing.T) {
 	require.Equal(t, types.ErrorCodeModelPriceError, apiErr.GetErrorCode())
 	require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	require.Nil(t, info.Billing)
+}
+
+func TestViolationFeeQuotaRejectsSaturation(t *testing.T) {
+	original := common.QuotaPerUnit
+	t.Cleanup(func() { common.QuotaPerUnit = original })
+	common.QuotaPerUnit = 500000
+
+	quota, clamp := calcViolationFeeQuota(1.25, 2)
+	require.Equal(t, 1250000, quota)
+	require.Nil(t, clamp)
+
+	quota, clamp = calcViolationFeeQuota(math.Inf(1), 1)
+	require.Zero(t, quota)
+	require.NotNil(t, clamp)
+	require.Equal(t, common.QuotaClampOverflow, clamp.Kind)
+}
+
+func TestOpenRouterCacheCreationInferenceRejectsInvalidArithmetic(t *testing.T) {
+	original := common.QuotaPerUnit
+	t.Cleanup(func() { common.QuotaPerUnit = original })
+	common.QuotaPerUnit = 1
+
+	usage := dto.Usage{PromptTokens: 10, Cost: 15.0}
+	priceData := types.PriceData{ModelRatio: 1, CompletionRatio: 1, CacheRatio: 0.1, CacheCreationRatio: 2}
+	require.Equal(t, 5, CalcOpenRouterCacheCreateTokens(usage, priceData))
+
+	usage.Cost = math.Inf(1)
+	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
+	priceData.ModelRatio = 0
+	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
 }

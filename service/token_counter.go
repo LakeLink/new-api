@@ -115,13 +115,12 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 
 	if isPatchBased {
 		// 32x32 patch-based calculation with 1536 cap and model multiplier
-		ceilDiv := func(a, b int) int { return (a + b - 1) / b }
-		rawPatchesW := ceilDiv(width, 32)
-		rawPatchesH := ceilDiv(height, 32)
-		rawPatches := rawPatchesW * rawPatchesH
-		if rawPatches > 1536 {
+		rawPatchesW := (int64(width) + 31) / 32
+		rawPatchesH := (int64(height) + 31) / 32
+		patchCountExceedsCap := rawPatchesH > 0 && rawPatchesW > 1536/rawPatchesH
+		if patchCountExceedsCap {
 			// scale down
-			area := float64(width * height)
+			area := float64(width) * float64(height)
 			r := math.Sqrt(float64(32*32*1536) / area)
 			wScaled := float64(width) * r
 			hScaled := float64(height) * r
@@ -136,15 +135,15 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 			hScaled = float64(height) * r
 			patchesW := math.Ceil(wScaled / 32.0)
 			patchesH := math.Ceil(hScaled / 32.0)
-			imageTokens := int(patchesW * patchesH)
+			imageTokens := common.QuotaRound(patchesW * patchesH)
 			if imageTokens > 1536 {
 				imageTokens = 1536
 			}
-			return int(math.Round(float64(imageTokens) * multiplier)), nil
+			return common.QuotaRound(float64(imageTokens) * multiplier), nil
 		}
 		// below cap
-		imageTokens := rawPatches
-		return int(math.Round(float64(imageTokens) * multiplier)), nil
+		imageTokens := int(rawPatchesW * rawPatchesH)
+		return common.QuotaRound(float64(imageTokens) * multiplier), nil
 	}
 
 	// Tile-based calculation for 4o/4.1/4.5/o1/o3/etc.

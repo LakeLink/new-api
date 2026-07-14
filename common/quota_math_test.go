@@ -124,3 +124,14 @@ func TestQuotaFromDecimalChecked(t *testing.T) {
 		assert.Equal(t, QuotaClampOverflow, clamp.Kind)
 	}
 }
+
+func TestGetTrustQuotaSaturatesConfiguredMultiplier(t *testing.T) {
+	original := QuotaPerUnit
+	t.Cleanup(func() { QuotaPerUnit = original })
+
+	QuotaPerUnit = 500000
+	assert.Equal(t, 5000000, GetTrustQuota())
+
+	QuotaPerUnit = float64(MaxQuota)
+	assert.Equal(t, MaxQuota, GetTrustQuota())
+}

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -497,6 +496,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	milliseconds := tok.Sub(tik).Milliseconds()
 	consumedTime := float64(milliseconds) / 1000.0
 	other := buildTestLogOther(c, info, priceData, usage, tieredResult)
+	service.AttachQuotaSaturation(c, info, other)
 	model.RecordConsumeLog(c, testUserID, model.RecordConsumeLogParams{
 		ChannelId:        channel.Id,
 		PromptTokens:     usage.PromptTokens,
@@ -542,15 +542,31 @@ func settleTestQuota(info *relaycommon.RelayInfo, priceData types.PriceData, usa
 
 	quota := 0
 	if !priceData.UsePrice {
-		quota = usage.PromptTokens + int(math.Round(float64(usage.CompletionTokens)*priceData.CompletionRatio))
-		quota = int(math.Round(float64(quota) * priceData.ModelRatio))
+		completionQuota, completionClamp := common.QuotaRoundChecked(float64(usage.CompletionTokens) * priceData.CompletionRatio)
+		if info != nil && completionClamp != nil {
+			info.QuotaClamp = completionClamp
+		}
+		quota, clamp := common.QuotaRoundChecked((float64(usage.PromptTokens) + float64(completionQuota)) * priceData.ModelRatio)
+		if info != nil && clamp != nil {
+			info.QuotaClamp = clamp
+		}
+		if quota < 0 {
+			quota = 0
+		}
 		if priceData.ModelRatio != 0 && quota <= 0 {
 			quota = 1
 		}
 		return quota, nil
 	}
 
-	return int(priceData.ModelPrice * common.QuotaPerUnit), nil
+	quota, clamp := common.QuotaFromFloatChecked(priceData.ModelPrice * common.QuotaPerUnit)
+	if info != nil && clamp != nil {
+		info.QuotaClamp = clamp
+	}
+	if quota < 0 {
+		quota = 0
+	}
+	return quota, nil
 }
 
 func buildTestLogOther(c *gin.Context, info *relaycommon.RelayInfo, priceData types.PriceData, usage *dto.Usage, tieredResult *billingexpr.TieredResult) map[string]interface{} {

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,6 +43,19 @@ func TestSettleTestQuotaUsesTieredBilling(t *testing.T) {
 	require.Equal(t, 1500, quota)
 	require.NotNil(t, result)
 	require.Equal(t, "stream", result.MatchedTier)
+}
+
+func TestSettleTestQuotaAuditsSaturatedProviderPrice(t *testing.T) {
+	info := &relaycommon.RelayInfo{}
+	quota, result := settleTestQuota(info, types.PriceData{
+		UsePrice:   true,
+		ModelPrice: math.Inf(1),
+	}, &dto.Usage{})
+
+	require.Equal(t, common.MaxQuota, quota)
+	require.Nil(t, result)
+	require.NotNil(t, info.QuotaClamp)
+	require.Equal(t, common.QuotaClampOverflow, info.QuotaClamp.Kind)
 }
 
 func TestBuildTestLogOtherInjectsTieredInfo(t *testing.T) {
