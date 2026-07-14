@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
@@ -21,6 +22,7 @@ import (
 )
 
 type ollamaChatStreamChunk struct {
+	Error     string `json:"error,omitempty"`
 	Model     string `json:"model"`
 	CreatedAt string `json:"created_at"`
 	// chat
@@ -40,6 +42,30 @@ type ollamaChatStreamChunk struct {
 	EvalCount          int    `json:"eval_count"`
 	PromptEvalDuration int64  `json:"prompt_eval_duration"`
 	EvalDuration       int64  `json:"eval_duration"`
+}
+
+type openAICompletionChoice struct {
+	Text         string  `json:"text"`
+	Index        int     `json:"index"`
+	Logprobs     any     `json:"logprobs"`
+	FinishReason *string `json:"finish_reason"`
+}
+
+type openAICompletionResponse struct {
+	ID      string                   `json:"id"`
+	Object  string                   `json:"object"`
+	Created int64                    `json:"created"`
+	Model   string                   `json:"model"`
+	Choices []openAICompletionChoice `json:"choices"`
+	Usage   *dto.Usage               `json:"usage,omitempty"`
+}
+
+type openAIStreamError struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error"`
 }
 
 func ollamaToolCallsToOpenAI(toolCalls []OllamaToolCall, startIndex int, includeIndex bool) ([]dto.ToolCallResponse, int) {
@@ -97,17 +123,15 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 
-	helper.SetEventStreamHeaders(c)
 	scanner := helper.NewStreamScanner(resp.Body)
 	usage := &dto.Usage{}
 	var model = info.UpstreamModelName
 	var responseId = common.GetUUID()
 	var created = time.Now().Unix()
 	var toolCallIndex int
-	start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
-	if data, err := common.Marshal(start); err == nil {
-		_ = helper.StringData(c, string(data))
-	}
+	isCompletion := info.RelayMode == relayconstant.RelayModeCompletions
+	streamStarted := false
+	sawDone := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -118,7 +142,22 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		var chunk ollamaChatStreamChunk
 		if err := common.Unmarshal([]byte(line), &chunk); err != nil {
 			logger.LogError(c, "ollama stream json decode error: "+err.Error()+" line="+line)
-			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+			if !streamStarted {
+				return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+			}
+			_ = writeOllamaStreamError(c, err.Error())
+			helper.Done(c)
+			return usage, nil
+		}
+		if chunk.Error != "" {
+			upstreamErr := fmt.Errorf("ollama error: %s", chunk.Error)
+			logger.LogError(c, upstreamErr.Error())
+			if !streamStarted {
+				return usage, types.NewOpenAIError(upstreamErr, types.ErrorCodeBadResponse, http.StatusBadGateway)
+			}
+			_ = writeOllamaStreamError(c, chunk.Error)
+			helper.Done(c)
+			return usage, nil
 		}
 		if chunk.Model != "" {
 			model = chunk.Model
@@ -126,12 +165,34 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		created = toUnix(chunk.CreatedAt)
 
 		if !chunk.Done {
-			// delta content
 			var content string
 			if chunk.Message != nil {
 				content = chunk.Message.Content
 			} else {
 				content = chunk.Response
+			}
+			if isCompletion {
+				helper.SetEventStreamHeaders(c)
+				completion := openAICompletionResponse{
+					ID:      responseId,
+					Object:  "text_completion",
+					Created: created,
+					Model:   model,
+					Choices: []openAICompletionChoice{{Text: content, Index: 0}},
+				}
+				if data, err := common.Marshal(completion); err == nil {
+					_ = helper.StringData(c, string(data))
+					streamStarted = true
+				}
+				continue
+			}
+			if !streamStarted {
+				helper.SetEventStreamHeaders(c)
+				start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
+				if data, err := common.Marshal(start); err == nil {
+					_ = helper.StringData(c, string(data))
+					streamStarted = true
+				}
 			}
 			delta := dto.ChatCompletionsStreamResponse{
 				Id:      responseId,
@@ -169,7 +230,7 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			continue
 		}
 		// done frame
-		// finalize once and break loop
+		sawDone = true
 		usage.PromptTokens = chunk.PromptEvalCount
 		usage.CompletionTokens = chunk.EvalCount
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -179,6 +240,41 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		if toolCallIndex > 0 {
 			finishReason = constant.FinishReasonToolCalls
+		}
+		if isCompletion {
+			helper.SetEventStreamHeaders(c)
+			stop := openAICompletionResponse{
+				ID:      responseId,
+				Object:  "text_completion",
+				Created: created,
+				Model:   model,
+				Choices: []openAICompletionChoice{{Text: "", Index: 0, FinishReason: &finishReason}},
+			}
+			if data, err := common.Marshal(stop); err == nil {
+				_ = helper.StringData(c, string(data))
+				streamStarted = true
+			}
+			final := openAICompletionResponse{
+				ID:      responseId,
+				Object:  "text_completion",
+				Created: created,
+				Model:   model,
+				Choices: make([]openAICompletionChoice, 0),
+				Usage:   usage,
+			}
+			if data, err := common.Marshal(final); err == nil {
+				_ = helper.StringData(c, string(data))
+			}
+			helper.Done(c)
+			break
+		}
+		if !streamStarted {
+			helper.SetEventStreamHeaders(c)
+			start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
+			if data, err := common.Marshal(start); err == nil {
+				_ = helper.StringData(c, string(data))
+				streamStarted = true
+			}
 		}
 		// emit stop delta
 		if stop := helper.GenerateStopResponse(responseId, created, model, finishReason); stop != nil {
@@ -198,8 +294,35 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		logger.LogError(c, "ollama stream scan error: "+err.Error())
+		if !streamStarted {
+			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+		_ = writeOllamaStreamError(c, err.Error())
+		helper.Done(c)
+		return usage, nil
+	}
+	if !sawDone {
+		err := fmt.Errorf("ollama stream ended before a terminal frame")
+		logger.LogError(c, err.Error())
+		if !streamStarted {
+			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+		_ = writeOllamaStreamError(c, err.Error())
+		helper.Done(c)
 	}
 	return usage, nil
+}
+
+func writeOllamaStreamError(c *gin.Context, message string) error {
+	payload := openAIStreamError{}
+	payload.Error.Message = message
+	payload.Error.Type = "upstream_error"
+	payload.Error.Code = "ollama_error"
+	data, err := common.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return helper.StringData(c, string(data))
 }
 
 // non-stream handler for chat/generate
@@ -235,6 +358,9 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			}
 			continue
 		}
+		if ck.Error != "" {
+			return nil, types.NewOpenAIError(fmt.Errorf("ollama error: %s", ck.Error), types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
 		parsedAny = true
 		lastChunk = ck
 		if ck.Message != nil && len(ck.Message.Thinking) > 0 {
@@ -266,6 +392,9 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		var single ollamaChatStreamChunk
 		if err := common.Unmarshal(body, &single); err != nil {
 			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		}
+		if single.Error != "" {
+			return nil, types.NewOpenAIError(fmt.Errorf("ollama error: %s", single.Error), types.ErrorCodeBadResponse, http.StatusBadGateway)
 		}
 		lastChunk = single
 		if single.Message != nil {
@@ -308,6 +437,27 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		finishReason = constant.FinishReasonToolCalls
 	}
 
+	if info.RelayMode == relayconstant.RelayModeCompletions {
+		full := openAICompletionResponse{
+			ID:      common.GetUUID(),
+			Model:   model,
+			Object:  "text_completion",
+			Created: created,
+			Choices: []openAICompletionChoice{{
+				Text:         content,
+				Index:        0,
+				FinishReason: &finishReason,
+			}},
+			Usage: usage,
+		}
+		out, marshalErr := common.Marshal(full)
+		if marshalErr != nil {
+			return nil, types.NewOpenAIError(marshalErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		}
+		service.IOCopyBytesGracefully(c, resp, out)
+		return usage, nil
+	}
+
 	msg := dto.Message{Role: "assistant", Content: contentPtr(content)}
 	if len(toolCalls) > 0 {
 		if rawToolCalls, err := common.Marshal(toolCalls); err == nil {
@@ -329,7 +479,10 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		}},
 		Usage: *usage,
 	}
-	out, _ := common.Marshal(full)
+	out, marshalErr := common.Marshal(full)
+	if marshalErr != nil {
+		return nil, types.NewOpenAIError(marshalErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
 	service.IOCopyBytesGracefully(c, resp, out)
 	return usage, nil
 }

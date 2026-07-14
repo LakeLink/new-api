@@ -1,7 +1,6 @@
 package ollama
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,15 +26,11 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 		Think:   r.Think,
 	}
 	if r.ResponseFormat != nil {
-		if r.ResponseFormat.Type == "json" {
-			chatReq.Format = "json"
-		} else if r.ResponseFormat.Type == "json_schema" {
-			if len(r.ResponseFormat.JsonSchema) > 0 {
-				var schema any
-				_ = json.Unmarshal(r.ResponseFormat.JsonSchema, &schema)
-				chatReq.Format = schema
-			}
+		format, err := openAIResponseFormatToOllama(r.ResponseFormat)
+		if err != nil {
+			return nil, err
 		}
+		chatReq.Format = format
 	}
 
 	// options mapping
@@ -127,7 +122,7 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 				for _, tc := range parsed {
 					var args interface{}
 					if tc.Function.Arguments != "" {
-						_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+						_ = common.Unmarshal([]byte(tc.Function.Arguments), &args)
 					}
 					if args == nil {
 						args = map[string]any{}
@@ -176,13 +171,11 @@ func openAIToGenerate(c *gin.Context, r *dto.GeneralOpenAIRequest) (*OllamaGener
 		}
 	}
 	if r.ResponseFormat != nil {
-		if r.ResponseFormat.Type == "json" {
-			gen.Format = "json"
-		} else if r.ResponseFormat.Type == "json_schema" {
-			var schema any
-			_ = json.Unmarshal(r.ResponseFormat.JsonSchema, &schema)
-			gen.Format = schema
+		format, err := openAIResponseFormatToOllama(r.ResponseFormat)
+		if err != nil {
+			return nil, err
 		}
+		gen.Format = format
 	}
 	if r.Temperature != nil {
 		gen.Options["temperature"] = r.Temperature
@@ -510,7 +503,7 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 		Version string `json:"version"`
 	}
 
-	if err := json.Unmarshal(body, &versionResp); err != nil {
+	if err := common.Unmarshal(body, &versionResp); err != nil {
 		return "", fmt.Errorf("解析响应失败: %v", err)
 	}
 
@@ -519,4 +512,32 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 	}
 
 	return versionResp.Version, nil
+}
+
+func openAIResponseFormatToOllama(responseFormat *dto.ResponseFormat) (any, error) {
+	if responseFormat == nil {
+		return nil, nil
+	}
+	switch responseFormat.Type {
+	case "", "text":
+		return nil, nil
+	case "json", "json_object":
+		return "json", nil
+	case "json_schema":
+		if len(responseFormat.JsonSchema) == 0 {
+			return nil, fmt.Errorf("response_format.json_schema is required")
+		}
+		var config dto.FormatJsonSchema
+		if err := common.Unmarshal(responseFormat.JsonSchema, &config); err != nil {
+			return nil, fmt.Errorf("invalid response_format.json_schema: %w", err)
+		}
+		if config.Schema == nil {
+			return nil, fmt.Errorf("response_format.json_schema.schema is required")
+		}
+		// Ollama's native API expects the JSON Schema itself in format, while
+		// OpenAI wraps it with name/description/strict metadata.
+		return config.Schema, nil
+	default:
+		return nil, fmt.Errorf("unsupported response_format type %q", responseFormat.Type)
+	}
 }
