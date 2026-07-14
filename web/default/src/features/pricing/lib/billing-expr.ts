@@ -205,6 +205,7 @@ export const COMMON_TIMEZONES: { value: string; label: string }[] = [
 const NUMERIC_LITERAL_REGEX = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
 
 export type ParamHeaderCondition = {
+  editorId?: string
   source: 'param' | 'header'
   path: string
   mode: string
@@ -212,6 +213,7 @@ export type ParamHeaderCondition = {
 }
 
 export type TimeCondition = {
+  editorId?: string
   source: 'time'
   timeFunc: TimeFunc
   timezone: string
@@ -224,6 +226,7 @@ export type TimeCondition = {
 export type RequestCondition = TimeCondition | ParamHeaderCondition
 
 export type RequestRuleGroup = {
+  editorId?: string
   conditions: RequestCondition[]
   multiplier: string
 }
@@ -232,6 +235,13 @@ export type TierCondition = {
   var: 'p' | 'c' | 'len'
   op: '<' | '<=' | '>' | '>='
   value: number
+}
+
+let requestRuleEditorIdSequence = 0
+
+function nextRequestRuleEditorId(prefix: 'condition' | 'group'): string {
+  requestRuleEditorIdSequence += 1
+  return `${prefix}-${requestRuleEditorIdSequence}`
 }
 
 export type ParsedTier = {
@@ -307,9 +317,9 @@ export function parseTiersFromExpr(exprStr: string): ParsedTier[] {
 export function normalizeTierLabel(label: string | undefined): string {
   if (!label) return ''
   return label
-    .replace(/<[=＝]?|≤|＜[=＝]?/g, '<')
-    .replace(/>[=＝]?|≥|＞[=＝]?/g, '>')
-    .replace(/\s+/g, '')
+    .replaceAll(/<[=＝]?|≤|＜[=＝]?/g, '<')
+    .replaceAll(/>[=＝]?|≥|＞[=＝]?/g, '>')
+    .replaceAll(/\s+/g, '')
     .toLowerCase()
 }
 
@@ -426,24 +436,26 @@ function tryParseRequestCondition(expr: string): RequestCondition | null {
   if (m) return { source: 'param', path: m[1], mode: MATCH_EXISTS, value: '' }
 
   m = expr.match(/^has\(header\("([^"]+)"\), ((?:"(?:[^"\\]|\\.)*"))\)$/)
-  if (m)
+  if (m) {
     return {
       source: 'header',
       path: m[1],
       mode: MATCH_CONTAINS,
       value: JSON.parse(m[2]) as string,
     }
+  }
 
   m = expr.match(
     /^param\("([^"]+)"\) != nil && has\(param\("([^"]+)"\), ((?:"(?:[^"\\]|\\.)*"))\)$/
   )
-  if (m && m[1] === m[2])
+  if (m && m[1] === m[2]) {
     return {
       source: 'param',
       path: m[1],
       mode: MATCH_CONTAINS,
       value: JSON.parse(m[3]) as string,
     }
+  }
 
   m = expr.match(
     /^param\("([^"]+)"\) != nil && param\("([^"]+)"\) (>|>=|<|<=) ([\d.eE+-]+)$/
@@ -504,7 +516,7 @@ export function tryParseRequestRuleExpr(
     if (!group) return null
     groups.push(group)
   }
-  return groups
+  return normalizeRequestRuleGroupsForEditor(groups)
 }
 
 // ---------------------------------------------------------------------------
@@ -578,11 +590,18 @@ export function combineBillingExpr(
 // ---------------------------------------------------------------------------
 
 export function createEmptyCondition(): ParamHeaderCondition {
-  return { source: 'param', path: '', mode: MATCH_EQ, value: '' }
+  return {
+    editorId: nextRequestRuleEditorId('condition'),
+    source: 'param',
+    path: '',
+    mode: MATCH_EQ,
+    value: '',
+  }
 }
 
 export function createEmptyTimeCondition(): TimeCondition {
   return {
+    editorId: nextRequestRuleEditorId('condition'),
     source: 'time',
     timeFunc: 'hour',
     timezone: 'Asia/Shanghai',
@@ -594,11 +613,19 @@ export function createEmptyTimeCondition(): TimeCondition {
 }
 
 export function createEmptyRuleGroup(): RequestRuleGroup {
-  return { conditions: [createEmptyCondition()], multiplier: '' }
+  return {
+    editorId: nextRequestRuleEditorId('group'),
+    conditions: [createEmptyCondition()],
+    multiplier: '',
+  }
 }
 
 export function createEmptyTimeRuleGroup(): RequestRuleGroup {
-  return { conditions: [createEmptyTimeCondition()], multiplier: '' }
+  return {
+    editorId: nextRequestRuleEditorId('group'),
+    conditions: [createEmptyTimeCondition()],
+    multiplier: '',
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -642,12 +669,12 @@ function isTimeFunc(value: unknown): value is TimeFunc {
 export function normalizeCondition(
   cond: Partial<RequestCondition> | null | undefined
 ): RequestCondition {
-  const source =
-    cond?.source === 'time'
-      ? 'time'
-      : cond?.source === 'header'
-        ? 'header'
-        : 'param'
+  let source: RequestCondition['source'] = 'param'
+  if (cond?.source === 'time') {
+    source = 'time'
+  } else if (cond?.source === 'header') {
+    source = 'header'
+  }
 
   if (source === 'time') {
     const timeCond = cond as Partial<TimeCondition> | null | undefined
@@ -659,6 +686,7 @@ export function normalizeCondition(
       ? (timeCond?.mode as string)
       : MATCH_GTE
     return {
+      editorId: timeCond?.editorId ?? nextRequestRuleEditorId('condition'),
       source: 'time',
       timeFunc,
       timezone: timeCond?.timezone || 'Asia/Shanghai',
@@ -676,11 +704,24 @@ export function normalizeCondition(
     ? (phCond?.mode as string)
     : MATCH_EQ
   return {
+    editorId: phCond?.editorId ?? nextRequestRuleEditorId('condition'),
     source,
     path: phCond?.path || '',
     mode,
     value: phCond?.value == null ? '' : String(phCond.value),
   }
+}
+
+export function normalizeRequestRuleGroupsForEditor(
+  groups: RequestRuleGroup[]
+): RequestRuleGroup[] {
+  return groups.map((group) => ({
+    ...group,
+    editorId: group.editorId ?? nextRequestRuleEditorId('group'),
+    conditions: group.conditions.map((condition) =>
+      normalizeCondition(condition)
+    ),
+  }))
 }
 
 // ---------------------------------------------------------------------------

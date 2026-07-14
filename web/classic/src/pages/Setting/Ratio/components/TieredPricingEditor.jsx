@@ -789,11 +789,6 @@ const PRESET_GROUPS = [
     group: '请求条件',
     presets: [
       {
-        key: 'claude-opus-fast', label: 'Claude Opus 4.6 Fast',
-        expr: 'tier("base", p * 5 + c * 25 + cr * 0.5 + cc * 6.25 + cc1h * 10)',
-        requestRules: [{ conditions: [{ source: SOURCE_HEADER, path: 'anthropic-beta', mode: MATCH_CONTAINS, value: 'fast-mode-2026-02-01' }], multiplier: '6' }],
-      },
-      {
         key: 'gpt-5.4-tiers', label: 'GPT-5.4 Priority/Flex',
         expr: 'len <= 272000 ? tier("standard", p * 2.5 + c * 15 + cr * 0.25) : tier("long_context", p * 5 + c * 22.5 + cr * 0.5)',
         requestRules: [

@@ -23,12 +23,14 @@ export const CACHE_MODE_GENERIC = 'generic'
 export type CacheMode = typeof CACHE_MODE_TIMED | typeof CACHE_MODE_GENERIC
 
 export type TierConditionInput = {
+  editorId?: string
   var: 'p' | 'c' | 'len'
   op: '<' | '<=' | '>' | '>='
   value: number | string
 }
 
 export type VisualTier = {
+  editorId?: string
   label: string
   conditions: TierConditionInput[]
   input_unit_cost: number
@@ -45,7 +47,15 @@ export type VisualTier = {
 }
 
 export type VisualConfig = {
+  versionPrefix?: 'v1:'
   tiers: VisualTier[]
+}
+
+let visualEditorIdSequence = 0
+
+function nextVisualEditorId(prefix: 'condition' | 'tier'): string {
+  visualEditorIdSequence += 1
+  return `${prefix}-${visualEditorIdSequence}`
 }
 
 export function getTierCacheMode(
@@ -61,13 +71,21 @@ export function getTierCacheMode(
 export function normalizeVisualTier(
   tier: Partial<VisualTier> = {}
 ): VisualTier {
+  const conditions = Array.isArray(tier.conditions)
+    ? tier.conditions.map((condition) => ({
+        ...condition,
+        editorId: condition.editorId ?? nextVisualEditorId('condition'),
+      }))
+    : []
+
   return {
     label: tier.label ?? '',
     input_unit_cost: Number(tier.input_unit_cost) || 0,
     output_unit_cost: Number(tier.output_unit_cost) || 0,
     cache_mode: getTierCacheMode(tier),
-    conditions: Array.isArray(tier.conditions) ? tier.conditions : [],
     ...tier,
+    editorId: tier.editorId ?? nextVisualEditorId('tier'),
+    conditions,
     cache_read_unit_cost: Number(tier.cache_read_unit_cost) || 0,
     cache_create_unit_cost: Number(tier.cache_create_unit_cost) || 0,
     cache_create_1h_unit_cost: Number(tier.cache_create_1h_unit_cost) || 0,
@@ -131,6 +149,7 @@ export function generateExprFromVisualConfig(
   if (!config || !config.tiers || config.tiers.length === 0) {
     return 'p * 0 + c * 0'
   }
+  const versionPrefix = config.versionPrefix ?? ''
   const tiers = config.tiers
 
   if (tiers.length === 1) {
@@ -139,9 +158,9 @@ export function generateExprFromVisualConfig(
     const body = `tier("${label}", ${buildTierBodyExpr(tier)})`
     const cond = buildConditionStr(tier.conditions)
     if (cond) {
-      return `${cond} ? ${body} : p * 0 + c * 0`
+      return `${versionPrefix}${cond} ? ${body} : p * 0 + c * 0`
     }
-    return body
+    return `${versionPrefix}${body}`
   }
 
   const parts: string[] = []
@@ -157,7 +176,7 @@ export function generateExprFromVisualConfig(
       parts.push(body)
     }
   }
-  return parts.join(' : ')
+  return `${versionPrefix}${parts.join(' : ')}`
 }
 
 export function tryParseVisualConfig(
@@ -166,8 +185,13 @@ export function tryParseVisualConfig(
   if (!exprStr) return null
   try {
     let body = exprStr
-    const versionMatch = body.match(/^v\d+:([\s\S]*)$/)
-    if (versionMatch) body = versionMatch[1]
+    let versionPrefix: VisualConfig['versionPrefix']
+    const versionMatch = body.match(/^v(\d+):([\s\S]*)$/)
+    if (versionMatch) {
+      if (versionMatch[1] !== '1') return null
+      versionPrefix = 'v1:'
+      body = versionMatch[2]
+    }
     const cacheVarNames = BILLING_CACHE_VAR_MAP.map((cv) => cv.exprVar)
     const optCacheStr = cacheVarNames
       .map((v) => `(?:\\s*\\+\\s*${v}\\s*\\*\\s*([\\d.eE+-]+))?`)
@@ -188,9 +212,17 @@ export function tryParseVisualConfig(
         const val = simple[4 + i]
         if (val != null) tier[cv.field] = Number(val)
       })
-      return normalizeVisualConfig({
+      const config = normalizeVisualConfig({
+        versionPrefix,
         tiers: [normalizeVisualTier(tier as Partial<VisualTier>)],
       })
+      if (
+        generateExprFromVisualConfig(config).replaceAll(/\s+/g, '') !==
+        exprStr.replaceAll(/\s+/g, '')
+      ) {
+        return null
+      }
+      return config
     }
 
     const condGroup =
@@ -231,16 +263,28 @@ export function tryParseVisualConfig(
       tiers.push(normalizeVisualTier(tier as Partial<VisualTier>))
     }
     if (tiers.length === 0) return null
+    if (tiers.slice(0, -1).some((tier) => tier.conditions.length === 0)) {
+      return null
+    }
 
-    const cfg = normalizeVisualConfig({ tiers })
+    const cfg = normalizeVisualConfig({ versionPrefix, tiers })
     const regenerated = generateExprFromVisualConfig(cfg)
-    if (regenerated.replace(/\s+/g, '') !== body.replace(/\s+/g, '')) {
+    if (regenerated.replaceAll(/\s+/g, '') !== exprStr.replaceAll(/\s+/g, '')) {
       return null
     }
     return cfg
   } catch {
     return null
   }
+}
+
+export function getVisualConfigForModeSwitch(
+  exprStr: string | null | undefined
+): VisualConfig | null {
+  if (!exprStr?.trim()) {
+    return createDefaultVisualConfig()
+  }
+  return tryParseVisualConfig(exprStr)
 }
 
 // ---------------------------------------------------------------------------
@@ -263,54 +307,294 @@ export type ExtraTokenValues = Record<
 >
 
 export type EvalResult = {
-  cost: number
+  expressionOutput: number
+  quotaBeforeGroup: number
+  quotaAfterGroup: number
+  billablePromptTokens: number
+  billableCompletionTokens: number
+  inputLength: number
+  quotaClamped: boolean
   matchedTier: string
-  error: string | null
+  error: EvalErrorCode | null
+}
+
+export type EvalErrorCode =
+  | 'unsupported_expression'
+  | 'non_finite_result'
+  | 'negative_result'
+  | 'invalid_result'
+
+export type UsageSemantics = 'openai' | 'anthropic'
+
+export type EstimatorOptions = {
+  usageSemantics: UsageSemantics
+  quotaPerUnit: number
+  groupRatio: number
+}
+
+const MAX_QUOTA = 2_147_483_647
+const MIN_QUOTA = -2_147_483_648
+
+function expressionUsesVariable(exprStr: string, variable: string): boolean {
+  const withoutStrings = exprStr.replaceAll(/"(?:\\.|[^"\\])*"/g, '')
+  return new RegExp(`\\b${variable}\\b`).test(withoutStrings)
+}
+
+function quotaRound(value: number): { value: number; clamped: boolean } {
+  if (Number.isNaN(value)) {
+    return { value: 0, clamped: true }
+  }
+
+  const rounded = Math.sign(value) * Math.floor(Math.abs(value) + 0.5)
+  if (Object.is(rounded, -0)) {
+    return { value: 0, clamped: false }
+  }
+  if (rounded >= MAX_QUOTA) {
+    return { value: MAX_QUOTA, clamped: true }
+  }
+  if (rounded <= MIN_QUOTA) {
+    return { value: MIN_QUOTA, clamped: true }
+  }
+  return { value: rounded, clamped: false }
+}
+
+function visualTierMatches(
+  tier: VisualTier,
+  variables: Record<TierConditionInput['var'], number>
+): boolean {
+  return tier.conditions.every((condition) => {
+    const left = variables[condition.var]
+    const right = Number(condition.value)
+    if (!Number.isFinite(right)) return false
+    switch (condition.op) {
+      case '<':
+        return left < right
+      case '<=':
+        return left <= right
+      case '>':
+        return left > right
+      case '>=':
+        return left >= right
+    }
+  })
+}
+
+function evaluateVisualTier(
+  tier: VisualTier,
+  variables: Record<string, number>
+): number {
+  let value =
+    variables.p * Number(tier.input_unit_cost) +
+    variables.c * Number(tier.output_unit_cost)
+  for (const cacheVariable of BILLING_CACHE_VAR_MAP) {
+    value +=
+      variables[cacheVariable.exprVar] *
+      Number((tier as Record<string, unknown>)[cacheVariable.field] ?? 0)
+  }
+  return value
+}
+
+function evaluateVisualConfig(
+  config: VisualConfig,
+  variables: Record<string, number>
+): { expressionOutput: number; matchedTier: string } {
+  const tiers = config.tiers
+  if (tiers.length === 1) {
+    const tier = tiers[0]
+    if (
+      tier.conditions.length > 0 &&
+      !visualTierMatches(tier, {
+        p: variables.p,
+        c: variables.c,
+        len: variables.len,
+      })
+    ) {
+      return { expressionOutput: 0, matchedTier: '' }
+    }
+    return {
+      expressionOutput: evaluateVisualTier(tier, variables),
+      matchedTier: tier.label || 'default',
+    }
+  }
+
+  for (let index = 0; index < tiers.length; index += 1) {
+    const tier = tiers[index]
+    const isFallback =
+      index === tiers.length - 1 || tier.conditions.length === 0
+    if (
+      isFallback ||
+      visualTierMatches(tier, {
+        p: variables.p,
+        c: variables.c,
+        len: variables.len,
+      })
+    ) {
+      return {
+        expressionOutput: evaluateVisualTier(tier, variables),
+        matchedTier: tier.label || `tier_${index + 1}`,
+      }
+    }
+  }
+
+  return { expressionOutput: 0, matchedTier: '' }
 }
 
 export function evalExprLocally(
   exprStr: string,
   promptTokens: number,
   completionTokens: number,
-  extraTokenValues: ExtraTokenValues
+  extraTokenValues: ExtraTokenValues,
+  options: EstimatorOptions
 ): EvalResult {
+  let errorCode: EvalErrorCode = 'invalid_result'
   try {
     if (!exprStr || !exprStr.trim()) {
-      return { cost: 0, matchedTier: '', error: null }
+      return {
+        expressionOutput: 0,
+        quotaBeforeGroup: 0,
+        quotaAfterGroup: 0,
+        billablePromptTokens: 0,
+        billableCompletionTokens: 0,
+        inputLength: 0,
+        quotaClamped: false,
+        matchedTier: '',
+        error: null,
+      }
     }
-    let matchedTier = ''
-    const tierFn = (name: string, value: number) => {
-      matchedTier = name
-      return value
+    const visualConfig = tryParseVisualConfig(exprStr)
+    if (!visualConfig) {
+      errorCode = 'unsupported_expression'
+      throw new Error(errorCode)
     }
-    const cacheReadTokens = extraTokenValues.cacheReadTokens || 0
-    const cacheCreateTokens = extraTokenValues.cacheCreateTokens || 0
-    const cacheCreate1hTokens = extraTokenValues.cacheCreate1hTokens || 0
-    const len =
-      promptTokens + cacheReadTokens + cacheCreateTokens + cacheCreate1hTokens
-    const env: Record<string, unknown> = {
-      p: promptTokens,
-      c: completionTokens,
-      len,
-      tier: tierFn,
-      max: Math.max,
-      min: Math.min,
-      abs: Math.abs,
-      ceil: Math.ceil,
-      floor: Math.floor,
+    const expressionBody = exprStr.startsWith('v1:')
+      ? exprStr.slice(3)
+      : exprStr
+    const normalizedPromptTokens = Number.isFinite(promptTokens)
+      ? Math.max(0, promptTokens)
+      : 0
+    const normalizedCompletionTokens = Number.isFinite(completionTokens)
+      ? Math.max(0, completionTokens)
+      : 0
+    const normalizedExtraTokenValues: ExtraTokenValues = {
+      cacheReadTokens: Number.isFinite(extraTokenValues.cacheReadTokens)
+        ? Math.max(0, extraTokenValues.cacheReadTokens)
+        : 0,
+      cacheCreateTokens: Number.isFinite(extraTokenValues.cacheCreateTokens)
+        ? Math.max(0, extraTokenValues.cacheCreateTokens)
+        : 0,
+      cacheCreate1hTokens: Number.isFinite(extraTokenValues.cacheCreate1hTokens)
+        ? Math.max(0, extraTokenValues.cacheCreate1hTokens)
+        : 0,
+      imageTokens: Number.isFinite(extraTokenValues.imageTokens)
+        ? Math.max(0, extraTokenValues.imageTokens)
+        : 0,
+      imageOutputTokens: Number.isFinite(extraTokenValues.imageOutputTokens)
+        ? Math.max(0, extraTokenValues.imageOutputTokens)
+        : 0,
+      audioInputTokens: Number.isFinite(extraTokenValues.audioInputTokens)
+        ? Math.max(0, extraTokenValues.audioInputTokens)
+        : 0,
+      audioOutputTokens: Number.isFinite(extraTokenValues.audioOutputTokens)
+        ? Math.max(0, extraTokenValues.audioOutputTokens)
+        : 0,
+    }
+    const {
+      cacheReadTokens,
+      cacheCreateTokens,
+      cacheCreate1hTokens,
+      imageTokens,
+      imageOutputTokens,
+      audioInputTokens,
+      audioOutputTokens,
+    } = normalizedExtraTokenValues
+
+    let billablePromptTokens = normalizedPromptTokens
+    let billableCompletionTokens = normalizedCompletionTokens
+    if (options.usageSemantics === 'openai') {
+      if (expressionUsesVariable(expressionBody, 'cr')) {
+        billablePromptTokens -= cacheReadTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'cc')) {
+        billablePromptTokens -= cacheCreateTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'cc1h')) {
+        billablePromptTokens -= cacheCreate1hTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'img')) {
+        billablePromptTokens -= imageTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'ai')) {
+        billablePromptTokens -= audioInputTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'img_o')) {
+        billableCompletionTokens -= imageOutputTokens
+      }
+      if (expressionUsesVariable(expressionBody, 'ao')) {
+        billableCompletionTokens -= audioOutputTokens
+      }
+    }
+    billablePromptTokens = Math.max(0, billablePromptTokens)
+    billableCompletionTokens = Math.max(0, billableCompletionTokens)
+
+    const inputLength =
+      options.usageSemantics === 'anthropic'
+        ? normalizedPromptTokens +
+          cacheReadTokens +
+          cacheCreateTokens +
+          cacheCreate1hTokens
+        : normalizedPromptTokens
+    const variables: Record<string, number> = {
+      p: billablePromptTokens,
+      c: billableCompletionTokens,
+      len: inputLength,
     }
     for (const field of ESTIMATOR_VARS) {
-      env[field.var] = extraTokenValues[field.stateKey] || 0
+      variables[field.var] = normalizedExtraTokenValues[field.stateKey]
     }
-    const fn = new Function(
-      ...Object.keys(env),
-      `"use strict"; return (${exprStr});`
+    const { expressionOutput, matchedTier } = evaluateVisualConfig(
+      visualConfig,
+      variables
     )
-    const cost = Number(fn(...Object.values(env))) || 0
-    return { cost, matchedTier, error: null }
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e)
-    return { cost: 0, matchedTier: '', error: message }
+    if (!Number.isFinite(expressionOutput)) {
+      errorCode = 'non_finite_result'
+      throw new Error(errorCode)
+    }
+    if (expressionOutput < 0) {
+      errorCode = 'negative_result'
+      throw new Error(errorCode)
+    }
+    const quotaPerUnit = Number.isFinite(options.quotaPerUnit)
+      ? options.quotaPerUnit
+      : 0
+    const groupRatio = Number.isFinite(options.groupRatio)
+      ? options.groupRatio
+      : 0
+    const quotaBeforeGroup = (expressionOutput / 1_000_000) * quotaPerUnit
+    const roundedQuota = quotaRound(quotaBeforeGroup * groupRatio)
+
+    return {
+      expressionOutput,
+      quotaBeforeGroup,
+      quotaAfterGroup: roundedQuota.value,
+      billablePromptTokens,
+      billableCompletionTokens,
+      inputLength,
+      quotaClamped: roundedQuota.clamped,
+      matchedTier,
+      error: null,
+    }
+  } catch {
+    return {
+      expressionOutput: 0,
+      quotaBeforeGroup: 0,
+      quotaAfterGroup: 0,
+      billablePromptTokens: 0,
+      billableCompletionTokens: 0,
+      inputLength: 0,
+      quotaClamped: false,
+      matchedTier: '',
+      error: errorCode,
+    }
   }
 }
 

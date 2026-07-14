@@ -33,7 +33,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { formatQuota } from '@/lib/format'
 import { DEFAULT_CURRENCY_CONFIG } from '@/stores/system-config-store'
@@ -46,6 +45,7 @@ import {
   paySubscriptionBalance,
 } from '../../api'
 import { formatDuration, formatResetPeriod } from '../../lib'
+import { calculateSubscriptionBalanceQuota } from '../../lib/balance-quota'
 import type { PlanRecord } from '../../types'
 
 interface PaymentMethod {
@@ -98,18 +98,17 @@ export function SubscriptionPurchaseDialog(props: Props) {
     selectedEpayMethod ||
     t('Select payment method')
   const totalAmount = Number(plan.total_amount || 0)
-  const price = Number(plan.price_amount || 0).toFixed(2)
   const quotaPerUnit =
     currency?.quotaPerUnit && currency.quotaPerUnit > 0
       ? currency.quotaPerUnit
       : DEFAULT_CURRENCY_CONFIG.quotaPerUnit
-  const balanceCost = Math.max(
-    0,
-    Math.ceil(Number(plan.price_amount || 0) * quotaPerUnit)
+  const balanceCost = calculateSubscriptionBalanceQuota(
+    Number(plan.price_amount || 0),
+    quotaPerUnit
   )
   const userQuota = Math.max(0, Number(props.userQuota || 0))
   const allowBalancePay = plan.allow_balance_pay !== false
-  const insufficientBalance = userQuota < balanceCost
+  const insufficientBalance = balanceCost !== null && userQuota < balanceCost
   const limitReached =
     (props.purchaseLimit || 0) > 0 &&
     (props.purchaseCount || 0) >= (props.purchaseLimit || 0)
@@ -314,11 +313,6 @@ export function SubscriptionPurchaseDialog(props: Props) {
               <GroupBadge group={plan.upgrade_group} />
             </div>
           )}
-          <Separator />
-          <div className='flex items-center justify-between'>
-            <span className='text-sm font-medium'>{t('Amount Due')}</span>
-            <span className='text-primary text-lg font-bold'>${price}</span>
-          </div>
         </div>
 
         {limitReached && (
@@ -331,15 +325,31 @@ export function SubscriptionPurchaseDialog(props: Props) {
         )}
 
         <div className='flex flex-col gap-2 rounded-md border p-3'>
+          <div className='space-y-1'>
+            <p className='text-sm font-medium'>{t('Balance redemption')}</p>
+            <p className='text-muted-foreground text-xs'>
+              {t('Redeem internal balance using the configured plan price.')}
+            </p>
+          </div>
           <div className='flex items-center justify-between gap-2 text-xs'>
-            <span className='text-muted-foreground'>{t('Required')}</span>
-            <span>{formatQuota(balanceCost)}</span>
+            <span className='text-muted-foreground'>{t('Balance cost')}</span>
+            <span>
+              {balanceCost === null
+                ? t('Not available')
+                : formatQuota(balanceCost)}
+            </span>
           </div>
           <div className='flex items-center justify-between gap-2 text-xs'>
             <span className='text-muted-foreground'>{t('Available')}</span>
             <span>{formatQuota(userQuota)}</span>
           </div>
-          {!allowBalancePay ? (
+          {balanceCost === null ? (
+            <Alert variant='destructive'>
+              <AlertDescription>
+                {t('Balance cost')}: {t('Not available')}
+              </AlertDescription>
+            </Alert>
+          ) : !allowBalancePay ? (
             <Alert variant='destructive'>
               <AlertDescription>
                 {t('This plan does not allow balance redemption')}
@@ -356,18 +366,27 @@ export function SubscriptionPurchaseDialog(props: Props) {
             variant='outline'
             onClick={handlePayBalance}
             disabled={
-              paying || limitReached || !allowBalancePay || insufficientBalance
+              paying ||
+              limitReached ||
+              !allowBalancePay ||
+              insufficientBalance ||
+              balanceCost === null
             }
           >
-            {t('Pay with Balance')}
+            {t('Redeem with Balance')}
           </Button>
         </div>
 
         {hasAnyPayment && (
           <div className='space-y-3'>
-            <p className='text-muted-foreground text-xs'>
-              {t('Select payment method')}
-            </p>
+            <div className='space-y-1'>
+              <p className='text-sm font-medium'>{t('External checkout')}</p>
+              <p className='text-muted-foreground text-xs'>
+                {t(
+                  'The payment provider shows the final amount and currency before confirmation.'
+                )}
+              </p>
+            </div>
             {(hasStripe || hasCreem || hasWaffoPancake) && (
               <div className='grid grid-cols-2 gap-2 sm:flex'>
                 {hasStripe && (
@@ -405,12 +424,10 @@ export function SubscriptionPurchaseDialog(props: Props) {
             {hasEpay && (
               <div className='grid grid-cols-[minmax(0,1fr)_auto] gap-2'>
                 <Select
-                  items={[
-                    ...(props.epayMethods || []).map((m) => ({
-                      value: m.type,
-                      label: m.name || m.type,
-                    })),
-                  ]}
+                  items={(props.epayMethods || []).map((m) => ({
+                    value: m.type,
+                    label: m.name || m.type,
+                  }))}
                   value={selectedEpayMethod}
                   onValueChange={(v) => v !== null && setSelectedEpayMethod(v)}
                   disabled={limitReached}

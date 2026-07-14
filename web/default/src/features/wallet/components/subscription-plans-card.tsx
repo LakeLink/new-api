@@ -52,12 +52,15 @@ import {
 } from '@/features/subscriptions/api'
 import { SubscriptionPurchaseDialog } from '@/features/subscriptions/components/dialogs/subscription-purchase-dialog'
 import { formatDuration, formatResetPeriod } from '@/features/subscriptions/lib'
+import { calculateSubscriptionBalanceQuota } from '@/features/subscriptions/lib/balance-quota'
 import type {
   PlanRecord,
   UserSubscriptionRecord,
 } from '@/features/subscriptions/types'
+import { useSystemConfig } from '@/hooks/use-system-config'
 import { formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { DEFAULT_CURRENCY_CONFIG } from '@/stores/system-config-store'
 
 import type { PaymentMethod, TopupInfo } from '../types'
 
@@ -99,6 +102,7 @@ export function SubscriptionPlansCard({
   onPurchaseSuccess,
 }: SubscriptionPlansCardProps) {
   const { t } = useTranslation()
+  const { currency } = useSystemConfig()
 
   const [plans, setPlans] = useState<PlanRecord[]>([])
   const [activeSubscriptions, setActiveSubscriptions] = useState<
@@ -528,7 +532,15 @@ export function SubscriptionPlansCard({
               const plan = p?.plan
               if (!plan) return null
               const totalAmount = Number(plan.total_amount || 0)
-              const price = Number(plan.price_amount || 0).toFixed(2)
+              const quotaPerUnit =
+                currency.quotaPerUnit > 0
+                  ? currency.quotaPerUnit
+                  : DEFAULT_CURRENCY_CONFIG.quotaPerUnit
+              const balanceCost = calculateSubscriptionBalanceQuota(
+                Number(plan.price_amount || 0),
+                quotaPerUnit
+              )
+              const allowsBalanceRedemption = plan.allow_balance_pay !== false
               const isPopular = index === 0 && plans.length > 1
               const limit = Number(plan.max_purchase_per_user || 0)
               const count = planPurchaseCountMap.get(plan.id) || 0
@@ -579,8 +591,17 @@ export function SubscriptionPlansCard({
                     </div>
 
                     <div className='py-2'>
+                      <p className='text-muted-foreground text-xs'>
+                        {allowsBalanceRedemption
+                          ? t('Balance redemption')
+                          : t('External checkout')}
+                      </p>
                       <span className='text-primary text-2xl font-bold'>
-                        ${price}
+                        {allowsBalanceRedemption
+                          ? balanceCost === null
+                            ? t('Not available')
+                            : formatQuota(balanceCost)
+                          : t('Provider price')}
                       </span>
                     </div>
 
