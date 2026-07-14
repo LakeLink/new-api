@@ -1,10 +1,10 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/Calcium-Ion/go-epay/epay"
@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
+	"github.com/shopspring/decimal"
 )
 
 type SubscriptionEpayPayRequest struct {
@@ -37,7 +38,12 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
-	if plan.PriceAmount < 0.01 {
+	if err := model.ValidateSubscriptionPlanForPurchase(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
+	}
+	payMoney := decimal.NewFromFloat(plan.PriceAmount).Round(2)
+	if payMoney.LessThan(decimal.NewFromFloat(0.01)) {
 		common.ApiErrorMsg(c, "套餐金额过低")
 		return
 	}
@@ -83,7 +89,7 @@ func SubscriptionRequestEpay(c *gin.Context) {
 	order := &model.SubscriptionOrder{
 		UserId:          userId,
 		PlanId:          plan.Id,
-		Money:           plan.PriceAmount,
+		Money:           payMoney.InexactFloat64(),
 		TradeNo:         tradeNo,
 		PaymentMethod:   req.PaymentMethod,
 		PaymentProvider: model.PaymentProviderEpay,
@@ -98,7 +104,7 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		Type:           req.PaymentMethod,
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("SUB:%s", plan.Title),
-		Money:          strconv.FormatFloat(plan.PriceAmount, 'f', 2, 64),
+		Money:          payMoney.StringFixed(2),
 		Device:         epay.PC,
 		NotifyUrl:      notifyUrl,
 		ReturnUrl:      returnUrl,
@@ -109,6 +115,39 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "success", "data": params, "url": uri})
+}
+
+func completeSubscriptionEpayCallback(verifyInfo *epay.VerifyRes) error {
+	if verifyInfo == nil || verifyInfo.ServiceTradeNo == "" || verifyInfo.TradeNo == "" {
+		return errors.New("易支付回调缺少订单标识")
+	}
+	order := model.GetSubscriptionOrderByTradeNo(verifyInfo.ServiceTradeNo)
+	if order == nil {
+		return model.ErrSubscriptionOrderNotFound
+	}
+	if order.PaymentProvider != model.PaymentProviderEpay || order.PaymentMethod != verifyInfo.Type {
+		return model.ErrPaymentMethodMismatch
+	}
+	if order.ProviderPaymentId != "" && order.ProviderPaymentId != verifyInfo.TradeNo {
+		return errors.New("易支付回调支付单号不匹配")
+	}
+	paidMoney, err := decimal.NewFromString(verifyInfo.Money)
+	if err != nil || !paidMoney.Equal(decimal.NewFromFloat(order.Money).Round(2)) {
+		return errors.New("易支付回调金额不匹配")
+	}
+	payload := common.GetJsonString(verifyInfo)
+	if err := model.SetSubscriptionOrderProviderIdentifiers(
+		verifyInfo.ServiceTradeNo,
+		model.PaymentProviderEpay,
+		"",
+		"",
+		verifyInfo.TradeNo,
+		"paid",
+		payload,
+	); err != nil {
+		return err
+	}
+	return model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, payload, model.PaymentProviderEpay, verifyInfo.Type)
 }
 
 func SubscriptionEpayNotify(c *gin.Context) {
@@ -153,10 +192,7 @@ func SubscriptionEpayNotify(c *gin.Context) {
 		return
 	}
 
-	LockOrder(verifyInfo.ServiceTradeNo)
-	defer UnlockOrder(verifyInfo.ServiceTradeNo)
-
-	if err := model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type); err != nil {
+	if err := completeSubscriptionEpayCallback(verifyInfo); err != nil {
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
@@ -203,9 +239,7 @@ func SubscriptionEpayReturn(c *gin.Context) {
 		return
 	}
 	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {
-		LockOrder(verifyInfo.ServiceTradeNo)
-		defer UnlockOrder(verifyInfo.ServiceTradeNo)
-		if err := model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type); err != nil {
+		if err := completeSubscriptionEpayCallback(verifyInfo); err != nil {
 			c.Redirect(http.StatusFound, paymentReturnPath("/console/topup?pay=fail"))
 			return
 		}

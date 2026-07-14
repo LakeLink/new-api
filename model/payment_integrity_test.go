@@ -46,6 +46,39 @@ func TestStripeRechargeUsesPersistedQuotaAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, "pi_1", topUp.ProviderPaymentId)
 }
 
+func TestEpayRechargeUsesPersistedQuotaAndProtectsBalanceRange(t *testing.T) {
+	truncateTables(t)
+	insertUserForPaymentGuardTest(t, 505, 10)
+	require.NoError(t, (&TopUp{
+		UserId: 505, Amount: 999999, Quota: 123, Money: 7.25,
+		TradeNo: "epay-exact-quota", PaymentMethod: "alipay",
+		PaymentProvider: PaymentProviderEpay, Status: common.TopUpStatusPending,
+	}).Insert())
+
+	require.NoError(t, RechargeEpay("epay-exact-quota", "alipay", "epay-payment-1", "127.0.0.1"))
+	require.NoError(t, RechargeEpay("epay-exact-quota", "alipay", "epay-payment-1", "127.0.0.1"))
+	require.Error(t, RechargeEpay("epay-exact-quota", "alipay", "epay-payment-other", "127.0.0.1"))
+	assert.Equal(t, 133, getUserQuotaForPaymentGuardTest(t, 505))
+	topUp := GetTopUpByTradeNo("epay-exact-quota")
+	require.NotNil(t, topUp)
+	assert.Equal(t, "epay-payment-1", topUp.ProviderPaymentId)
+
+	require.NoError(t, DB.Create(&User{
+		Id: 506, Username: "payment_guard_overflow", AffCode: "epay-overflow-user",
+		Status: common.UserStatusEnabled, Quota: common.MaxQuota - 10,
+	}).Error)
+	require.NoError(t, (&TopUp{
+		UserId: 506, Amount: 1, Quota: 20, Money: 1,
+		TradeNo: "epay-overflow", PaymentMethod: "alipay",
+		PaymentProvider: PaymentProviderEpay, Status: common.TopUpStatusPending,
+	}).Insert())
+	require.Error(t, RechargeEpay("epay-overflow", "alipay", "epay-payment-2", "127.0.0.1"))
+	assert.Equal(t, common.MaxQuota-10, getUserQuotaForPaymentGuardTest(t, 506))
+	topUp = GetTopUpByTradeNo("epay-overflow")
+	require.NotNil(t, topUp)
+	assert.Equal(t, common.TopUpStatusPending, topUp.Status)
+}
+
 func TestTopUpReversalUsesCumulativeRefundAndIsIdempotent(t *testing.T) {
 	truncateTables(t)
 	insertUserForPaymentGuardTest(t, 502, 1100)

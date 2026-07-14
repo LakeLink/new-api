@@ -36,6 +36,10 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
+	if err := model.ValidateSubscriptionPlanForPurchase(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
+	}
 	if strings.TrimSpace(plan.WaffoPancakeProductId) == "" {
 		common.ApiErrorMsg(c, "该套餐未配置 WaffoPancakeProductId")
 		return

@@ -108,6 +108,26 @@ var (
 	ErrTopUpStatusInvalid    = errors.New("topup status invalid")
 )
 
+func creditTopUpQuotaTx(tx *gorm.DB, userId int, quota int, updates map[string]interface{}) error {
+	if quota <= 0 || quota > common.MaxQuota {
+		return errors.New("无效的充值额度")
+	}
+	if updates == nil {
+		updates = make(map[string]interface{})
+	}
+	updates["quota"] = gorm.Expr("quota + ?", quota)
+	result := tx.Model(&User{}).
+		Where("id = ? AND quota <= ?", userId, common.MaxQuota-quota).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("充值用户不存在或充值后额度超出允许范围")
+	}
+	return nil
+}
+
 func (topUp *TopUp) Insert() error {
 	var err error
 	err = DB.Create(topUp).Error
@@ -214,12 +234,8 @@ func Recharge(referenceId string, customerId string, providerPaymentId string, c
 			return err
 		}
 
-		result := tx.Model(&User{}).Where("id = ?", topUp.UserId).Updates(map[string]interface{}{"stripe_customer": customerId, "quota": gorm.Expr("quota + ?", quota)})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("充值用户不存在")
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quota, map[string]interface{}{"stripe_customer": customerId}); err != nil {
+			return err
 		}
 
 		completed = true
@@ -239,6 +255,69 @@ func Recharge(referenceId string, customerId string, providerPaymentId string, c
 	}
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值额度: %v，支付金额：%.2f", logger.FormatQuota(quota), topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
 
+	return nil
+}
+
+func RechargeEpay(referenceId string, paymentMethod string, providerPaymentId string, callerIp string) error {
+	if referenceId == "" {
+		return errors.New("未提供支付单号")
+	}
+
+	var quota int
+	completed := false
+	topUp := &TopUp{}
+	refCol := "`trade_no`"
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		refCol = `"trade_no"`
+	}
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error; err != nil {
+			return ErrTopUpNotFound
+		}
+		if topUp.PaymentProvider != PaymentProviderEpay || (paymentMethod != "" && topUp.PaymentMethod != paymentMethod) {
+			return ErrPaymentMethodMismatch
+		}
+		if topUp.ProviderPaymentId != "" && providerPaymentId != "" && topUp.ProviderPaymentId != providerPaymentId {
+			return ErrPaymentMethodMismatch
+		}
+		if topUp.Status == common.TopUpStatusSuccess || topUp.Status == TopUpStatusPartiallyRefunded || topUp.Status == TopUpStatusRefunded {
+			return nil
+		}
+		if topUp.Status != common.TopUpStatusPending {
+			return ErrTopUpStatusInvalid
+		}
+
+		var err error
+		quota, err = topUpCreditQuota(topUp)
+		if err != nil {
+			return err
+		}
+		topUp.Quota = quota
+		topUp.CompleteTime = common.GetTimestamp()
+		topUp.Status = common.TopUpStatusSuccess
+		if providerPaymentId != "" {
+			topUp.ProviderPaymentId = providerPaymentId
+		}
+		if err := tx.Save(topUp).Error; err != nil {
+			return err
+		}
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quota, nil); err != nil {
+			return err
+		}
+		completed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !completed {
+		return nil
+	}
+	if err := InvalidateUserCache(topUp.UserId); err != nil {
+		common.SysLog("failed to invalidate user cache after Epay topup: " + err.Error())
+	}
+	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值额度: %v，支付金额：%.2f", logger.FormatQuota(quota), topUp.Money), callerIp, topUp.PaymentMethod, PaymentProviderEpay)
 	return nil
 }
 
@@ -414,6 +493,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	var quotaToAdd int
 	var payMoney float64
 	var paymentMethod string
+	completed := false
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		topUp := &TopUp{}
@@ -449,22 +529,22 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		}
 
 		// 增加用户额度（立即写库，保持一致性）
-		result := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("充值用户不存在")
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quotaToAdd, nil); err != nil {
+			return err
 		}
 
 		userId = topUp.UserId
 		payMoney = topUp.Money
 		paymentMethod = topUp.PaymentMethod
+		completed = true
 		return nil
 	})
 
 	if err != nil {
 		return err
+	}
+	if !completed {
+		return nil
 	}
 	if err := InvalidateUserCache(userId); err != nil {
 		common.SysLog("failed to invalidate user cache after manual topup: " + err.Error())
@@ -521,9 +601,7 @@ func RechargeCreem(referenceId string, providerPaymentId string, customerEmail s
 		}
 
 		// 构建更新字段，优先使用邮箱，如果邮箱为空则使用用户名
-		updateFields := map[string]interface{}{
-			"quota": gorm.Expr("quota + ?", quota),
-		}
+		updateFields := make(map[string]interface{})
 
 		// 如果有客户邮箱，尝试更新用户邮箱（仅当用户邮箱为空时）
 		if customerEmail != "" {
@@ -540,12 +618,8 @@ func RechargeCreem(referenceId string, providerPaymentId string, customerEmail s
 			}
 		}
 
-		result := tx.Model(&User{}).Where("id = ?", topUp.UserId).Updates(updateFields)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("充值用户不存在")
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quota, updateFields); err != nil {
+			return err
 		}
 
 		completed = true
@@ -612,12 +686,8 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return err
 		}
 
-		result := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("充值用户不存在")
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quotaToAdd, nil); err != nil {
+			return err
 		}
 
 		completed = true
@@ -683,12 +753,8 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return err
 		}
 
-		result := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", gorm.Expr("quota + ?", quotaToAdd))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("充值用户不存在")
+		if err := creditTopUpQuotaTx(tx, topUp.UserId, quotaToAdd, nil); err != nil {
+			return err
 		}
 
 		completed = true
