@@ -129,6 +129,61 @@ func TestClearChannelReadOnlyFields(t *testing.T) {
 	assert.Equal(t, "default", channel.Group)
 }
 
+func TestClearChannelInfoRedactsSecretViewFields(t *testing.T) {
+	baseURL := "https://user:password@internal.example"
+	organization := "org-secret"
+	headerOverride := `{"Authorization":"Bearer secret"}`
+	paramOverride := `{"system":"private"}`
+	setting := `{"proxy":"http://user:password@proxy.internal"}`
+	channel := &model.Channel{
+		Key:                "provider-key",
+		Keys:               []string{"provider-key"},
+		BaseURL:            &baseURL,
+		OpenAIOrganization: &organization,
+		HeaderOverride:     &headerOverride,
+		ParamOverride:      &paramOverride,
+		Setting:            &setting,
+		Other:              "provider-secret-metadata",
+		OtherSettings:      `{"advanced_custom":{"advanced_routes":[{"auth":{"value":"secret"}}]}}`,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:             true,
+			MultiKeySize:           2,
+			MultiKeyStatusList:     map[int]int{0: 1, 1: 3},
+			MultiKeyDisabledReason: map[int]string{1: "credential rejected"},
+			MultiKeyDisabledTime:   map[int]int64{1: 123},
+			MultiKeyPollingIndex:   1,
+		},
+	}
+
+	clearChannelInfo(channel, false)
+
+	assert.Empty(t, channel.Key)
+	assert.Nil(t, channel.Keys)
+	assert.Nil(t, channel.BaseURL)
+	assert.Nil(t, channel.OpenAIOrganization)
+	assert.Nil(t, channel.HeaderOverride)
+	assert.Nil(t, channel.ParamOverride)
+	assert.Nil(t, channel.Setting)
+	assert.Empty(t, channel.Other)
+	assert.Empty(t, channel.OtherSettings)
+	assert.Nil(t, channel.ChannelInfo.MultiKeyStatusList)
+	assert.Nil(t, channel.ChannelInfo.MultiKeyDisabledReason)
+	assert.Nil(t, channel.ChannelInfo.MultiKeyDisabledTime)
+	assert.Zero(t, channel.ChannelInfo.MultiKeyPollingIndex)
+	assert.Equal(t, 2, channel.ChannelInfo.MultiKeySize)
+}
+
+func TestClearChannelInfoPreservesFieldsForSecretView(t *testing.T) {
+	setting := `{"proxy":"https://proxy.example"}`
+	channel := &model.Channel{Key: "secret", Setting: &setting}
+
+	clearChannelInfo(channel, true)
+
+	assert.Equal(t, "secret", channel.Key)
+	require.NotNil(t, channel.Setting)
+	assert.Equal(t, setting, *channel.Setting)
+}
+
 func TestUpdateChannelRejectsStatusField(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

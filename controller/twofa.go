@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -177,17 +178,16 @@ func Enable2FA(c *gin.Context) {
 		return
 	}
 
-	if !common.ValidateTOTPCode(twoFA.Secret, cleanCode) {
+	valid, err := twoFA.EnableWithTOTP(cleanCode)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !valid {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "验证码或备用码错误，请重试",
 		})
-		return
-	}
-
-	// 启用2FA
-	if err := twoFA.Enable(); err != nil {
-		common.ApiError(c, err)
 		return
 	}
 
@@ -227,29 +227,12 @@ func Disable2FA(c *gin.Context) {
 		return
 	}
 
-	// 验证TOTP验证码或备用码
-	cleanCode, err := common.ValidateNumericCode(req.Code)
-	isValidTOTP := false
-	isValidBackup := false
-
-	if err == nil {
-		// 尝试验证TOTP
-		isValidTOTP, _ = twoFA.ValidateTOTPAndUpdateUsage(cleanCode)
+	valid, err := twoFA.ValidateCodeAndUpdateUsage(req.Code)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
 	}
-
-	if !isValidTOTP {
-		// 尝试验证备用码
-		isValidBackup, err = twoFA.ValidateBackupCodeAndUpdateUsage(req.Code)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	}
-
-	if !isValidTOTP && !isValidBackup {
+	if !valid {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "验证码或备用码错误，请重试",
@@ -408,7 +391,11 @@ func Verify2FALogin(c *gin.Context) {
 	// 从会话中获取pending用户信息
 	session := sessions.Default(c)
 	pendingUserId := session.Get("pending_user_id")
-	if pendingUserId == nil {
+	pendingAt, pendingAtOK := session.Get("pending_login_at").(int64)
+	elapsed := time.Now().Unix() - pendingAt
+	if pendingUserId == nil || !pendingAtOK || elapsed < -30 || elapsed >= int64(pendingTwoFALoginTimeout/time.Second) {
+		session.Clear()
+		_ = session.Save()
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "会话已过期，请重新登录",
@@ -432,6 +419,13 @@ func Verify2FALogin(c *gin.Context) {
 		})
 		return
 	}
+	pendingVersion, versionOK := session.Get("pending_session_version").(int64)
+	if !versionOK || pendingVersion != user.SessionVersion {
+		session.Clear()
+		_ = session.Save()
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "会话已过期，请重新登录"})
+		return
+	}
 
 	// 获取2FA记录
 	twoFA, err := model.GetTwoFAByUserId(user.Id)
@@ -447,29 +441,12 @@ func Verify2FALogin(c *gin.Context) {
 		return
 	}
 
-	// 验证TOTP验证码或备用码
-	cleanCode, err := common.ValidateNumericCode(req.Code)
-	isValidTOTP := false
-	isValidBackup := false
-
-	if err == nil {
-		// 尝试验证TOTP
-		isValidTOTP, _ = twoFA.ValidateTOTPAndUpdateUsage(cleanCode)
+	valid, err := twoFA.ValidateCodeAndUpdateUsage(req.Code)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
 	}
-
-	if !isValidTOTP {
-		// 尝试验证备用码
-		isValidBackup, err = twoFA.ValidateBackupCodeAndUpdateUsage(req.Code)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	}
-
-	if !isValidTOTP && !isValidBackup {
+	if !valid {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "验证码或备用码错误，请重试",
@@ -480,7 +457,12 @@ func Verify2FALogin(c *gin.Context) {
 	// 2FA验证成功，清理pending会话信息并完成登录
 	session.Delete("pending_username")
 	session.Delete("pending_user_id")
-	session.Save()
+	session.Delete("pending_login_at")
+	session.Delete("pending_session_version")
+	if err := session.Save(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	setupLogin(user, c)
 }

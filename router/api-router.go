@@ -82,13 +82,14 @@ func SetApiRouter(router *gin.Engine) {
 			{
 				selfRoute.GET("/self/groups", controller.GetUserGroups)
 				selfRoute.GET("/self", controller.GetSelf)
+				selfRoute.POST("/logout_all", middleware.CriticalRateLimit(), controller.LogoutAll)
 				selfRoute.GET("/models", controller.GetUserModels)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), controller.UpdateSelf)
 				selfRoute.DELETE("/self", controller.DeleteSelf)
 				selfRoute.GET("/token", controller.GenerateAccessToken)
 				selfRoute.GET("/passkey", controller.PasskeyStatus)
-				selfRoute.POST("/passkey/register/begin", controller.PasskeyRegisterBegin)
-				selfRoute.POST("/passkey/register/finish", controller.PasskeyRegisterFinish)
+				selfRoute.POST("/passkey/register/begin", middleware.SecureVerificationRequired(), controller.PasskeyRegisterBegin)
+				selfRoute.POST("/passkey/register/finish", middleware.SecureVerificationRequired(), controller.PasskeyRegisterFinish)
 				selfRoute.POST("/passkey/verify/begin", controller.PasskeyVerifyBegin)
 				selfRoute.POST("/passkey/verify/finish", controller.PasskeyVerifyFinish)
 				selfRoute.DELETE("/passkey", controller.PasskeyDelete)
@@ -110,8 +111,8 @@ func SetApiRouter(router *gin.Engine) {
 
 				// 2FA routes
 				selfRoute.GET("/2fa/status", controller.Get2FAStatus)
-				selfRoute.POST("/2fa/setup", controller.Setup2FA)
-				selfRoute.POST("/2fa/enable", controller.Enable2FA)
+				selfRoute.POST("/2fa/setup", middleware.SecureVerificationRequired(), controller.Setup2FA)
+				selfRoute.POST("/2fa/enable", middleware.SecureVerificationRequired(), controller.Enable2FA)
 				selfRoute.POST("/2fa/disable", controller.Disable2FA)
 				selfRoute.POST("/2fa/backup_codes", controller.RegenerateBackupCodes)
 

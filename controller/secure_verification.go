@@ -17,6 +17,7 @@ const (
 	secureVerificationMethodSessionKey = "secure_verified_method"
 	secureVerificationMethod2FA        = "2fa"
 	secureVerificationMethodPasskey    = "passkey"
+	secureVerificationMethodPassword   = "password"
 	// PasskeyReadySessionKey means WebAuthn finished and /api/verify can finalize step-up verification.
 	PasskeyReadySessionKey = "secure_passkey_ready_at"
 	// SecureVerificationTimeout 验证有效期（秒）
@@ -26,8 +27,9 @@ const (
 )
 
 type UniversalVerifyRequest struct {
-	Method string `json:"method"` // "2fa" 或 "passkey"
-	Code   string `json:"code,omitempty"`
+	Method   string `json:"method"` // "2fa", "passkey" or "password"
+	Code     string `json:"code,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 type VerificationStatusResponse struct {
@@ -54,8 +56,8 @@ func UniversalVerify(c *gin.Context) {
 	}
 
 	// 获取用户信息
-	user := &model.User{Id: userId}
-	if err := user.FillUserById(); err != nil {
+	user, err := model.GetUserById(userId, true)
+	if err != nil {
 		common.ApiError(c, fmt.Errorf("获取用户信息失败: %v", err))
 		return
 	}
@@ -72,15 +74,9 @@ func UniversalVerify(c *gin.Context) {
 	passkey, passkeyErr := model.GetPasskeyByUserID(userId)
 	hasPasskey := passkeyErr == nil && passkey != nil
 
-	if !has2FA && !hasPasskey {
-		common.ApiError(c, fmt.Errorf("用户未启用2FA或Passkey"))
-		return
-	}
-
 	// 根据验证方式进行验证
 	var verified bool
 	var verifyMethod string
-	var err error
 
 	switch req.Method {
 	case "2fa":
@@ -111,6 +107,20 @@ func UniversalVerify(c *gin.Context) {
 			return
 		}
 		verifyMethod = "Passkey"
+
+	case "password":
+		password := req.Password
+		if password == "" {
+			// Keep compatibility with clients that use the existing code field for
+			// every verification method.
+			password = req.Code
+		}
+		if user.Password == "" || password == "" {
+			common.ApiError(c, fmt.Errorf("当前账户未设置密码"))
+			return
+		}
+		verified = common.ValidatePasswordAndHash(password, user.Password)
+		verifyMethod = "Password"
 
 	default:
 		common.ApiError(c, fmt.Errorf("不支持的验证方式: %s", req.Method))

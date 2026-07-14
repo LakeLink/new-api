@@ -7,11 +7,12 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
@@ -40,12 +41,10 @@ func TelegramBind(c *gin.Context) {
 		return
 	}
 
-	session := sessions.Default(c)
-	id := session.Get("id")
-	user := model.User{Id: id.(int)}
-	if err := user.FillUserById(); err != nil {
-		c.JSON(200, gin.H{
-			"message": err.Error(),
+	user, err := getCurrentSessionUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": "请先登录后再绑定 Telegram",
 			"success": false,
 		})
 		return
@@ -99,12 +98,28 @@ func TelegramLogin(c *gin.Context) {
 }
 
 func checkTelegramAuthorization(params map[string][]string, token string) bool {
-	strs := []string{}
-	var hash = ""
+	if token == "" || len(params["id"]) != 1 || len(params["auth_date"]) != 1 || len(params["hash"]) != 1 {
+		return false
+	}
+	authDate, err := strconv.ParseInt(params["auth_date"][0], 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().Unix()
+	// Telegram login data is an authentication assertion, not a reusable account
+	// credential. Reject replayed assertions and clocks implausibly in the future.
+	if authDate > now+30 || now-authDate > int64((5*time.Minute)/time.Second) {
+		return false
+	}
+
+	strs := make([]string, 0, len(params)-1)
+	hash := params["hash"][0]
 	for k, v := range params {
 		if k == "hash" {
-			hash = v[0]
 			continue
+		}
+		if len(v) != 1 {
+			return false
 		}
 		strs = append(strs, k+"="+v[0])
 	}
@@ -120,6 +135,10 @@ func checkTelegramAuthorization(params map[string][]string, token string) bool {
 	io.WriteString(sha256hash, token)
 	hmachash := hmac.New(sha256.New, sha256hash.Sum(nil))
 	io.WriteString(hmachash, imploded)
-	ss := hex.EncodeToString(hmachash.Sum(nil))
-	return hash == ss
+	expectedHash := hmachash.Sum(nil)
+	providedHash, err := hex.DecodeString(hash)
+	if err != nil || len(providedHash) != len(expectedHash) {
+		return false
+	}
+	return hmac.Equal(providedHash, expectedHash)
 }

@@ -34,6 +34,50 @@ func validUserInfo(username string, role int) bool {
 	return true
 }
 
+func parseSessionVersion(raw any) (int64, bool) {
+	// Sessions created before revocation versioning represent version zero.
+	if raw == nil {
+		return 0, true
+	}
+	switch value := raw.(type) {
+	case int64:
+		return value, value >= 0
+	case int:
+		return int64(value), value >= 0
+	case uint64:
+		if value > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func clearAuthSession(session sessions.Session) {
+	session.Clear()
+	_ = session.Save()
+}
+
+func currentSessionUser(session sessions.Session) (*model.User, error) {
+	id, ok := session.Get("id").(int)
+	if !ok || id == 0 {
+		return nil, nil
+	}
+	if model.DB == nil {
+		return nil, model.ErrDatabase
+	}
+	user, err := model.GetUserById(id, false)
+	if err != nil {
+		return nil, err
+	}
+	version, ok := parseSessionVersion(session.Get("session_version"))
+	if !ok || version != user.SessionVersion {
+		return nil, nil
+	}
+	return user, nil
+}
+
 func authHelper(c *gin.Context, minRole int) {
 	session := sessions.Default(c)
 	username := session.Get("username")
@@ -84,6 +128,7 @@ func authHelper(c *gin.Context, minRole int) {
 			role = user.Role
 			id = user.Id
 			status = user.Status
+			group = user.Group
 			useAccessToken = true
 		} else {
 			c.JSON(http.StatusOK, gin.H{
@@ -122,13 +167,12 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	// Cookie sessions contain a role/status snapshot that cannot be revoked
-	// server-side. Re-read privileged sessions before every admin/root request so
-	// a committed demotion or disable takes effect immediately even when the old
-	// browser cookie is still present.
-	if !useAccessToken && minRole >= common.RoleAdminUser {
+	// Signed cookie sessions are client-side snapshots. Re-read the account and
+	// compare its revocation version on every authenticated request so password
+	// changes, logout-all, disablement, and demotion take effect immediately.
+	if !useAccessToken {
 		if model.DB == nil {
-			common.SysLog(fmt.Sprintf("cannot refresh privileged session for user %d: database is not initialized", apiUserId))
+			common.SysLog(fmt.Sprintf("cannot refresh session for user %d: database is not initialized", apiUserId))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
@@ -138,10 +182,20 @@ func authHelper(c *gin.Context, minRole int) {
 		}
 		currentUser, currentErr := model.GetUserById(apiUserId, false)
 		if currentErr != nil {
-			common.SysLog(fmt.Sprintf("failed to refresh privileged session for user %d: %v", apiUserId, currentErr))
+			common.SysLog(fmt.Sprintf("failed to refresh session for user %d: %v", apiUserId, currentErr))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+			})
+			c.Abort()
+			return
+		}
+		sessionVersion, versionOK := parseSessionVersion(session.Get("session_version"))
+		if !versionOK || sessionVersion != currentUser.SessionVersion {
+			clearAuthSession(session)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
 			})
 			c.Abort()
 			return
@@ -204,9 +258,13 @@ func authHelper(c *gin.Context, minRole int) {
 func TryUserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		session := sessions.Default(c)
-		id := session.Get("id")
-		if id != nil {
-			c.Set("id", id)
+		user, err := currentSessionUser(session)
+		if err == nil {
+			if user != nil && user.Status == common.UserStatusEnabled {
+				c.Set("id", user.Id)
+			} else if session.Get("id") != nil {
+				clearAuthSession(session)
+			}
 		}
 		c.Next()
 	}
@@ -256,12 +314,18 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		// Try session auth first (dashboard users)
 		session := sessions.Default(c)
-		if id := session.Get("id"); id != nil {
-			if status, ok := session.Get("status").(int); ok && status == common.UserStatusEnabled {
-				c.Set("id", id)
-				c.Next()
-				return
-			}
+		user, err := currentSessionUser(session)
+		if err != nil {
+			abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+			return
+		}
+		if user != nil && user.Status == common.UserStatusEnabled {
+			c.Set("id", user.Id)
+			c.Next()
+			return
+		}
+		if session.Get("id") != nil {
+			clearAuthSession(session)
 		}
 		// Fall back to token auth (API clients)
 		TokenAuth()(c)

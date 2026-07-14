@@ -38,6 +38,25 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		// A forced admin channel changes selection, not token authorization. Model
+		// limits must apply before either the forced or normal selection branch.
+		modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+		if modelLimitEnable {
+			s, hasLimits := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+			if !hasLimits {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+				return
+			}
+			tokenModelLimit, validLimits := s.(map[string]bool)
+			if !validLimits {
+				tokenModelLimit = map[string]bool{}
+			}
+			matchName := ratio_setting.FormatMatchingModelName(modelRequest.Model)
+			if _, allowed := tokenModelLimit[matchName]; !allowed {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+				return
+			}
+		}
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
 			if err != nil {
@@ -53,29 +72,36 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
 				return
 			}
-		} else {
-			// Select a channel for the user
-			// check token model mapping
-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-				if !ok {
-					// token model limit is empty, all models are not allowed
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+			if shouldSelectChannel {
+				if modelRequest.Model == "" {
+					abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))
 					return
 				}
-				var tokenModelLimit map[string]bool
-				tokenModelLimit, ok = s.(map[string]bool)
-				if !ok {
-					tokenModelLimit = map[string]bool{}
+				if !channelSupportsRequestPath(channel, c.Request.URL.Path, modelRequest.Model) {
+					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
+					return
 				}
-				matchName := ratio_setting.FormatMatchingModelName(modelRequest.Model) // match gpts & thinking-*
-				if _, ok := tokenModelLimit[matchName]; !ok {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+				usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+				groupAllowed := false
+				if usingGroup == "auto" {
+					userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+					for _, candidateGroup := range service.GetUserAutoGroup(userGroup) {
+						if model.IsChannelEnabledForGroupModel(candidateGroup, modelRequest.Model, channel.Id) {
+							common.SetContextKey(c, constant.ContextKeyAutoGroup, candidateGroup)
+							groupAllowed = true
+							break
+						}
+					}
+				} else {
+					groupAllowed = model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, channel.Id)
+				}
+				if !groupAllowed {
+					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
 					return
 				}
 			}
-
+		} else {
+			// Select a channel for the user
 			if shouldSelectChannel {
 				if modelRequest.Model == "" {
 					abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))

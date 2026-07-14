@@ -509,48 +509,19 @@ func PasskeyVerifyFinish(c *gin.Context) {
 }
 
 func getSessionUser(c *gin.Context) (*model.User, error) {
-	session := sessions.Default(c)
-	idRaw := session.Get("id")
-	if idRaw == nil {
+	user, err := getCurrentSessionUser(c)
+	if errors.Is(err, errSessionInvalid) {
 		return nil, errors.New("未登录")
 	}
-	id, ok := idRaw.(int)
-	if !ok {
-		return nil, errors.New("无效的会话信息")
-	}
-	user := &model.User{Id: id}
-	if err := user.FillUserById(); err != nil {
-		return nil, err
-	}
-	if user.Status != common.UserStatusEnabled {
-		return nil, errors.New("该用户已被禁用")
-	}
-	return user, nil
+	return user, err
 }
 
 func requirePasskeyRegistrationVerification(c *gin.Context, userID int) bool {
-	twoFA, err := model.GetTwoFAByUserId(userID)
-	if err != nil {
-		common.ApiError(c, err)
-		return false
-	}
-	if twoFA == nil || !twoFA.IsEnabled {
-		return true
-	}
-	return requireSecureVerificationMethod(c, secureVerificationMethod2FA)
+	return requireAnySecureVerification(c)
 }
 
 func requirePasskeyDeleteVerification(c *gin.Context, userID int) bool {
-	twoFA, err := model.GetTwoFAByUserId(userID)
-	if err != nil {
-		common.ApiError(c, err)
-		return false
-	}
-	if twoFA != nil && twoFA.IsEnabled {
-		return requireSecureVerificationMethod(c, secureVerificationMethod2FA)
-	}
-
-	_, err = model.GetPasskeyByUserID(userID)
+	_, err := model.GetPasskeyByUserID(userID)
 	if err != nil {
 		if errors.Is(err, model.ErrPasskeyNotFound) {
 			c.JSON(http.StatusOK, gin.H{
@@ -563,7 +534,25 @@ func requirePasskeyDeleteVerification(c *gin.Context, userID int) bool {
 		return false
 	}
 
-	return requireSecureVerificationMethod(c, secureVerificationMethodPasskey)
+	return requireAnySecureVerification(c)
+}
+
+func requireAnySecureVerification(c *gin.Context) bool {
+	session := sessions.Default(c)
+	verifiedAt, ok := session.Get(SecureVerificationSessionKey).(int64)
+	if !ok || time.Now().Unix()-verifiedAt >= SecureVerificationTimeout {
+		session.Delete(SecureVerificationSessionKey)
+		session.Delete(secureVerificationMethodSessionKey)
+		_ = session.Save()
+		common.ApiErrorMsg(c, "请先完成安全验证")
+		return false
+	}
+	method, ok := session.Get(secureVerificationMethodSessionKey).(string)
+	if !ok || (method != secureVerificationMethod2FA && method != secureVerificationMethodPasskey && method != secureVerificationMethodPassword) {
+		common.ApiErrorMsg(c, "请先完成安全验证")
+		return false
+	}
+	return true
 }
 
 func requireSecureVerificationMethod(c *gin.Context, method string) bool {

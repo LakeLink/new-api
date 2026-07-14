@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -31,9 +32,12 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+const pendingTwoFALoginTimeout = 5 * time.Minute
+
 var (
 	errUserPasswordUnset    = errors.New("user password is not set")
 	errOriginalPasswordFail = errors.New("original password is incorrect")
+	errSessionInvalid       = errors.New("session is invalid or has been revoked")
 )
 
 func Login(c *gin.Context) {
@@ -75,8 +79,11 @@ func Login(c *gin.Context) {
 	if model.IsTwoFAEnabled(user.Id) {
 		// 设置pending session，等待2FA验证
 		session := sessions.Default(c)
+		session.Clear()
 		session.Set("pending_username", user.Username)
 		session.Set("pending_user_id", user.Id)
+		session.Set("pending_login_at", time.Now().Unix())
+		session.Set("pending_session_version", user.SessionVersion)
 		err := session.Save()
 		if err != nil {
 			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
@@ -137,11 +144,16 @@ func recordLoginAudit(user *model.User, c *gin.Context) {
 func setupLogin(user *model.User, c *gin.Context) {
 	model.UpdateUserLastLoginAt(user.Id)
 	session := sessions.Default(c)
+	// Rotate all application session state at the authentication boundary. The
+	// cookie store is signed but client-side, so retaining pre-login state would
+	// otherwise allow pending or step-up markers to survive account changes.
+	session.Clear()
 	session.Set("id", user.Id)
 	session.Set("username", user.Username)
 	session.Set("role", user.Role)
 	session.Set("status", user.Status)
 	session.Set("group", user.Group)
+	session.Set("session_version", user.SessionVersion)
 	err := session.Save()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
@@ -162,6 +174,34 @@ func setupLogin(user *model.User, c *gin.Context) {
 	})
 }
 
+func getCurrentSessionUser(c *gin.Context) (*model.User, error) {
+	session := sessions.Default(c)
+	id, ok := session.Get("id").(int)
+	if !ok || id == 0 {
+		return nil, errSessionInvalid
+	}
+	user, err := model.GetUserById(id, false)
+	if err != nil {
+		return nil, err
+	}
+	version := int64(0)
+	if rawVersion := session.Get("session_version"); rawVersion != nil {
+		var versionOK bool
+		version, versionOK = rawVersion.(int64)
+		if !versionOK {
+			session.Clear()
+			_ = session.Save()
+			return nil, errSessionInvalid
+		}
+	}
+	if version != user.SessionVersion || user.Status != common.UserStatusEnabled {
+		session.Clear()
+		_ = session.Save()
+		return nil, errSessionInvalid
+	}
+	return user, nil
+}
+
 func Logout(c *gin.Context) {
 	session := sessions.Default(c)
 	session.Clear()
@@ -177,6 +217,23 @@ func Logout(c *gin.Context) {
 		"message": "",
 		"success": true,
 	})
+}
+
+// LogoutAll revokes all browser sessions, including the current one. API keys
+// and dashboard access tokens are separate credentials and are not changed.
+func LogoutAll(c *gin.Context) {
+	userId := c.GetInt("id")
+	if err := model.RevokeUserSessions(userId); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	session := sessions.Default(c)
+	session.Clear()
+	if err := session.Save(); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 }
 
 func Register(c *gin.Context) {
@@ -209,7 +266,12 @@ func Register(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailVerificationRequired)
 			return
 		}
-		if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
+		valid, verifyErr := common.VerifyCodeWithKeyE(user.Email, user.VerificationCode, common.EmailVerificationPurpose)
+		if verifyErr != nil {
+			common.ApiError(c, verifyErr)
+			return
+		}
+		if !valid {
 			common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
 			return
 		}
@@ -247,6 +309,15 @@ func Register(c *gin.Context) {
 	}
 	if common.EmailVerificationEnabled {
 		cleanUser.Email = user.Email
+		valid, consumeErr := common.ConsumeVerificationCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose)
+		if consumeErr != nil {
+			common.ApiError(c, consumeErr)
+			return
+		}
+		if !valid {
+			common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
+			return
+		}
 	}
 	if err := cleanUser.Insert(inviterId); err != nil {
 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
@@ -865,6 +936,16 @@ func UpdateSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if updatePassword {
+		session := sessions.Default(c)
+		session.Set("session_version", cleanUser.SessionVersion)
+		session.Delete(SecureVerificationSessionKey)
+		session.Delete(secureVerificationMethodSessionKey)
+		if err := session.Save(); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -1210,24 +1291,32 @@ func EmailBind(c *gin.Context) {
 		common.ApiError(c, errors.New("invalid request body"))
 		return
 	}
+	user, err := getCurrentSessionUser(c)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgAuthNotLoggedIn)
+		return
+	}
 	email := req.Email
 	email = model.NormalizeEmail(email)
 	code := req.Code
-	if !common.VerifyCodeWithKey(email, code, common.EmailVerificationPurpose) {
-		common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
-		return
-	}
-	session := sessions.Default(c)
-	id := session.Get("id")
-	user := model.User{
-		Id: id.(int),
-	}
-	err := user.FillUserById()
-	if err != nil {
+	if err := model.EnsureEmailAvailable(email, user.Id); err != nil {
+		if errors.Is(err, model.ErrEmailAlreadyTaken) {
+			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
+			return
+		}
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.BindEmailToUser(&user, email); err != nil {
+	valid, verifyErr := common.ConsumeVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
+	if verifyErr != nil {
+		common.ApiError(c, verifyErr)
+		return
+	}
+	if !valid {
+		common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
+		return
+	}
+	if err := model.BindEmailToUser(user, email); err != nil {
 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
 			return

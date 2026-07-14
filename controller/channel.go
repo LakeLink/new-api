@@ -64,11 +64,25 @@ func parseStatusFilter(statusParam string) int {
 	}
 }
 
-func clearChannelInfo(channel *model.Channel) {
-	if channel.ChannelInfo.IsMultiKey {
-		channel.ChannelInfo.MultiKeyDisabledReason = nil
-		channel.ChannelInfo.MultiKeyDisabledTime = nil
+func clearChannelInfo(channel *model.Channel, canViewSecrets bool) {
+	if channel == nil || canViewSecrets {
+		return
 	}
+	channel.Key = ""
+	channel.Keys = nil
+	channel.BaseURL = nil
+	channel.OpenAIOrganization = nil
+	channel.HeaderOverride = nil
+	channel.ParamOverride = nil
+	channel.Setting = nil
+	channel.Other = ""
+	channel.OtherSettings = ""
+	// Per-key state, failure reasons, and polling position reveal credential
+	// inventory and provider responses. Only ChannelSecretView may receive them.
+	channel.ChannelInfo.MultiKeyStatusList = nil
+	channel.ChannelInfo.MultiKeyDisabledReason = nil
+	channel.ChannelInfo.MultiKeyDisabledTime = nil
+	channel.ChannelInfo.MultiKeyPollingIndex = 0
 }
 
 func applyChannelStatusFilter(query *gorm.DB, statusFilter int) *gorm.DB {
@@ -98,6 +112,7 @@ func GetChannelOps(c *gin.Context) {
 }
 
 func GetAllChannels(c *gin.Context) {
+	canViewSecrets := authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView)
 	pageInfo := common.GetPageQuery(c)
 	channelData := make([]*model.Channel, 0)
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
@@ -166,7 +181,7 @@ func GetAllChannels(c *gin.Context) {
 	}
 
 	for _, datum := range channelData {
-		clearChannelInfo(datum)
+		clearChannelInfo(datum, canViewSecrets)
 	}
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
@@ -266,6 +281,7 @@ func FixChannelsAbilities(c *gin.Context) {
 }
 
 func SearchChannels(c *gin.Context) {
+	canViewSecrets := authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView)
 	keyword := c.Query("keyword")
 	group := c.Query("group")
 	modelKeyword := c.Query("model")
@@ -301,7 +317,7 @@ func SearchChannels(c *gin.Context) {
 			}
 		}
 	} else {
-		channels, err := model.SearchChannels(keyword, group, modelKeyword, idSort, sortOptions)
+		channels, err := model.SearchChannels(keyword, group, modelKeyword, idSort, canViewSecrets, sortOptions)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
@@ -372,7 +388,7 @@ func SearchChannels(c *gin.Context) {
 	pagedData := channelData[startIdx:endIdx]
 
 	for _, datum := range pagedData {
-		clearChannelInfo(datum)
+		clearChannelInfo(datum, canViewSecrets)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -399,7 +415,7 @@ func GetChannel(c *gin.Context) {
 		return
 	}
 	if channel != nil {
-		clearChannelInfo(channel)
+		clearChannelInfo(channel, authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -448,19 +464,8 @@ func GetChannelKey(c *gin.Context) {
 
 // validateTwoFactorAuth 统一的2FA验证函数
 func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
-	// 尝试验证TOTP
-	if cleanCode, err := common.ValidateNumericCode(code); err == nil {
-		if isValid, _ := twoFA.ValidateTOTPAndUpdateUsage(cleanCode); isValid {
-			return true
-		}
-	}
-
-	// 尝试验证备用码
-	if isValid, err := twoFA.ValidateBackupCodeAndUpdateUsage(code); err == nil && isValid {
-		return true
-	}
-
-	return false
+	valid, err := twoFA.ValidateCodeAndUpdateUsage(code)
+	return err == nil && valid
 }
 
 // validateChannel 通用的渠道校验函数
@@ -1076,7 +1081,7 @@ func UpdateChannel(c *gin.Context) {
 		"changed_fields": changedFields,
 	})
 	channel.Key = ""
-	clearChannelInfo(&channel.Channel)
+	clearChannelInfo(&channel.Channel, authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView))
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1479,6 +1484,10 @@ func ManageMultiKeys(c *gin.Context) {
 
 	switch request.Action {
 	case "get_key_status":
+		if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView) {
+			common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
+			return
+		}
 		keys := channel.GetKeys()
 
 		// Default pagination parameters

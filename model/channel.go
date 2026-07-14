@@ -376,7 +376,7 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
-func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
+func SearchChannels(keyword string, group string, model string, idSort bool, includeSensitive bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	modelsCol := "`models`"
 
@@ -397,8 +397,12 @@ func SearchChannels(keyword string, group string, model string, idSort bool, sor
 	baseQuery := DB.Model(&Channel{}).Omit("key")
 
 	// 构造WHERE子句
-	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
-	args := []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
+	whereClause := "(id = ? OR name LIKE ?) AND " + modelsCol + " LIKE ?"
+	args := []any{common.String2Int(keyword), "%" + keyword + "%", "%" + model + "%"}
+	if includeSensitive {
+		whereClause = "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
+		args = []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
+	}
 	baseQuery = ApplyChannelGroupFilter(baseQuery.Where(whereClause, args...), group)
 
 	// 执行查询

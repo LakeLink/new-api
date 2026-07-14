@@ -51,6 +51,7 @@ type User struct {
 	StripeCustomer   string                     `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
 	CreatedAt        int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	LastLoginAt      int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
+	SessionVersion   int64                      `json:"-" gorm:"column:session_version"`
 	AdminPermissions map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
 }
 
@@ -646,7 +647,9 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 }
 
 func (user *User) Update(updatePassword bool) error {
-	if err := user.UpdateWithTx(DB, updatePassword); err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		return user.UpdateWithTx(tx, updatePassword)
+	}); err != nil {
 		return err
 	}
 	return updateUserCache(*user)
@@ -668,11 +671,18 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 	if err = tx.Model(&current).Omit("quota", "used_quota", "request_count").Updates(newUser).Error; err != nil {
 		return err
 	}
+	if updatePassword {
+		if err = tx.Model(&current).UpdateColumn("session_version", gorm.Expr("COALESCE(session_version, 0) + ?", 1)).Error; err != nil {
+			return err
+		}
+	}
 	return tx.First(user, user.Id).Error
 }
 
 func (user *User) Edit(updatePassword bool) error {
-	if err := user.EditWithTx(DB, updatePassword); err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		return user.EditWithTx(tx, updatePassword)
+	}); err != nil {
 		return err
 	}
 	return updateUserCache(*user)
@@ -696,6 +706,7 @@ func (user *User) EditWithTx(tx *gorm.DB, updatePassword bool) error {
 	}
 	if updatePassword {
 		updates["password"] = newUser.Password
+		updates["session_version"] = gorm.Expr("COALESCE(session_version, 0) + ?", 1)
 	}
 
 	current := User{}
@@ -914,8 +925,20 @@ func ResetUserPasswordByEmail(email string, password string) error {
 	if err != nil {
 		return err
 	}
-	err = DB.Model(&User{}).Where("id = ?", user.Id).Update("password", hashedPassword).Error
-	return err
+	return DB.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]any{
+		"password":        hashedPassword,
+		"session_version": gorm.Expr("COALESCE(session_version, 0) + ?", 1),
+	}).Error
+}
+
+// RevokeUserSessions invalidates every signed browser session for a user.
+// API tokens are deliberately unaffected and have their own revocation lifecycle.
+func RevokeUserSessions(userId int) error {
+	if userId == 0 {
+		return errors.New("user id is empty")
+	}
+	return DB.Model(&User{}).Where("id = ?", userId).
+		UpdateColumn("session_version", gorm.Expr("COALESCE(session_version, 0) + ?", 1)).Error
 }
 
 func IsAdmin(userId int) bool {

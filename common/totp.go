@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -35,14 +36,39 @@ func GenerateTOTPSecret(accountName string) (*otp.Key, error) {
 
 // ValidateTOTPCode 验证TOTP验证码
 func ValidateTOTPCode(secret, code string) bool {
+	_, valid := MatchTOTPTimeStep(secret, code, time.Now())
+	return valid
+}
+
+// MatchTOTPTimeStep validates a TOTP and returns the exact counter that
+// generated it. Persisting this counter lets callers reject replay of the same
+// otherwise-valid code within its 30-second validity window.
+func MatchTOTPTimeStep(secret, code string, at time.Time) (int64, bool) {
 	// 清理验证码格式
 	cleanCode := strings.ReplaceAll(code, " ", "")
 	if len(cleanCode) != 6 {
-		return false
+		return 0, false
 	}
 
-	// 验证验证码
-	return totp.Validate(cleanCode, secret)
+	currentStep := at.Unix() / 30
+	// Preserve the library's Google-Authenticator-compatible one-step clock
+	// skew while returning the precise step that matched for replay protection.
+	for _, offset := range []int64{0, -1, 1} {
+		step := currentStep + offset
+		if step < 0 {
+			continue
+		}
+		valid, err := totp.ValidateCustom(cleanCode, secret, time.Unix(step*30, 0), totp.ValidateOpts{
+			Period:    30,
+			Skew:      0,
+			Digits:    otp.DigitsSix,
+			Algorithm: otp.AlgorithmSHA1,
+		})
+		if err == nil && valid {
+			return step, true
+		}
+	}
+	return 0, false
 }
 
 // GenerateBackupCodes 生成备用恢复码

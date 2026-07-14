@@ -19,6 +19,16 @@ import (
 
 func TestUserAuthWritesSessionGroupToRelayContextKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	oldDB := model.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	model.DB = db
+	t.Cleanup(func() { model.DB = oldDB })
+	require.NoError(t, db.Create(&model.User{
+		Id: 1, Username: "admin", Role: common.RoleAdminUser,
+		Status: common.UserStatusEnabled, Group: "user:admin",
+	}).Error)
 
 	router := gin.New()
 	router.Use(sessions.Sessions("session", cookie.NewStore([]byte("test-secret"))))
@@ -48,6 +58,43 @@ func TestUserAuthWritesSessionGroupToRelayContextKeys(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 
 	assert.Equal(t, http.StatusNoContent, recorder.Code)
+}
+
+func TestUserAuthRejectsRevokedCookieSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldDB := model.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.User{}))
+	model.DB = db
+	t.Cleanup(func() { model.DB = oldDB })
+	require.NoError(t, db.Create(&model.User{
+		Id: 7, Username: "revoked", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", SessionVersion: 2,
+	}).Error)
+
+	handlerCalled := false
+	router := gin.New()
+	router.Use(sessions.Sessions("session", cookie.NewStore([]byte("test-secret"))))
+	router.GET("/test", func(c *gin.Context) {
+		session := sessions.Default(c)
+		session.Set("username", "revoked")
+		session.Set("role", common.RoleCommonUser)
+		session.Set("id", 7)
+		session.Set("status", common.UserStatusEnabled)
+		session.Set("group", "default")
+		session.Set("session_version", int64(1))
+		require.NoError(t, session.Save())
+		c.Next()
+	}, UserAuth(), func(c *gin.Context) { handlerCalled = true })
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/test", nil)
+	request.Header.Set("New-Api-User", "7")
+	router.ServeHTTP(recorder, request)
+
+	assert.False(t, handlerCalled)
+	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
 }
 
 func TestAdminAuthRejectsDemotedCookieSessionUsingCurrentDatabaseRole(t *testing.T) {

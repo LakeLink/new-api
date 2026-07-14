@@ -140,6 +140,13 @@ func handleOAuthBind(c *gin.Context, provider oauth.Provider) {
 		common.ApiErrorI18n(c, i18n.MsgOAuthNotEnabled, providerParams(provider.GetName()))
 		return
 	}
+	// A revoked client-side session must not be able to establish a fresh login
+	// method on the account.
+	user, err := getCurrentSessionUser(c)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgAuthNotLoggedIn)
+		return
+	}
 
 	// Exchange code for token
 	code := c.Query("code")
@@ -169,16 +176,6 @@ func handleOAuthBind(c *gin.Context, provider oauth.Provider) {
 		}
 	}
 
-	// Get current user from session
-	session := sessions.Default(c)
-	id := session.Get("id")
-	user := model.User{Id: id.(int)}
-	err = user.FillUserById()
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-
 	// Handle binding based on provider type
 	if genericProvider, ok := provider.(*oauth.GenericOAuthProvider); ok {
 		// Custom provider: use user_oauth_bindings table
@@ -189,7 +186,7 @@ func handleOAuthBind(c *gin.Context, provider oauth.Provider) {
 		}
 	} else {
 		// Built-in provider: update user record directly
-		provider.SetProviderUserID(&user, oauthUser.ProviderUserID)
+		provider.SetProviderUserID(user, oauthUser.ProviderUserID)
 		err = user.Update(false)
 		if err != nil {
 			common.ApiError(c, err)

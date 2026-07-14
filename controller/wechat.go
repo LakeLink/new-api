@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
@@ -142,6 +141,11 @@ func WeChatBind(c *gin.Context) {
 		})
 		return
 	}
+	user, err := getCurrentSessionUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "请先登录"})
+		return
+	}
 	code := req.Code
 	wechatId, err := getWeChatIdByCode(code)
 	if err != nil {
@@ -156,16 +160,6 @@ func WeChatBind(c *gin.Context) {
 			"success": false,
 			"message": "该微信账号已被绑定",
 		})
-		return
-	}
-	session := sessions.Default(c)
-	id := session.Get("id")
-	user := model.User{
-		Id: id.(int),
-	}
-	err = user.FillUserById()
-	if err != nil {
-		common.ApiError(c, err)
 		return
 	}
 	user.WeChatId = wechatId
