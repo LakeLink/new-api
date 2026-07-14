@@ -16,6 +16,8 @@ import (
 var RDB *redis.Client
 var RedisEnabled = true
 
+var ErrRedisKeyNotFound = errors.New("redis key not found")
+
 func RedisKeyCacheSeconds() int {
 	return SyncFrequency
 }
@@ -276,25 +278,22 @@ func RedisHIncrBy(key, field string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HINCRBY: key=%s, field=%s, delta=%d", key, field, delta))
 	}
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
+	// EXISTS and HINCRBY must be one atomic operation. Creating only the quota
+	// field on a cache miss would produce an incomplete object, while silently
+	// skipping the delta makes callers believe the cache was updated. HINCRBY
+	// itself preserves both expiring and persistent-key TTL semantics.
+	const script = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
+return 1`
+	updated, err := RDB.Eval(context.Background(), script, []string{key}, field, delta).Int64()
+	if err != nil {
+		return fmt.Errorf("failed to increment Redis hash field: %w", err)
 	}
-
-	if ttl > 0 {
-		ctx := context.Background()
-		txn := RDB.TxPipeline()
-
-		incrCmd := txn.HIncrBy(ctx, key, field, delta)
-		if err := incrCmd.Err(); err != nil {
-			return err
-		}
-
-		txn.Expire(ctx, key, ttl)
-
-		_, err = txn.Exec(ctx)
-		return err
+	if updated == 0 {
+		return fmt.Errorf("%w: %s", ErrRedisKeyNotFound, key)
 	}
 	return nil
 }

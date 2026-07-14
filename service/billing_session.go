@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -30,63 +31,89 @@ type BillingSession struct {
 	extraReserved    int  // 发送前补充预扣的额度（订阅退款时需要单独回滚）
 	trusted          bool // 是否命中信任额度旁路
 	fundingSettled   bool // funding.Settle 已成功，资金来源已提交
+	settlementQueued bool // 结算差额已持久化，不能再走失败退款
 	settled          bool // Settle 全部完成（资金 + 令牌）
-	refunded         bool // Refund 已调用
+	refunded         bool // Refund 已持久化（可能仍在等待重试）
 	mu               sync.Mutex
 }
 
-// Settle 根据实际消耗额度进行结算。
-// 资金来源和令牌额度分两步提交：若资金来源已提交但令牌调整失败，
-// 会标记 fundingSettled 防止 Refund 对已提交的资金来源执行退款。
+var billingAdjustmentWorkerOnce sync.Once
+
+// StartBillingAdjustmentWorker retries durable settlement/refund records. It
+// is safe to call from startup and request paths; only one worker is created.
+func StartBillingAdjustmentWorker() {
+	billingAdjustmentWorkerOnce.Do(func() {
+		gopool.Go(func() {
+			for {
+				if err := model.ProcessPendingBillingAdjustments(100); err != nil {
+					common.SysLog("error retrying pending billing adjustments: " + err.Error())
+				}
+				time.Sleep(5 * time.Second)
+			}
+		})
+	})
+}
+
+// Settle 根据实际消耗额度进行结算。差额会先写入持久化调整队列，再在
+// 同一数据库事务中更新资金来源、令牌额度和完成标记。
 func (s *BillingSession) Settle(actualQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.settled {
 		return nil
 	}
+	if actualQuota < 0 {
+		return fmt.Errorf("actual quota cannot be negative: %d", actualQuota)
+	}
 	delta := actualQuota - s.preConsumedQuota
 	if delta == 0 {
 		s.settled = true
 		return nil
 	}
-	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）
-	if !s.fundingSettled {
-		if err := s.funding.Settle(delta); err != nil {
-			return err
-		}
-		s.fundingSettled = true
+	tokenDelta := delta
+	if s.relayInfo.IsPlayground {
+		tokenDelta = 0
 	}
-	// 2) 调整令牌额度
-	var tokenErr error
-	if !s.relayInfo.IsPlayground {
-		if delta > 0 {
-			tokenErr = model.DecreaseTokenQuota(s.relayInfo.TokenId, s.relayInfo.TokenKey, delta)
-		} else {
-			tokenErr = model.IncreaseTokenQuota(s.relayInfo.TokenId, s.relayInfo.TokenKey, -delta)
-		}
-		if tokenErr != nil {
-			// 资金来源已提交，令牌调整失败只能记录日志；标记 settled 防止 Refund 误退资金
-			common.SysLog(fmt.Sprintf("error adjusting token quota after funding settled (userId=%d, tokenId=%d, delta=%d): %s",
-				s.relayInfo.UserId, s.relayInfo.TokenId, delta, tokenErr.Error()))
-		}
+	adjustment := model.BillingAdjustment{
+		RequestID:      s.relayInfo.RequestId,
+		Kind:           model.BillingAdjustmentSettle,
+		FundingSource:  s.funding.Source(),
+		UserID:         s.relayInfo.UserId,
+		SubscriptionID: s.relayInfo.SubscriptionId,
+		TokenID:        s.relayInfo.TokenId,
+		FundingDelta:   delta,
+		TokenDelta:     tokenDelta,
 	}
-	// 3) 更新 relayInfo 上的订阅 PostDelta（用于日志）
+	var taskID string
+	err := retryBillingOperation(func() error {
+		var enqueueErr error
+		taskID, enqueueErr = model.EnqueueBillingAdjustment(adjustment)
+		return enqueueErr
+	})
+	if err != nil {
+		return fmt.Errorf("persist billing settlement: %w", err)
+	}
+	s.settlementQueued = true
+	if err := model.ProcessBillingAdjustment(taskID); err != nil {
+		return fmt.Errorf("billing settlement queued for retry: %w", err)
+	}
+
 	if s.funding.Source() == BillingSourceSubscription {
 		s.relayInfo.SubscriptionPostDelta += int64(delta)
 	}
+	s.fundingSettled = true
 	s.settled = true
-	return tokenErr
+	return nil
 }
 
-// Refund 退还所有预扣费，幂等安全，异步执行。
+// Refund 退还所有预扣费。退款先持久化，钱包/订阅和令牌退款随后在一个
+// 事务中执行；处理失败时记录保持 pending，可安全重试。
 func (s *BillingSession) Refund(c *gin.Context) {
 	s.mu.Lock()
 	if s.settled || s.refunded || !s.needsRefundLocked() {
 		s.mu.Unlock()
 		return
 	}
-	s.refunded = true
-	s.mu.Unlock()
 
 	logger.LogInfo(c, fmt.Sprintf("用户 %d 请求失败, 返还预扣费（token_quota=%s, funding=%s）",
 		s.relayInfo.UserId,
@@ -94,32 +121,38 @@ func (s *BillingSession) Refund(c *gin.Context) {
 		s.funding.Source(),
 	))
 
-	// 复制需要的值到闭包中
-	tokenId := s.relayInfo.TokenId
-	tokenKey := s.relayInfo.TokenKey
-	isPlayground := s.relayInfo.IsPlayground
-	tokenConsumed := s.tokenConsumed
-	extraReserved := s.extraReserved
-	subscriptionId := s.relayInfo.SubscriptionId
-	funding := s.funding
-
-	gopool.Go(func() {
-		// 1) 退还资金来源
-		if err := funding.Refund(); err != nil {
-			common.SysLog("error refunding billing source: " + err.Error())
-		}
-		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
-			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
-				common.SysLog("error refunding subscription extra reserved quota: " + err.Error())
-			}
-		}
-		// 2) 退还令牌额度
-		if tokenConsumed > 0 && !isPlayground {
-			if err := model.IncreaseTokenQuota(tokenId, tokenKey, tokenConsumed); err != nil {
-				common.SysLog("error refunding token quota: " + err.Error())
-			}
-		}
+	tokenDelta := -s.tokenConsumed
+	if s.relayInfo.IsPlayground {
+		tokenDelta = 0
+	}
+	adjustment := model.BillingAdjustment{
+		RequestID:             s.relayInfo.RequestId,
+		Kind:                  model.BillingAdjustmentRefund,
+		FundingSource:         s.funding.Source(),
+		UserID:                s.relayInfo.UserId,
+		SubscriptionID:        s.relayInfo.SubscriptionId,
+		SubscriptionRequestID: s.relayInfo.RequestId,
+		TokenID:               s.relayInfo.TokenId,
+		FundingDelta:          -s.preConsumedQuota,
+		TokenDelta:            tokenDelta,
+		ExtraReserved:         int64(s.extraReserved),
+	}
+	var taskID string
+	err := retryBillingOperation(func() error {
+		var enqueueErr error
+		taskID, enqueueErr = model.EnqueueBillingAdjustment(adjustment)
+		return enqueueErr
 	})
+	if err != nil {
+		s.mu.Unlock()
+		common.SysLog("error persisting billing refund: " + err.Error())
+		return
+	}
+	s.refunded = true
+	s.mu.Unlock()
+	if err := model.ProcessBillingAdjustment(taskID); err != nil {
+		common.SysLog("billing refund queued for retry: " + err.Error())
+	}
 }
 
 // NeedsRefund 返回是否存在需要退还的预扣状态。
@@ -130,7 +163,7 @@ func (s *BillingSession) NeedsRefund() bool {
 }
 
 func (s *BillingSession) needsRefundLocked() bool {
-	if s.settled || s.refunded || s.fundingSettled {
+	if s.settled || s.refunded || s.fundingSettled || s.settlementQueued {
 		// fundingSettled 时资金来源已提交结算，不能再退预扣费
 		return false
 	}
@@ -343,6 +376,9 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 	if relayInfo == nil {
 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
+	// Recover adjustments durably queued by earlier requests or a previous
+	// process. Current-request settlement/refund remains synchronous.
+	StartBillingAdjustmentWorker()
 
 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
 

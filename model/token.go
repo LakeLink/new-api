@@ -259,26 +259,10 @@ func GetTokenById(id int) (*Token, error) {
 	return &token, err
 }
 
-func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
-	defer func() {
-		// Update Redis cache asynchronously on successful DB read
-		if shouldUpdateRedis(fromDB, err) && token != nil {
-			gopool.Go(func() {
-				if err := cacheSetToken(*token); err != nil {
-					common.SysLog("failed to update user status cache: " + err.Error())
-				}
-			})
-		}
-	}()
-	if !fromDB && common.RedisEnabled {
-		// Try Redis first
-		token, err := cacheGetTokenByKey(key)
-		if err == nil {
-			return token, nil
-		}
-		// Don't return error - fall through to DB
-	}
-	fromDB = true
+func GetTokenByKey(key string, _ bool) (token *Token, err error) {
+	// Token quota is financial state. A full-object cache populated from an
+	// older DB snapshot can resurrect already-spent quota, so authorization and
+	// balance checks read the authoritative row.
 	err = DB.Where(commonKeyCol+" = ?", key).First(&token).Error
 	return token, err
 }
@@ -380,63 +364,71 @@ func DeleteTokenById(id int, userId int) (err error) {
 }
 
 func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
+	if quota < 0 || quota > common.MaxQuota {
+		return errors.New("quota 必须在有效范围内！")
+	}
+	if err := increaseTokenQuota(tokenId, quota); err != nil {
+		return err
 	}
 	if common.RedisEnabled {
-		gopool.Go(func() {
-			err := cacheIncrTokenQuota(key, int64(quota))
-			if err != nil {
-				common.SysLog("failed to increase token quota: " + err.Error())
-			}
-		})
+		if err := cacheDeleteToken(key); err != nil {
+			common.SysLog("failed to invalidate token quota cache: " + err.Error())
+		}
 	}
-	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, tokenId, quota)
-		return nil
-	}
-	return increaseTokenQuota(tokenId, quota)
+	return nil
 }
 
 func increaseTokenQuota(id int, quota int) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
-		map[string]interface{}{
-			"remain_quota":  gorm.Expr("remain_quota + ?", quota),
-			"used_quota":    gorm.Expr("used_quota - ?", quota),
-			"accessed_time": common.GetTimestamp(),
-		},
-	).Error
-	return err
+	result := DB.Model(&Token{}).
+		Where("id = ? AND remain_quota <= ? AND used_quota >= ?", id, common.MaxQuota-quota, common.MinQuota+quota).
+		Updates(
+			map[string]interface{}{
+				"remain_quota":  gorm.Expr("remain_quota + ?", quota),
+				"used_quota":    gorm.Expr("used_quota - ?", quota),
+				"accessed_time": common.GetTimestamp(),
+			},
+		)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("token quota update would overflow or token does not exist")
+	}
+	return nil
 }
 
 func DecreaseTokenQuota(id int, key string, quota int) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
+	if quota < 0 || quota > common.MaxQuota {
+		return errors.New("quota 必须在有效范围内！")
+	}
+	if err := decreaseTokenQuota(id, quota); err != nil {
+		return err
 	}
 	if common.RedisEnabled {
-		gopool.Go(func() {
-			err := cacheDecrTokenQuota(key, int64(quota))
-			if err != nil {
-				common.SysLog("failed to decrease token quota: " + err.Error())
-			}
-		})
+		if err := cacheDeleteToken(key); err != nil {
+			common.SysLog("failed to invalidate token quota cache: " + err.Error())
+		}
 	}
-	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, id, -quota)
-		return nil
-	}
-	return decreaseTokenQuota(id, quota)
+	return nil
 }
 
 func decreaseTokenQuota(id int, quota int) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
-		map[string]interface{}{
-			"remain_quota":  gorm.Expr("remain_quota - ?", quota),
-			"used_quota":    gorm.Expr("used_quota + ?", quota),
-			"accessed_time": common.GetTimestamp(),
-		},
-	).Error
-	return err
+	result := DB.Model(&Token{}).
+		Where("id = ? AND remain_quota >= ? AND used_quota <= ?", id, common.MinQuota+quota, common.MaxQuota-quota).
+		Updates(
+			map[string]interface{}{
+				"remain_quota":  gorm.Expr("remain_quota - ?", quota),
+				"used_quota":    gorm.Expr("used_quota + ?", quota),
+				"accessed_time": common.GetTimestamp(),
+			},
+		)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("token quota update would overflow or token does not exist")
+	}
+	return nil
 }
 
 // CountUserTokens returns total number of tokens for the given user, used for pagination

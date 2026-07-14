@@ -9,8 +9,6 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/bytedance/gopkg/util/gopool"
 )
 
 // UserBase struct remains the same as it represents the cached data structure
@@ -99,28 +97,20 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (userCache *UserBase, err error) {
-	var user *User
-	var fromDB bool
-	defer func() {
-		// Update Redis cache asynchronously on successful DB read
-		if shouldUpdateRedis(fromDB, err) && user != nil {
-			gopool.Go(func() {
-				if err := populateUserCache(*user); err != nil {
-					common.SysLog("failed to update user status cache: " + err.Error())
-				}
-			})
-		}
-	}()
-
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
 	if err == nil {
+		// Quota is financial state and must never be restored from an older full
+		// user snapshot. Static identity fields may remain cached, but balance
+		// checks always use the database value.
+		if err := DB.Model(&User{}).Where("id = ?", userId).Select("quota").Find(&userCache.Quota).Error; err != nil {
+			return nil, err
+		}
 		return userCache, nil
 	}
 
 	// If Redis fails, get from DB
-	fromDB = true
-	user, err = GetUserById(userId, false)
+	user, err := GetUserById(userId, false)
 	if err != nil {
 		return nil, err // Return nil and error if DB lookup fails
 	}

@@ -28,8 +28,8 @@ import (
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
-	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	_ "github.com/QuantumNous/new-api/setting/active_request_setting"
+	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
@@ -76,6 +76,10 @@ func main() {
 			common.FatalLog("failed to close database: " + err.Error())
 		}
 	}()
+
+	// Recover durable billing settlements/refunds left pending by an earlier
+	// process before accepting new relay traffic.
+	service.StartBillingAdjustmentWorker()
 
 	if common.RedisEnabled {
 		// for compatibility with old versions
@@ -241,6 +245,18 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
+	}
+	if common.BatchUpdateEnabled {
+		for attempt := 1; attempt <= 3; attempt++ {
+			if err := model.FlushBatchUpdates(); err == nil {
+				break
+			} else {
+				common.SysError(fmt.Sprintf("failed to flush batch updates during shutdown (attempt %d/3): %v", attempt, err))
+			}
+			if attempt < 3 {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
 	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
