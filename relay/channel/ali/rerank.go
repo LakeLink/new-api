@@ -1,10 +1,11 @@
 package ali
 
 import (
-	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
@@ -13,7 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func ConvertRerankRequest(request dto.RerankRequest) *AliRerankRequest {
+func ConvertRerankRequest(request dto.RerankRequest) (*AliRerankRequest, error) {
+	query, ok := request.QueryString()
+	if !ok {
+		return nil, errors.New("ali rerank query must be a non-empty string")
+	}
 	returnDocuments := request.ReturnDocuments
 	if returnDocuments == nil {
 		t := true
@@ -22,14 +27,14 @@ func ConvertRerankRequest(request dto.RerankRequest) *AliRerankRequest {
 	return &AliRerankRequest{
 		Model: request.Model,
 		Input: AliRerankInput{
-			Query:     request.Query,
+			Query:     query,
 			Documents: request.Documents,
 		},
 		Parameters: AliRerankParameters{
 			TopN:            request.TopN,
 			ReturnDocuments: returnDocuments,
 		},
-	}
+	}, nil
 }
 
 func RerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.Usage) {
@@ -40,7 +45,7 @@ func RerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 	service.CloseResponseBodyGracefully(resp)
 
 	var aliResponse AliRerankResponse
-	err = json.Unmarshal(responseBody, &aliResponse)
+	err = common.Unmarshal(responseBody, &aliResponse)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError), nil
 	}
@@ -64,7 +69,7 @@ func RerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 		Usage:   usage,
 	}
 
-	jsonResponse, err := json.Marshal(rerankResponse)
+	jsonResponse, err := common.Marshal(rerankResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}

@@ -33,15 +33,13 @@ type EmbeddingRequest struct {
 }
 
 func (r *EmbeddingRequest) GetTokenCountMeta() *types.TokenCountMeta {
-	var texts = make([]string, 0)
-
-	inputs := r.ParseInput()
-	for _, input := range inputs {
-		texts = append(texts, input)
-	}
+	texts := make([]string, 0)
+	files := make([]*types.FileMeta, 0)
+	collectMultimodalTokenInputs(r.Input, &texts, &files)
 
 	return &types.TokenCountMeta{
 		CombineText: strings.Join(texts, "\n"),
+		Files:       files,
 	}
 }
 
@@ -56,22 +54,10 @@ func (r *EmbeddingRequest) SetModelName(modelName string) {
 }
 
 func (r *EmbeddingRequest) ParseInput() []string {
-	if r.Input == nil {
-		return make([]string, 0)
-	}
-	var input []string
-	switch r.Input.(type) {
-	case string:
-		input = []string{r.Input.(string)}
-	case []any:
-		input = make([]string, 0, len(r.Input.([]any)))
-		for _, item := range r.Input.([]any) {
-			if str, ok := item.(string); ok {
-				input = append(input, str)
-			}
-		}
-	}
-	return input
+	texts := make([]string, 0)
+	files := make([]*types.FileMeta, 0)
+	collectMultimodalTokenInputs(r.Input, &texts, &files)
+	return texts
 }
 
 type EmbeddingResponseItem struct {

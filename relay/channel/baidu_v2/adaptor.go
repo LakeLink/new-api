@@ -155,6 +155,11 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
+	query, ok := request.QueryString()
+	if !ok {
+		return nil, errors.New("baidu v2 rerank query must be a non-empty string")
+	}
+	request.Query = query
 	return request, nil
 }
 

@@ -86,7 +86,7 @@ func GetAndValidateRerankRequest(c *gin.Context) (*dto.RerankRequest, error) {
 		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
-	if rerankRequest.Query == "" {
+	if !rerankRequest.HasValidQuery() {
 		return nil, types.NewError(fmt.Errorf("query is empty"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 	if len(rerankRequest.Documents) == 0 {

@@ -1,7 +1,6 @@
 package dto
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/QuantumNous/new-api/types"
@@ -10,7 +9,7 @@ import (
 
 type RerankRequest struct {
 	Documents       []any  `json:"documents"`
-	Query           string `json:"query"`
+	Query           any    `json:"query"`
 	Model           string `json:"model"`
 	TopN            *int   `json:"top_n,omitempty"`
 	ReturnDocuments *bool  `json:"return_documents,omitempty"`
@@ -23,19 +22,34 @@ func (r *RerankRequest) IsStream(c *gin.Context) bool {
 }
 
 func (r *RerankRequest) GetTokenCountMeta() *types.TokenCountMeta {
-	var texts = make([]string, 0)
+	texts := make([]string, 0)
+	files := make([]*types.FileMeta, 0)
 
 	for _, document := range r.Documents {
-		texts = append(texts, fmt.Sprintf("%v", document))
+		collectMultimodalTokenInputs(document, &texts, &files)
 	}
-
-	if r.Query != "" {
-		texts = append(texts, r.Query)
-	}
+	collectMultimodalTokenInputs(r.Query, &texts, &files)
 
 	return &types.TokenCountMeta{
 		CombineText: strings.Join(texts, "\n"),
+		Files:       files,
 	}
+}
+
+func (r *RerankRequest) QueryString() (string, bool) {
+	query, ok := r.Query.(string)
+	return query, ok && strings.TrimSpace(query) != ""
+}
+
+func (r *RerankRequest) HasValidQuery() bool {
+	if _, ok := r.QueryString(); ok {
+		return true
+	}
+
+	var texts []string
+	var files []*types.FileMeta
+	collectMultimodalTokenInputs(r.Query, &texts, &files)
+	return len(texts) > 0 || len(files) > 0
 }
 
 func (r *RerankRequest) SetModelName(modelName string) {

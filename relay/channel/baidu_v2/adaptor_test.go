@@ -87,3 +87,12 @@ func TestBaiduV2ImageConversionEnforcesProviderContract(t *testing.T) {
 func TestBaiduV2ChannelIdentity(t *testing.T) {
 	assert.Equal(t, "baidu_v2", (&Adaptor{}).GetChannelName())
 }
+
+func TestBaiduV2RerankRejectsMultimodalQuery(t *testing.T) {
+	_, err := (&Adaptor{}).ConvertRerankRequest(nil, relayconstant.RelayModeRerank, dto.RerankRequest{
+		Model:     "bce-reranker-base",
+		Query:     map[string]any{"image": "https://example.test/query.png"},
+		Documents: []any{"document"},
+	})
+	require.ErrorContains(t, err, "must be a non-empty string")
+}
