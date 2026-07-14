@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -36,8 +37,64 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	if request.ResponseFormat != "" && !strings.EqualFold(request.ResponseFormat, "url") {
+		return nil, fmt.Errorf("baidu v2 image response_format %q is unsupported; use url", request.ResponseFormat)
+	}
+	if info.RelayMode == constant.RelayModeImagesEdits && c != nil && c.Request != nil &&
+		strings.Contains(strings.ToLower(c.Request.Header.Get("Content-Type")), "multipart/form-data") {
+		return nil, errors.New("baidu v2 image edits require a JSON image URL or data URL")
+	}
+
+	payload := map[string]any{
+		"model":  request.Model,
+		"prompt": request.Prompt,
+	}
+	if request.N != nil {
+		if *request.N < 1 || *request.N > 4 {
+			return nil, errors.New("baidu v2 image n must be between 1 and 4")
+		}
+		if strings.EqualFold(request.Model, "qwen-image") && *request.N != 1 {
+			return nil, errors.New("baidu v2 qwen-image only supports n=1")
+		}
+		payload["n"] = *request.N
+	}
+	if request.Size != "" {
+		payload["size"] = request.Size
+	}
+	if request.Watermark != nil {
+		payload["watermark"] = request.Watermark
+	}
+	if request.Stream != nil {
+		payload["stream"] = request.Stream
+	}
+	if len(request.User) > 0 {
+		payload["user"] = request.User
+	}
+	if len(request.Image) > 0 {
+		payload["image"] = request.Image
+	}
+	if info.RelayMode == constant.RelayModeImagesEdits {
+		if len(request.Image) == 0 {
+			return nil, errors.New("image is required for baidu v2 image edits")
+		}
+	}
+	for _, field := range []string{"negative_prompt", "steps", "seed", "guidance", "prompt_extend"} {
+		if value, ok := request.Extra[field]; ok {
+			payload[field] = value
+		}
+	}
+
+	// Materialize the raw JSON values once so malformed provider-native
+	// extensions fail during conversion instead of reaching the upstream.
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var converted map[string]any
+	if err := common.Unmarshal(encoded, &converted); err != nil {
+		return nil, err
+	}
+	return converted, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -98,12 +155,11 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return request, nil
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return request, nil
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
