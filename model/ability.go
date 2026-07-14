@@ -30,6 +30,13 @@ type AbilityWithChannel struct {
 	ChannelType int `json:"channel_type"`
 }
 
+func excludeRetiredChannelAbilities(query *gorm.DB) *gorm.DB {
+	retiredChannelIDs := DB.Model(&Channel{}).
+		Select("id").
+		Where("type IN ?", constant.RetiredChannelTypes())
+	return query.Where("channel_id NOT IN (?)", retiredChannelIDs)
+}
+
 func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	var abilities []AbilityWithChannel
 	err := DB.Table("abilities").
@@ -63,7 +70,7 @@ func GetAllEnableAbilities() []Ability {
 func getPriority(group string, model string, retry int) (int, error) {
 
 	var priorities []int
-	err := DB.Model(&Ability{}).
+	err := excludeRetiredChannelAbilities(DB.Model(&Ability{})).
 		Select("DISTINCT(priority)").
 		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
 		Order("priority DESC").              // 按优先级降序排序
@@ -91,14 +98,18 @@ func getPriority(group string, model string, retry int) (int, error) {
 }
 
 func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
-	maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
-	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
+	maxPrioritySubQuery := excludeRetiredChannelAbilities(DB.Model(&Ability{})).
+		Select("MAX(priority)").
+		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
+	channelQuery := excludeRetiredChannelAbilities(DB.Model(&Ability{})).
+		Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
 	if retry != 0 {
 		priority, err := getPriority(group, model, retry)
 		if err != nil {
 			return nil, err
 		} else {
-			channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
+			channelQuery = excludeRetiredChannelAbilities(DB.Model(&Ability{})).
+				Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
 		}
 	}
 
@@ -209,7 +220,7 @@ func (channel *Channel) AddAbilities(tx *gorm.DB) error {
 				Group:     group,
 				Model:     model,
 				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
+				Enabled:   channel.Status == common.ChannelStatusEnabled && !constant.IsRetiredChannelType(channel.Type),
 				Priority:  channel.Priority,
 				Weight:    uint(channel.GetWeight()),
 				Tag:       channel.Tag,
@@ -281,7 +292,7 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 				Group:     group,
 				Model:     model,
 				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
+				Enabled:   channel.Status == common.ChannelStatusEnabled && !constant.IsRetiredChannelType(channel.Type),
 				Priority:  channel.Priority,
 				Weight:    uint(channel.GetWeight()),
 				Tag:       channel.Tag,

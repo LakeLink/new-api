@@ -30,6 +30,7 @@ import { useIsMobile } from '../../../../hooks/common/useIsMobile';
 import {
   CHANNEL_OPTIONS,
   MODEL_FETCHABLE_CHANNEL_TYPES,
+  RETIRED_CHANNEL_TYPES,
 } from '../../../../constants';
 import {
   SideSheet,
@@ -2107,15 +2108,18 @@ const EditChannelModal = (props) => {
     </Space>
   ) : null;
 
-  const channelOptionList = useMemo(
-    () =>
-      CHANNEL_OPTIONS.map((opt) => ({
+  const channelOptionList = useMemo(() => {
+    const options = [];
+    for (const opt of CHANNEL_OPTIONS) {
+      if (!isEdit && RETIRED_CHANNEL_TYPES.has(opt.value)) continue;
+      options.push({
         ...opt,
         // 保持 label 为纯文本以支持搜索
         label: opt.label,
-      })),
-    [],
-  );
+      });
+    }
+    return options;
+  }, [isEdit]);
 
   const renderChannelOption = (renderProps) => {
     const {

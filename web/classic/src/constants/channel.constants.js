@@ -191,9 +191,13 @@ export const CHANNEL_OPTIONS = [
   },
 ];
 
+// Keep the options available for rendering existing channels, but exclude
+// them from the create form because their upstream protocols are retired.
+export const RETIRED_CHANNEL_TYPES = new Set([11, 23]);
+
 // Channel types that support upstream model list fetching in UI.
 export const MODEL_FETCHABLE_CHANNEL_TYPES = new Set([
-  1, 4, 14, 34, 17, 26, 27, 24, 47, 25, 20, 23, 31, 40, 42, 48, 43,
+  1, 4, 14, 34, 17, 26, 27, 24, 47, 25, 20, 31, 40, 42, 48, 43,
 ]);
 
 export const MODEL_TABLE_PAGE_SIZE = 10;

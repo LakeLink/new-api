@@ -144,6 +144,7 @@ import {
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
+  RETIRED_CHANNEL_TYPES,
 } from '../../constants'
 import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
@@ -920,11 +921,19 @@ export function ChannelMutateDrawer({
   )
 
   const channelTypeOptions = useMemo(() => {
-    const options = CHANNEL_TYPE_OPTIONS.map((option) => ({
-      value: String(option.value),
-      label: t(option.label),
-      icon: <ChannelTypeLogo type={option.value} size={16} />,
-    }))
+    const options: Array<{
+      value: string
+      label: string
+      icon: ReactNode
+    }> = []
+    for (const option of CHANNEL_TYPE_OPTIONS) {
+      if (!isEditing && RETIRED_CHANNEL_TYPES.has(option.value)) continue
+      options.push({
+        value: String(option.value),
+        label: t(option.label),
+        icon: <ChannelTypeLogo type={option.value} size={16} />,
+      })
+    }
     if (!options.some((option) => Number(option.value) === currentType)) {
       options.push({
         value: String(currentType),
@@ -933,7 +942,7 @@ export function ChannelMutateDrawer({
       })
     }
     return options
-  }, [currentType, t])
+  }, [currentType, isEditing, t])
 
   const formErrors = form.formState.errors
   const identityHasErrors = Boolean(

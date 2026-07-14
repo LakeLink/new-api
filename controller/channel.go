@@ -470,6 +470,19 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
+	if channel == nil {
+		return fmt.Errorf("channel cannot be empty")
+	}
+
+	if constant.IsRetiredChannelType(channel.Type) {
+		switch channel.Type {
+		case constant.ChannelTypePaLM:
+			return fmt.Errorf("PaLM channel is retired; migrate this channel to Gemini")
+		case constant.ChannelTypeTencent:
+			return fmt.Errorf("Tencent legacy Hunyuan channel is retired; migrate this channel to an OpenAI-compatible provider")
+		}
+	}
+
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
@@ -477,7 +490,7 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	// 如果是添加操作，检查 channel 和 key 是否为空
 	if isAdd {
-		if channel == nil || channel.Key == "" {
+		if channel.Key == "" {
 			return fmt.Errorf("channel cannot be empty")
 		}
 

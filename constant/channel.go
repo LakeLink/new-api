@@ -187,6 +187,18 @@ func GetChannelTypeName(channelType int) string {
 	return "Unknown"
 }
 
+// IsRetiredChannelType reports channel types whose built-in upstream protocol
+// is no longer usable. Keep their numeric identifiers and names for existing
+// database rows, logs, and migration tooling, but do not offer or relay them.
+func IsRetiredChannelType(channelType int) bool {
+	return channelType == ChannelTypePaLM || channelType == ChannelTypeTencent
+}
+
+// RetiredChannelTypes returns a fresh slice suitable for database filters.
+func RetiredChannelTypes() []int {
+	return []int{ChannelTypePaLM, ChannelTypeTencent}
+}
+
 type ChannelSpecialBase struct {
 	ClaudeBaseURL string
 	OpenAIBaseURL string

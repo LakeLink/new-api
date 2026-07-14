@@ -716,6 +716,9 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		if channelCache == nil {
 			return false
 		}
+		if status == common.ChannelStatusEnabled && constant.IsRetiredChannelType(channelCache.Type) {
+			return false
+		}
 		if channelCache.ChannelInfo.IsMultiKey {
 			// Use per-channel lock to prevent concurrent map read/write with GetNextEnabledKey
 			beforeStatus := channelCache.Status
@@ -751,6 +754,9 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	if err != nil {
 		return false
 	} else {
+		if status == common.ChannelStatusEnabled && constant.IsRetiredChannelType(channel.Type) {
+			return false
+		}
 		if channel.Status == status {
 			return false
 		}
@@ -783,7 +789,9 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 }
 
 func EnableChannelByTag(tag string) error {
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
+	err := DB.Model(&Channel{}).
+		Where("tag = ? AND type NOT IN ?", tag, constant.RetiredChannelTypes()).
+		Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
 		return err
 	}

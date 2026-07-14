@@ -33,7 +33,7 @@ export const CHANNEL_TYPES = {
   8: 'Custom',
   // 9: 'AILS',
   // 10: 'AI Proxy',
-  // 11: 'PaLM',
+  11: 'PaLM',
   // 12: 'API2GPT',
   // 13: 'AIGC2D',
   14: 'Anthropic',
@@ -78,6 +78,10 @@ export const CHANNEL_TYPES = {
   57: 'ChatGPT Subscription (Codex)',
   58: 'Advanced Custom',
 } as const
+
+// Retain labels for existing rows while preventing creation of channels whose
+// built-in provider protocols have been retired upstream.
+export const RETIRED_CHANNEL_TYPES = new Set<number>([11, 23])
 
 const CHANNEL_TYPE_DISPLAY_ORDER: number[] = [
   1, 14, 33, 24, 43, 3, 41, 48, 58, 42, 34, 20, 4, 40, 27, 25, 17, 26, 15, 46,
@@ -377,7 +381,7 @@ export const FIELD_DESCRIPTIONS = {
 // ============================================================================
 
 export const MODEL_FETCHABLE_TYPES = new Set([
-  1, 4, 14, 17, 20, 23, 24, 25, 26, 27, 31, 34, 35, 40, 42, 43, 47, 48,
+  1, 4, 14, 17, 20, 24, 25, 26, 27, 31, 34, 35, 40, 42, 43, 47, 48,
 ])
 
 export const TYPE_TO_KEY_PROMPT: Record<number, string> = {
