@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	channelconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -14,12 +16,12 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/types"
-	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Adaptor struct {
+	imageResponseFormat string
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
@@ -37,7 +39,39 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	return request, nil
+	responseFormat := strings.ToLower(strings.TrimSpace(request.ResponseFormat))
+	if responseFormat == "" {
+		responseFormat = "url"
+	}
+	if responseFormat != "url" && responseFormat != "b64_json" {
+		return nil, fmt.Errorf("unsupported image response_format %q", request.ResponseFormat)
+	}
+	a.imageResponseFormat = responseFormat
+
+	watermarkEnabled := request.Watermark
+	if len(request.WatermarkEnabled) > 0 {
+		if err := common.Unmarshal(request.WatermarkEnabled, &watermarkEnabled); err != nil {
+			return nil, fmt.Errorf("invalid watermark_enabled: %w", err)
+		}
+	}
+	var userID string
+	if len(request.UserId) > 0 {
+		if err := common.Unmarshal(request.UserId, &userID); err != nil {
+			return nil, fmt.Errorf("invalid user_id: %w", err)
+		}
+	} else if len(request.User) > 0 {
+		if err := common.Unmarshal(request.User, &userID); err != nil {
+			return nil, fmt.Errorf("invalid user: %w", err)
+		}
+	}
+	return &zhipuImageRequest{
+		Model:            request.Model,
+		Prompt:           request.Prompt,
+		Quality:          request.Quality,
+		Size:             request.Size,
+		WatermarkEnabled: watermarkEnabled,
+		UserID:           userID,
+	}, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -87,10 +121,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
-	if lo.FromPtrOr(request.TopP, 0) >= 1 {
-		request.TopP = lo.ToPtr(0.99)
-	}
-	return requestOpenAI2Zhipu(*request), nil
+	return requestOpenAI2Zhipu(*request)
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
@@ -117,7 +148,14 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return adaptor.DoResponse(c, resp, info)
 	default:
 		if info.RelayMode == relayconstant.RelayModeImagesGenerations {
-			return zhipu4vImageHandler(c, resp, info)
+			responseFormat := a.imageResponseFormat
+			if responseFormat == "" {
+				responseFormat = "url"
+				if request, ok := info.Request.(*dto.ImageRequest); ok && strings.EqualFold(strings.TrimSpace(request.ResponseFormat), "b64_json") {
+					responseFormat = "b64_json"
+				}
+			}
+			return zhipu4vImageHandler(c, resp, info, responseFormat)
 		}
 		adaptor := openai.Adaptor{}
 		return adaptor.DoResponse(c, resp, info)

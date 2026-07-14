@@ -1,6 +1,7 @@
 package zhipu_4v
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 
@@ -51,10 +52,11 @@ type openAIImagePayload struct {
 }
 
 type openAIImageData struct {
-	B64Json string `json:"b64_json"`
+	Url     string `json:"url,omitempty"`
+	B64Json string `json:"b64_json,omitempty"`
 }
 
-func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, responseFormat string) (*dto.Usage, *types.NewAPIError) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -85,35 +87,39 @@ func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		if url == "" {
 			url = data.ImageUrl
 		}
-		if url == "" {
-			logger.LogWarn(c, "zhipu_image_missing_url")
-			continue
-		}
 
 		var b64 string
-		switch {
-		case data.B64Json != "":
-			b64 = data.B64Json
-		case data.B64Image != "":
-			b64 = data.B64Image
-		default:
-			_, downloaded, err := service.GetImageFromUrl(url)
-			if err != nil {
-				logger.LogError(c, "zhipu_image_get_b64_failed: "+err.Error())
-				continue
+		if responseFormat == "b64_json" || url == "" {
+			switch {
+			case data.B64Json != "":
+				b64 = data.B64Json
+			case data.B64Image != "":
+				b64 = data.B64Image
+			case url != "":
+				_, downloaded, err := service.GetImageFromUrl(url)
+				if err != nil {
+					return nil, types.NewOpenAIError(fmt.Errorf("zhipu image base64 conversion failed: %w", err), types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+				}
+				b64 = downloaded
 			}
-			b64 = downloaded
 		}
 
-		if b64 == "" {
-			logger.LogWarn(c, "zhipu_image_empty_b64")
-			continue
+		if url == "" && b64 == "" {
+			logger.LogWarn(c, "zhipu_image_missing_data")
+			return nil, types.NewOpenAIError(fmt.Errorf("zhipu image response contains no image data"), types.ErrorCodeBadResponseBody, http.StatusBadGateway)
 		}
 
 		imageData := openAIImageData{
+			Url:     url,
 			B64Json: b64,
 		}
+		if responseFormat == "b64_json" {
+			imageData.Url = ""
+		}
 		payload.Data = append(payload.Data, imageData)
+	}
+	if info != nil && info.PriceData.UsePrice && len(payload.Data) > 0 {
+		info.PriceData.AddOtherRatio("n", float64(len(payload.Data)))
 	}
 
 	jsonResp, err := common.Marshal(payload)

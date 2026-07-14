@@ -1,12 +1,13 @@
 package zhipu_4v
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/QuantumNous/new-api/dto"
 )
 
-func requestOpenAI2Zhipu(request dto.GeneralOpenAIRequest) *dto.GeneralOpenAIRequest {
+func requestOpenAI2Zhipu(request dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRequest, error) {
 	messages := make([]dto.Message, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		if !message.IsStringContent() {
@@ -27,34 +28,43 @@ func requestOpenAI2Zhipu(request dto.GeneralOpenAIRequest) *dto.GeneralOpenAIReq
 			}
 			message.SetMediaContent(mediaMessages)
 		}
-		messages = append(messages, dto.Message{
-			Role:       message.Role,
-			Content:    message.Content,
-			ToolCalls:  message.ToolCalls,
-			ToolCallId: message.ToolCallId,
-		})
+		messages = append(messages, message)
 	}
-	str, ok := request.Stop.(string)
-	var Stop []string
-	if ok {
-		Stop = []string{str}
-	} else {
-		Stop, _ = request.Stop.([]string)
+	var stop []string
+	switch value := request.Stop.(type) {
+	case string:
+		if value != "" {
+			stop = []string{value}
+		}
+	case []string:
+		stop = value
+	case []any:
+		for _, item := range value {
+			if text, ok := item.(string); ok && text != "" {
+				stop = append(stop, text)
+			}
+		}
+	}
+	if request.ResponseFormat != nil && request.ResponseFormat.Type != "" &&
+		request.ResponseFormat.Type != "text" && request.ResponseFormat.Type != "json_object" {
+		return nil, fmt.Errorf("zhipu response_format type %q is unsupported", request.ResponseFormat.Type)
 	}
 	out := &dto.GeneralOpenAIRequest{
-		Model:       request.Model,
-		Stream:      request.Stream,
-		Messages:    messages,
-		Temperature: request.Temperature,
-		TopP:        request.TopP,
-		Stop:        Stop,
-		Tools:       request.Tools,
-		ToolChoice:  request.ToolChoice,
-		THINKING:    request.THINKING,
+		Model:           request.Model,
+		Stream:          request.Stream,
+		Messages:        messages,
+		ReasoningEffort: request.ReasoningEffort,
+		Temperature:     request.Temperature,
+		TopP:            request.TopP,
+		Stop:            stop,
+		ResponseFormat:  request.ResponseFormat,
+		Tools:           request.Tools,
+		ToolChoice:      request.ToolChoice,
+		THINKING:        request.THINKING,
 	}
 	if request.MaxTokens != nil || request.MaxCompletionTokens != nil {
 		maxTokens := request.GetMaxTokens()
 		out.MaxTokens = &maxTokens
 	}
-	return out
+	return out, nil
 }
