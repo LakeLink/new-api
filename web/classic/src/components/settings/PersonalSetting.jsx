@@ -34,6 +34,7 @@ import {
 import { UserContext } from '../../context/User';
 import { Modal } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
+import { clearPlaygroundData } from '../playground/configStorage';
 
 // 导入子组件
 import UserInfoHeader from './personal/components/UserInfoHeader';
@@ -116,6 +117,9 @@ const PersonalSetting = () => {
   const visiblePasskeyVerificationMethods = passkeyRequiredVerificationMethod
     ? {
         ...passkeyVerificationMethods,
+        hasPassword:
+          passkeyRequiredVerificationMethod === 'password' &&
+          passkeyVerificationMethods.hasPassword,
         has2FA:
           passkeyRequiredVerificationMethod === '2fa' &&
           passkeyVerificationMethods.has2FA,
@@ -239,19 +243,17 @@ const PersonalSetting = () => {
 
   const startPasskeyManagementVerification = async (apiCall, options = {}) => {
     const methods = await checkPasskeyVerificationMethods();
-    const requiredMethod = methods.has2FA
-      ? '2fa'
-      : methods.hasPasskey
-        ? 'passkey'
-        : null;
+    let requiredMethod = null;
+    if (methods.has2FA) {
+      requiredMethod = '2fa';
+    } else if (methods.hasPasskey && methods.passkeySupported) {
+      requiredMethod = 'passkey';
+    } else if (methods.hasPassword) {
+      requiredMethod = 'password';
+    }
 
     if (!requiredMethod) {
       showError(t('您需要先启用两步验证或 Passkey 才能执行此操作'));
-      return;
-    }
-
-    if (requiredMethod === 'passkey' && !methods.passkeySupported) {
-      showInfo(t('当前设备不支持 Passkey'));
       return;
     }
 
@@ -264,21 +266,7 @@ const PersonalSetting = () => {
   };
 
   const startPasskeyRegistration = async () => {
-    const methods = await checkPasskeyVerificationMethods();
-    if (!methods.has2FA) {
-      try {
-        await registerPasskey();
-      } catch (error) {
-        showError(error.message || t('Passkey 注册失败，请重试'));
-      }
-      return;
-    }
-
-    setPasskeyRequiredVerificationMethod('2fa');
-    await startPasskeyVerification(registerPasskey, {
-      preferredMethod: '2fa',
-      title: t('安全验证'),
-    });
+    await startPasskeyManagementVerification(registerPasskey);
   };
 
   const registerPasskey = async () => {
@@ -388,7 +376,12 @@ const PersonalSetting = () => {
 
     if (success) {
       showSuccess(t('账户已删除！'));
-      await API.get('/api/user/logout');
+      try {
+        await API.get('/api/user/logout', { skipErrorHandler: true });
+      } catch {
+        // The account is already deleted; continue local cleanup.
+      }
+      clearPlaygroundData(userState?.user?.id);
       userDispatch({ type: 'logout' });
       localStorage.removeItem('user');
       navigate('/login');

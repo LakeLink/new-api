@@ -28,6 +28,7 @@ import { normalizeLanguage } from '../../i18n/language';
 import { useIsMobile } from './useIsMobile';
 import { useSidebarCollapsed } from './useSidebarCollapsed';
 import { useMinimumLoadingTime } from './useMinimumLoadingTime';
+import { clearPlaygroundData } from '../../components/playground/configStorage';
 
 export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
   const { t, i18n } = useTranslation();
@@ -37,7 +38,9 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
   const [logoLoaded, setLogoLoaded] = useState(false);
   const navigate = useNavigate();
-  const [currentLang, setCurrentLang] = useState(normalizeLanguage(i18n.language));
+  const [currentLang, setCurrentLang] = useState(
+    normalizeLanguage(i18n.language),
+  );
   const location = useLocation();
 
   const loading = statusState?.status === undefined;
@@ -140,12 +143,17 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
 
   // Actions
   const logout = useCallback(async () => {
-    await API.get('/api/user/logout');
+    try {
+      await API.get('/api/user/logout', { skipErrorHandler: true });
+    } catch {
+      // Local sensitive state must still be cleared if logout is unavailable.
+    }
     showSuccess(t('注销成功!'));
+    clearPlaygroundData(userState?.user?.id);
     userDispatch({ type: 'logout' });
     localStorage.removeItem('user');
     navigate('/login');
-  }, [navigate, t, userDispatch]);
+  }, [navigate, t, userDispatch, userState?.user?.id]);
 
   const handleLanguageChange = useCallback(
     async (lang) => {

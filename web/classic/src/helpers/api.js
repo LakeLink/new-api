@@ -25,6 +25,7 @@ import {
 } from './utils';
 import axios from 'axios';
 import { MESSAGE_ROLES } from '../constants/playground.constants';
+import { clearPlaygroundData } from '../components/playground/configStorage';
 
 export let API = axios.create({
   baseURL: import.meta.env.VITE_REACT_APP_SERVER_URL
@@ -35,7 +36,6 @@ export let API = axios.create({
     'Cache-Control': 'no-store',
   },
 });
-
 
 function redirectToOAuthUrl(url, options = {}) {
   const { openInNewTab = false } = options;
@@ -48,7 +48,6 @@ function redirectToOAuthUrl(url, options = {}) {
 
   window.location.assign(targetUrl);
 }
-
 
 function patchAPIInstance(instance) {
   const originalGet = instance.get.bind(instance);
@@ -262,6 +261,7 @@ async function prepareOAuthState(options = {}) {
     try {
       await API.get('/api/user/logout', { skipErrorHandler: true });
     } catch (err) {}
+    clearPlaygroundData();
     localStorage.removeItem('user');
     updateAPI();
   }

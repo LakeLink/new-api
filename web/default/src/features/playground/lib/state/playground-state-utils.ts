@@ -28,16 +28,22 @@ export type MessageStateUpdater =
   | Message[]
   | ((previousMessages: Message[]) => Message[])
 
-export function getInitialPlaygroundConfig(): PlaygroundConfig {
-  return { ...DEFAULT_CONFIG, ...loadConfig() }
+export function getInitialPlaygroundConfig(
+  userId: number | null | undefined
+): PlaygroundConfig {
+  return { ...DEFAULT_CONFIG, ...loadConfig(userId) }
 }
 
-export function getInitialParameterEnabled(): ParameterEnabled {
-  return { ...DEFAULT_PARAMETER_ENABLED, ...loadParameterEnabled() }
+export function getInitialParameterEnabled(
+  userId: number | null | undefined
+): ParameterEnabled {
+  return { ...DEFAULT_PARAMETER_ENABLED, ...loadParameterEnabled(userId) }
 }
 
-export function getInitialMessages(): Message[] {
-  return loadMessages() || []
+export function getInitialMessages(
+  userId: number | null | undefined
+): Message[] {
+  return loadMessages(userId) || []
 }
 
 export function applyMessageStateUpdate(

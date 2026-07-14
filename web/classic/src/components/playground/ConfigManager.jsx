@@ -27,6 +27,7 @@ import {
   clearConfig,
   hasStoredConfig,
   getConfigTimestamp,
+  saveConfig,
 } from './configStorage';
 
 const ConfigManager = ({
@@ -46,10 +47,7 @@ const ConfigManager = ({
         ...currentConfig,
         timestamp: new Date().toISOString(),
       };
-      localStorage.setItem(
-        'playground_config',
-        JSON.stringify(configWithTimestamp),
-      );
+      saveConfig(configWithTimestamp);
 
       exportConfig(currentConfig, messages);
       Toast.success({

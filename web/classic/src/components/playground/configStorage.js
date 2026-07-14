@@ -22,7 +22,35 @@ import {
   DEFAULT_CONFIG,
 } from '../../constants/playground.constants';
 
-const MESSAGES_STORAGE_KEY = 'playground_messages';
+const STORAGE_NAMESPACE = 'playground:classic:v2';
+const DEFAULT_STORAGE_NAMESPACE = 'playground:v2';
+
+const getCurrentUserId = () => {
+  try {
+    const savedUser = localStorage.getItem('user');
+    if (!savedUser) return null;
+    const userId = JSON.parse(savedUser)?.id;
+    return Number.isSafeInteger(userId) && userId > 0 ? userId : null;
+  } catch {
+    return null;
+  }
+};
+
+const getStorageKey = (kind, userId = getCurrentUserId()) => {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return null;
+  return `${STORAGE_NAMESPACE}:user:${userId}:${kind.toLowerCase()}`;
+};
+
+const discardOwnerlessLegacyData = () => {
+  for (const key of Object.values(STORAGE_KEYS)) {
+    localStorage.removeItem(key);
+  }
+};
+
+const prepareStorageKey = (kind) => {
+  discardOwnerlessLegacyData();
+  return getStorageKey(kind);
+};
 
 /**
  * 保存配置到 localStorage
@@ -30,11 +58,13 @@ const MESSAGES_STORAGE_KEY = 'playground_messages';
  */
 export const saveConfig = (config) => {
   try {
+    const key = prepareStorageKey('CONFIG');
+    if (!key) return;
     const configToSave = {
       ...config,
       timestamp: new Date().toISOString(),
     };
-    localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(configToSave));
+    localStorage.setItem(key, JSON.stringify(configToSave));
   } catch (error) {
     console.error('保存配置失败:', error);
   }
@@ -46,11 +76,13 @@ export const saveConfig = (config) => {
  */
 export const saveMessages = (messages) => {
   try {
+    const key = prepareStorageKey('MESSAGES');
+    if (!key) return;
     const messagesToSave = {
       messages,
       timestamp: new Date().toISOString(),
     };
-    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messagesToSave));
+    localStorage.setItem(key, JSON.stringify(messagesToSave));
   } catch (error) {
     console.error('保存消息失败:', error);
   }
@@ -62,7 +94,9 @@ export const saveMessages = (messages) => {
  */
 export const loadConfig = () => {
   try {
-    const savedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
+    const key = prepareStorageKey('CONFIG');
+    if (!key) return DEFAULT_CONFIG;
+    const savedConfig = localStorage.getItem(key);
     if (savedConfig) {
       const parsedConfig = JSON.parse(savedConfig);
       const parsedMaxTokens = parseInt(parsedConfig?.inputs?.max_tokens, 10);
@@ -102,7 +136,9 @@ export const loadConfig = () => {
  */
 export const loadMessages = () => {
   try {
-    const savedMessages = localStorage.getItem(STORAGE_KEYS.MESSAGES);
+    const key = prepareStorageKey('MESSAGES');
+    if (!key) return null;
+    const savedMessages = localStorage.getItem(key);
     if (savedMessages) {
       const parsedMessages = JSON.parse(savedMessages);
       return parsedMessages.messages || null;
@@ -119,8 +155,11 @@ export const loadMessages = () => {
  */
 export const clearConfig = () => {
   try {
-    localStorage.removeItem(STORAGE_KEYS.CONFIG);
-    localStorage.removeItem(STORAGE_KEYS.MESSAGES); // 同时清除消息
+    const configKey = getStorageKey('CONFIG');
+    const messagesKey = getStorageKey('MESSAGES');
+    if (configKey) localStorage.removeItem(configKey);
+    if (messagesKey) localStorage.removeItem(messagesKey);
+    discardOwnerlessLegacyData();
   } catch (error) {
     console.error('清除配置失败:', error);
   }
@@ -131,6 +170,8 @@ export const clearConfig = () => {
  */
 export const clearMessages = () => {
   try {
+    const key = getStorageKey('MESSAGES');
+    if (key) localStorage.removeItem(key);
     localStorage.removeItem(STORAGE_KEYS.MESSAGES);
   } catch (error) {
     console.error('清除消息失败:', error);
@@ -143,7 +184,8 @@ export const clearMessages = () => {
  */
 export const hasStoredConfig = () => {
   try {
-    return localStorage.getItem(STORAGE_KEYS.CONFIG) !== null;
+    const key = prepareStorageKey('CONFIG');
+    return key ? localStorage.getItem(key) !== null : false;
   } catch (error) {
     console.error('检查配置失败:', error);
     return false;
@@ -156,7 +198,9 @@ export const hasStoredConfig = () => {
  */
 export const getConfigTimestamp = () => {
   try {
-    const savedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
+    const key = prepareStorageKey('CONFIG');
+    if (!key) return null;
+    const savedConfig = localStorage.getItem(key);
     if (savedConfig) {
       const parsedConfig = JSON.parse(savedConfig);
       return parsedConfig.timestamp || null;
@@ -165,6 +209,28 @@ export const getConfigTimestamp = () => {
     console.error('获取配置时间戳失败:', error);
   }
   return null;
+};
+
+/**
+ * Clear playground content for the current account across both frontend
+ * themes. Call this before removing the locally stored user identity.
+ */
+export const clearPlaygroundData = (userId = getCurrentUserId()) => {
+  try {
+    if (Number.isSafeInteger(userId) && userId > 0) {
+      for (const kind of ['config', 'messages']) {
+        localStorage.removeItem(`${STORAGE_NAMESPACE}:user:${userId}:${kind}`);
+      }
+      for (const kind of ['config', 'messages', 'parameter_enabled']) {
+        localStorage.removeItem(
+          `${DEFAULT_STORAGE_NAMESPACE}:user:${userId}:${kind}`,
+        );
+      }
+    }
+    discardOwnerlessLegacyData();
+  } catch {
+    // Best-effort local cleanup; server-side logout proceeds independently.
+  }
 };
 
 /**

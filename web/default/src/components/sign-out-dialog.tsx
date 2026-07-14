@@ -30,7 +30,7 @@ interface SignOutDialogProps {
 
 export function SignOutDialog({ open, onOpenChange }: SignOutDialogProps) {
   const { t } = useTranslation()
-  const { auth } = useAuthStore()
+  const resetAuth = useAuthStore((state) => state.auth.reset)
 
   const handleSignOut = async () => {
     try {
@@ -38,7 +38,7 @@ export function SignOutDialog({ open, onOpenChange }: SignOutDialogProps) {
     } catch {
       /* empty */
     }
-    auth.reset()
+    resetAuth()
     try {
       if (typeof window !== 'undefined') {
         window.localStorage.removeItem('uid')

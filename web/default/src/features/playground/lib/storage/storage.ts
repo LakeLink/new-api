@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { MESSAGE_STATUS, STORAGE_KEYS } from '../../constants'
+import { MESSAGE_STATUS } from '../../constants'
 import type { PlaygroundConfig, ParameterEnabled, Message } from '../../types'
 import {
   finalizeMessage,
@@ -25,6 +25,12 @@ import {
 } from '../message/message-streaming-utils'
 import { completeAssistantTiming } from '../message/message-timing-utils'
 import { hasMessageContent } from '../message/message-utils'
+import {
+  clearPlaygroundData,
+  discardLegacyPlaygroundData,
+  getPlaygroundStorageKey,
+  type PlaygroundStorageKind,
+} from './playground-storage'
 import {
   MAX_LOADED_MESSAGE_CHARS,
   MAX_LOADED_MESSAGES_CHARS,
@@ -53,12 +59,12 @@ function readStoredValue(key: string): unknown | null {
   return JSON.parse(saved) as unknown
 }
 
-function readStoredMessagesValue(): unknown | null {
-  const saved = localStorage.getItem(STORAGE_KEYS.MESSAGES)
+function readStoredMessagesValue(key: string): unknown | null {
+  const saved = localStorage.getItem(key)
   if (!saved) return null
 
   if (saved.length > MAX_STORED_MESSAGES_BYTES) {
-    localStorage.removeItem(STORAGE_KEYS.MESSAGES)
+    localStorage.removeItem(key)
     return null
   }
 
@@ -84,6 +90,14 @@ function writeStoredValue<T>(key: string, data: T): void {
   }
 
   localStorage.setItem(key, JSON.stringify(payload))
+}
+
+function prepareStorageKey(
+  userId: number | null | undefined,
+  kind: PlaygroundStorageKind
+): string | null {
+  discardLegacyPlaygroundData()
+  return getPlaygroundStorageKey(userId, kind)
 }
 
 function trimMessages(messages: Message[]): Message[] {
@@ -278,9 +292,13 @@ function trimMessagesByContentSize(messages: Message[]): Message[] {
 /**
  * Load playground config from localStorage
  */
-export function loadConfig(): Partial<PlaygroundConfig> {
+export function loadConfig(
+  userId: number | null | undefined
+): Partial<PlaygroundConfig> {
   try {
-    const saved = readStoredValue(STORAGE_KEYS.CONFIG)
+    const key = prepareStorageKey(userId, 'CONFIG')
+    if (!key) return {}
+    const saved = readStoredValue(key)
     if (!saved) return {}
 
     return playgroundConfigSchema.parse(unwrapStoredValue(saved))
@@ -294,10 +312,15 @@ export function loadConfig(): Partial<PlaygroundConfig> {
 /**
  * Save playground config to localStorage
  */
-export function saveConfig(config: Partial<PlaygroundConfig>): void {
+export function saveConfig(
+  userId: number | null | undefined,
+  config: Partial<PlaygroundConfig>
+): void {
   try {
+    const key = prepareStorageKey(userId, 'CONFIG')
+    if (!key) return
     const parsed = playgroundConfigSchema.parse(config)
-    writeStoredValue(STORAGE_KEYS.CONFIG, parsed)
+    writeStoredValue(key, parsed)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to save config:', error)
@@ -307,9 +330,13 @@ export function saveConfig(config: Partial<PlaygroundConfig>): void {
 /**
  * Load parameter enabled state from localStorage
  */
-export function loadParameterEnabled(): Partial<ParameterEnabled> {
+export function loadParameterEnabled(
+  userId: number | null | undefined
+): Partial<ParameterEnabled> {
   try {
-    const saved = readStoredValue(STORAGE_KEYS.PARAMETER_ENABLED)
+    const key = prepareStorageKey(userId, 'PARAMETER_ENABLED')
+    if (!key) return {}
+    const saved = readStoredValue(key)
     if (!saved) return {}
 
     return parameterEnabledSchema.parse(unwrapStoredValue(saved))
@@ -324,11 +351,14 @@ export function loadParameterEnabled(): Partial<ParameterEnabled> {
  * Save parameter enabled state to localStorage
  */
 export function saveParameterEnabled(
+  userId: number | null | undefined,
   parameterEnabled: Partial<ParameterEnabled>
 ): void {
   try {
+    const key = prepareStorageKey(userId, 'PARAMETER_ENABLED')
+    if (!key) return
     const parsed = parameterEnabledSchema.parse(parameterEnabled)
-    writeStoredValue(STORAGE_KEYS.PARAMETER_ENABLED, parsed)
+    writeStoredValue(key, parsed)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to save parameter enabled:', error)
@@ -338,9 +368,13 @@ export function saveParameterEnabled(
 /**
  * Load messages from localStorage
  */
-export function loadMessages(): Message[] | null {
+export function loadMessages(
+  userId: number | null | undefined
+): Message[] | null {
   try {
-    const saved = readStoredMessagesValue()
+    const key = prepareStorageKey(userId, 'MESSAGES')
+    if (!key) return null
+    const saved = readStoredMessagesValue(key)
     if (!saved) return null
 
     const parsed = messagesSchema.parse(unwrapStoredValue(saved)) as Message[]
@@ -358,7 +392,7 @@ export function loadMessages(): Message[] | null {
       sizeTrimmed !== trimmed ||
       sanitized !== sizeTrimmed
     ) {
-      saveMessages(sanitized)
+      saveMessages(userId, sanitized)
     }
 
     return sanitized
@@ -372,27 +406,20 @@ export function loadMessages(): Message[] | null {
 /**
  * Save messages to localStorage
  */
-export function saveMessages(messages: Message[]): void {
+export function saveMessages(
+  userId: number | null | undefined,
+  messages: Message[]
+): void {
   try {
+    const key = prepareStorageKey(userId, 'MESSAGES')
+    if (!key) return
     const trimmed = trimMessages(messages)
     const parsed = messagesSchema.parse(trimmed) as Message[]
-    writeStoredValue(STORAGE_KEYS.MESSAGES, parsed)
+    writeStoredValue(key, parsed)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to save messages:', error)
   }
 }
 
-/**
- * Clear all playground data
- */
-export function clearPlaygroundData(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEYS.CONFIG)
-    localStorage.removeItem(STORAGE_KEYS.PARAMETER_ENABLED)
-    localStorage.removeItem(STORAGE_KEYS.MESSAGES)
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Failed to clear playground data:', error)
-  }
-}
+export { clearPlaygroundData }

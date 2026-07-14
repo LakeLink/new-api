@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { create } from 'zustand'
 
+import { clearPlaygroundData } from '@/features/playground/lib/storage/playground-storage'
 import type { AdminCapabilities } from '@/lib/admin-permissions'
 
 export type UserPermissions = {
@@ -96,6 +97,7 @@ export const useAuthStore = create<AuthState>()((set) => {
       reset: () =>
         set((state) => {
           if (typeof window !== 'undefined') {
+            clearPlaygroundData(state.auth.user?.id)
             window.localStorage.removeItem('user')
           }
           return {
