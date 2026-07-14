@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -59,6 +60,14 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
 	if request == nil {
 		return nil, errors.New("request is nil")
+	}
+	if request.WebSearchOptions != nil && request.WebSearchOptions.SearchType != "" {
+		switch strings.ToLower(request.WebSearchOptions.SearchType) {
+		case "fast", "pro", "auto":
+			request.WebSearchOptions.SearchType = strings.ToLower(request.WebSearchOptions.SearchType)
+		default:
+			return nil, fmt.Errorf("unsupported Perplexity search_type %q", request.WebSearchOptions.SearchType)
+		}
 	}
 	if lo.FromPtrOr(request.TopP, 0) >= 1 {
 		request.TopP = lo.ToPtr(0.99)

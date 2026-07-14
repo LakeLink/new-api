@@ -18,6 +18,7 @@ func requestOpenAI2Perplexity(request dto.GeneralOpenAIRequest) *dto.GeneralOpen
 		TopP:                   request.TopP,
 		FrequencyPenalty:       request.FrequencyPenalty,
 		PresencePenalty:        request.PresencePenalty,
+		WebSearchOptions:       request.WebSearchOptions,
 		SearchDomainFilter:     request.SearchDomainFilter,
 		SearchRecencyFilter:    request.SearchRecencyFilter,
 		ReturnImages:           request.ReturnImages,
