@@ -1,16 +1,19 @@
 package controller
 
 import (
+	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
+const paymentWebhookMaxBodyBytes int64 = 1 << 20
+
 func isStripeTopUpEnabled() bool {
 	return strings.TrimSpace(setting.StripeApiSecret) != "" &&
 		strings.TrimSpace(setting.StripeWebhookSecret) != "" &&
-		strings.TrimSpace(setting.StripePriceId) != ""
+		setting.StripeUnitPrice > 0 && !math.IsNaN(setting.StripeUnitPrice) && !math.IsInf(setting.StripeUnitPrice, 0)
 }
 
 func isStripeWebhookConfigured() bool {
@@ -18,7 +21,7 @@ func isStripeWebhookConfigured() bool {
 }
 
 func isStripeWebhookEnabled() bool {
-	return isStripeTopUpEnabled()
+	return isStripeWebhookConfigured()
 }
 
 func isCreemTopUpEnabled() bool {
@@ -33,7 +36,7 @@ func isCreemWebhookConfigured() bool {
 }
 
 func isCreemWebhookEnabled() bool {
-	return isCreemTopUpEnabled() && isCreemWebhookConfigured()
+	return isCreemWebhookConfigured() || setting.CreemTestMode
 }
 
 func isWaffoTopUpEnabled() bool {
@@ -57,7 +60,7 @@ func isWaffoWebhookConfigured() bool {
 }
 
 func isWaffoWebhookEnabled() bool {
-	return isWaffoTopUpEnabled()
+	return isWaffoWebhookConfigured()
 }
 
 func isWaffoPancakeTopUpEnabled() bool {
@@ -69,11 +72,13 @@ func isWaffoPancakeTopUpEnabled() bool {
 }
 
 func isWaffoPancakeWebhookConfigured() bool {
-	return isWaffoPancakeTopUpEnabled()
+	// Pancake webhook verification uses Waffo's bundled environment public
+	// keys and does not depend on credentials used to create new checkouts.
+	return true
 }
 
 func isWaffoPancakeWebhookEnabled() bool {
-	return isWaffoPancakeTopUpEnabled()
+	return isWaffoPancakeWebhookConfigured()
 }
 
 func isEpayTopUpEnabled() bool {
@@ -87,5 +92,5 @@ func isEpayWebhookConfigured() bool {
 }
 
 func isEpayWebhookEnabled() bool {
-	return isEpayTopUpEnabled()
+	return isEpayWebhookConfigured()
 }

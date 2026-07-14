@@ -160,9 +160,6 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if req.Plan.DurationUnit == "" {
 		req.Plan.DurationUnit = model.SubscriptionDurationMonth
 	}
-	if req.Plan.DurationValue <= 0 && req.Plan.DurationUnit != model.SubscriptionDurationCustom {
-		req.Plan.DurationValue = 1
-	}
 	if req.Plan.MaxPurchasePerUser < 0 {
 		common.ApiErrorMsg(c, "购买上限不能为负数")
 		return
@@ -188,6 +185,10 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 	req.Plan.QuotaResetPeriod = model.NormalizeResetPeriod(req.Plan.QuotaResetPeriod)
 	if req.Plan.QuotaResetPeriod == model.SubscriptionResetCustom && req.Plan.QuotaResetCustomSeconds <= 0 {
 		common.ApiErrorMsg(c, "自定义重置周期需大于0秒")
+		return
+	}
+	if err := model.ValidateSubscriptionPlanForPurchase(&req.Plan); err != nil {
+		common.ApiErrorMsg(c, "套餐时长或价格配置无效")
 		return
 	}
 	err := model.DB.Create(&req.Plan).Error
@@ -230,9 +231,6 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 	if req.Plan.DurationUnit == "" {
 		req.Plan.DurationUnit = model.SubscriptionDurationMonth
 	}
-	if req.Plan.DurationValue <= 0 && req.Plan.DurationUnit != model.SubscriptionDurationCustom {
-		req.Plan.DurationValue = 1
-	}
 	if req.Plan.MaxPurchasePerUser < 0 {
 		common.ApiErrorMsg(c, "购买上限不能为负数")
 		return
@@ -258,6 +256,10 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 	req.Plan.QuotaResetPeriod = model.NormalizeResetPeriod(req.Plan.QuotaResetPeriod)
 	if req.Plan.QuotaResetPeriod == model.SubscriptionResetCustom && req.Plan.QuotaResetCustomSeconds <= 0 {
 		common.ApiErrorMsg(c, "自定义重置周期需大于0秒")
+		return
+	}
+	if err := model.ValidateSubscriptionPlanForPurchase(&req.Plan); err != nil {
+		common.ApiErrorMsg(c, "套餐时长或价格配置无效")
 		return
 	}
 
