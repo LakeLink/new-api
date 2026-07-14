@@ -44,11 +44,15 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
 
     const has2FA =
       Boolean(twoFAResponse?.success) && Boolean(twoFAResponse?.data?.enabled)
+    const hasPassword =
+      Boolean(twoFAResponse?.success) &&
+      Boolean(twoFAResponse?.data?.has_password)
     const hasPasskey =
       Boolean(passkeyResponse?.success) &&
       Boolean(passkeyResponse?.data?.enabled)
 
     return {
+      hasPassword,
       has2FA,
       hasPasskey,
       passkeySupported,
@@ -57,6 +61,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
     // eslint-disable-next-line no-console
     console.error('[Secure Verification] Failed to check methods', error)
     return {
+      hasPassword: false,
       has2FA: false,
       hasPasskey: false,
       passkeySupported: false,
@@ -72,12 +77,29 @@ export async function verify(
   code?: string
 ): Promise<void> {
   switch (method) {
+    case 'password':
+      return verifyPassword(code)
     case '2fa':
       return verifyTwoFA(code)
     case 'passkey':
       return verifyPasskey()
     default:
       throw new Error(`Unsupported verification method: ${method}`)
+  }
+}
+
+async function verifyPassword(password?: string | null): Promise<void> {
+  if (!password) {
+    throw new Error('Please enter your current password')
+  }
+
+  const res = await api.post('/api/verify', {
+    method: 'password',
+    password,
+  })
+
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'Verification failed')
   }
 }
 

@@ -259,6 +259,12 @@ func Disable2FA(c *gin.Context) {
 func Get2FAStatus(c *gin.Context) {
 	userId := c.GetInt("id")
 
+	user, err := model.GetUserById(userId, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
 	twoFA, err := model.GetTwoFAByUserId(userId)
 	if err != nil {
 		common.ApiError(c, err)
@@ -266,8 +272,9 @@ func Get2FAStatus(c *gin.Context) {
 	}
 
 	status := map[string]interface{}{
-		"enabled": false,
-		"locked":  false,
+		"enabled":      false,
+		"locked":       false,
+		"has_password": user.Password != "",
 	}
 
 	if twoFA != nil {

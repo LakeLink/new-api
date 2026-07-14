@@ -95,6 +95,8 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     if (!restrictedMethod) return verificationMethods
     return {
       ...verificationMethods,
+      hasPassword:
+        restrictedMethod === 'password' && verificationMethods.hasPassword,
       has2FA: restrictedMethod === '2fa' && verificationMethods.has2FA,
       hasPasskey:
         restrictedMethod === 'passkey' && verificationMethods.hasPasskey,
@@ -108,20 +110,22 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     }
 
     const methods = await fetchVerificationMethods()
-    if (!methods.has2FA) {
-      // Without 2FA enabled, register directly. The browser-level Passkey prompt
-      // is itself a strong proof of presence, so no extra verification is needed.
-      await register()
-      return
+    let required: VerificationMethod = 'password'
+    if (methods.has2FA) {
+      required = '2fa'
+    } else if (methods.hasPasskey && methods.passkeySupported) {
+      required = 'passkey'
     }
-
-    setRestrictedMethod('2fa')
+    setRestrictedMethod(required)
     await startVerification(register, {
-      preferredMethod: '2fa',
+      preferredMethod: required,
       title: t('Security verification'),
-      description: t(
-        'Confirm your identity with Two-factor Authentication before registering a Passkey.'
-      ),
+      description:
+        required === '2fa'
+          ? t(
+              'Confirm your identity with Two-factor Authentication before registering a Passkey.'
+            )
+          : t('Confirm your identity before registering a Passkey.'),
     })
   }, [fetchVerificationMethods, register, startVerification, supported, t])
 
@@ -130,8 +134,10 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     let required: VerificationMethod | null = null
     if (methods.has2FA) {
       required = '2fa'
-    } else if (methods.hasPasskey) {
+    } else if (methods.hasPasskey && methods.passkeySupported) {
       required = 'passkey'
+    } else if (methods.hasPassword) {
+      required = 'password'
     }
 
     if (!required) {
@@ -140,11 +146,6 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
           'Please enable Two-factor Authentication or Passkey before proceeding'
         )
       )
-      return
-    }
-
-    if (required === 'passkey' && !methods.passkeySupported) {
-      toast.info(t('This device does not support Passkey'))
       return
     }
 

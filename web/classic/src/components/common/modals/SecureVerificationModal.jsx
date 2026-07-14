@@ -59,7 +59,8 @@ const SecureVerificationModal = ({
   const [isAnimating, setIsAnimating] = useState(false);
   const [verifySuccess, setVerifySuccess] = useState(false);
 
-  const { has2FA, hasPasskey, passkeySupported } = verificationMethods;
+  const { hasPassword, has2FA, hasPasskey, passkeySupported } =
+    verificationMethods;
   const { method, loading, code } = verificationState;
 
   useEffect(() => {
@@ -72,7 +73,12 @@ const SecureVerificationModal = ({
   }, [visible]);
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && code.trim() && !loading && method === '2fa') {
+    if (
+      e.key === 'Enter' &&
+      code &&
+      !loading &&
+      (method === 'password' || method === '2fa')
+    ) {
       onVerify(method, code);
     }
     if (e.key === 'Escape' && !loading) {
@@ -81,7 +87,7 @@ const SecureVerificationModal = ({
   };
 
   // 如果用户没有启用任何验证方式
-  if (visible && !has2FA && !hasPasskey) {
+  if (visible && !hasPassword && !has2FA && !hasPasskey) {
     return (
       <Modal
         title={title || t('安全验证')}
@@ -159,6 +165,62 @@ const SecureVerificationModal = ({
           size='default'
           style={{ margin: 0 }}
         >
+          {hasPassword && (
+            <TabPane tab={t('密码')} itemKey='password'>
+              <div style={{ paddingTop: '20px' }}>
+                <div style={{ marginBottom: '12px' }}>
+                  <Input
+                    type='password'
+                    autoComplete='current-password'
+                    placeholder={t('请输入原密码')}
+                    value={code}
+                    onChange={onCodeChange}
+                    size='large'
+                    onKeyDown={handleKeyDown}
+                    autoFocus={method === 'password'}
+                    disabled={loading}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+
+                <Typography.Text
+                  type='tertiary'
+                  size='small'
+                  style={{
+                    display: 'block',
+                    marginBottom: '20px',
+                    fontSize: '13px',
+                    lineHeight: '1.5',
+                  }}
+                >
+                  {t('请输入您的密码')}
+                </Typography.Text>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    gap: '8px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <Button onClick={onCancel} disabled={loading}>
+                    {t('取消')}
+                  </Button>
+                  <Button
+                    theme='solid'
+                    type='primary'
+                    loading={loading}
+                    disabled={!code || loading}
+                    onClick={() => onVerify(method, code)}
+                  >
+                    {t('验证')}
+                  </Button>
+                </div>
+              </div>
+            </TabPane>
+          )}
+
           {has2FA && (
             <TabPane tab={t('两步验证')} itemKey='2fa'>
               <div style={{ paddingTop: '20px' }}>

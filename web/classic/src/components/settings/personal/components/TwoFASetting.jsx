@@ -40,6 +40,8 @@ import {
 import React, { useEffect, useState } from 'react';
 
 import { QRCodeSVG } from 'qrcode.react';
+import SecureVerificationModal from '../../../common/modals/SecureVerificationModal';
+import { useSecureVerification } from '../../../../hooks/common/useSecureVerification';
 
 const { Text, Paragraph } = Typography;
 
@@ -63,6 +65,16 @@ const TwoFASetting = ({ t }) => {
   const [backupCodes, setBackupCodes] = useState([]);
   const [confirmDisable, setConfirmDisable] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  const {
+    isModalVisible: isVerificationModalVisible,
+    verificationMethods,
+    verificationState,
+    startVerification,
+    executeVerification,
+    cancelVerification,
+    setVerificationCode: setSecureVerificationCode,
+    switchVerificationMethod,
+  } = useSecureVerification();
 
   // 获取2FA状态
   const fetchStatus = async () => {
@@ -81,7 +93,7 @@ const TwoFASetting = ({ t }) => {
   }, []);
 
   // 初始化2FA设置
-  const handleSetup2FA = async () => {
+  const setup2FA = async () => {
     setLoading(true);
     try {
       const res = await API.post('/api/user/2fa/setup');
@@ -96,6 +108,22 @@ const TwoFASetting = ({ t }) => {
       showError(t('设置2FA失败'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSetup2FA = async () => {
+    await startVerification(setup2FA, {
+      preferredMethod: 'password',
+      title: t('安全验证'),
+      description: t('请输入您的密码'),
+    });
+  };
+
+  const handleSecureVerification = async (method, code) => {
+    try {
+      await executeVerification(method, code);
+    } catch {
+      // useSecureVerification already displays the verification error.
     }
   };
 
@@ -716,6 +744,18 @@ const TwoFASetting = ({ t }) => {
           )}
         </div>
       </Modal>
+
+      <SecureVerificationModal
+        visible={isVerificationModalVisible}
+        verificationMethods={verificationMethods}
+        verificationState={verificationState}
+        onVerify={handleSecureVerification}
+        onCancel={cancelVerification}
+        onCodeChange={setSecureVerificationCode}
+        onMethodSwitch={switchVerificationMethod}
+        title={verificationState.title}
+        description={verificationState.description}
+      />
     </>
   );
 };

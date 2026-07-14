@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { API, showError } from '../helpers';
+import { API } from '../helpers';
 import {
   prepareCredentialRequestOptions,
   buildAssertionResult,
@@ -31,7 +31,7 @@ import {
 export class SecureVerificationService {
   /**
    * 检查用户可用的验证方式
-   * @returns {Promise<{has2FA: boolean, hasPasskey: boolean, passkeySupported: boolean}>}
+   * @returns {Promise<{hasPassword: boolean, has2FA: boolean, hasPasskey: boolean, passkeySupported: boolean}>}
    */
   static async checkAvailableVerificationMethods() {
     try {
@@ -52,25 +52,15 @@ export class SecureVerificationService {
       const has2FA =
         twoFAResponse.data?.success &&
         twoFAResponse.data?.data?.enabled === true;
+      const hasPassword =
+        twoFAResponse.data?.success &&
+        twoFAResponse.data?.data?.has_password === true;
       const hasPasskey =
         passkeyResponse.data?.success &&
         passkeyResponse.data?.data?.enabled === true;
 
-      console.log('has2FA calculation:', {
-        success: twoFAResponse.data?.success,
-        dataExists: !!twoFAResponse.data?.data,
-        enabled: twoFAResponse.data?.data?.enabled,
-        result: has2FA,
-      });
-
-      console.log('hasPasskey calculation:', {
-        success: passkeyResponse.data?.success,
-        dataExists: !!passkeyResponse.data?.data,
-        enabled: passkeyResponse.data?.data?.enabled,
-        result: hasPasskey,
-      });
-
       const result = {
+        hasPassword,
         has2FA,
         hasPasskey,
         passkeySupported,
@@ -80,10 +70,31 @@ export class SecureVerificationService {
     } catch (error) {
       console.error('Failed to check verification methods:', error);
       return {
+        hasPassword: false,
         has2FA: false,
         hasPasskey: false,
         passkeySupported: false,
       };
+    }
+  }
+
+  /**
+   * 执行当前密码验证
+   * @param {string} password - 当前账户密码
+   * @returns {Promise<void>}
+   */
+  static async verifyPassword(password) {
+    if (!password) {
+      throw new Error('请输入您的密码');
+    }
+
+    const verifyResponse = await API.post('/api/verify', {
+      method: 'password',
+      password,
+    });
+
+    if (!verifyResponse.data?.success) {
+      throw new Error(verifyResponse.data?.message || '验证失败');
     }
   }
 
@@ -168,12 +179,14 @@ export class SecureVerificationService {
 
   /**
    * 通用验证方法，根据验证类型执行相应的验证流程
-   * @param {string} method - 验证方式: '2fa' | 'passkey'
-   * @param {string} code - 2FA验证码（当method为'2fa'时必需）
+   * @param {string} method - 验证方式: 'password' | '2fa' | 'passkey'
+   * @param {string} code - 密码或2FA验证码
    * @returns {Promise<void>}
    */
   static async verify(method, code = '') {
     switch (method) {
+      case 'password':
+        return await this.verifyPassword(code);
       case '2fa':
         return await this.verify2FA(code);
       case 'passkey':

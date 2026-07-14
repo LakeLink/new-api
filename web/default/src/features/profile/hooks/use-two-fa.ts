@@ -29,6 +29,7 @@ import type { TwoFAStatus } from '../types'
 const DEFAULT_STATUS: TwoFAStatus = {
   enabled: false,
   locked: false,
+  has_password: false,
   backup_codes_remaining: 0,
 }
 

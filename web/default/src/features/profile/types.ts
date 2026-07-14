@@ -173,6 +173,7 @@ export interface BindingItem {
 export interface TwoFAStatus {
   enabled: boolean
   locked: boolean
+  has_password: boolean
   backup_codes_remaining: number
 }
 

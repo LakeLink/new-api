@@ -38,7 +38,7 @@ type VerificationStatusResponse struct {
 }
 
 // UniversalVerify 通用验证接口
-// 支持 2FA 和 Passkey 验证，验证成功后在 session 中记录时间戳
+// 支持密码、2FA 和 Passkey 验证，验证成功后在 session 中记录时间戳
 func UniversalVerify(c *gin.Context) {
 	userId := c.GetInt("id")
 	if userId == 0 {
@@ -128,7 +128,11 @@ func UniversalVerify(c *gin.Context) {
 	}
 
 	if !verified {
-		common.ApiError(c, fmt.Errorf("验证失败，请检查验证码"))
+		if req.Method == secureVerificationMethodPassword {
+			common.ApiError(c, fmt.Errorf("验证失败，请检查密码"))
+		} else {
+			common.ApiError(c, fmt.Errorf("验证失败，请检查验证码"))
+		}
 		return
 	}
 

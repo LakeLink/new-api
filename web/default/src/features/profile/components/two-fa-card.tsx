@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Shield, AlertTriangle, RefreshCw } from 'lucide-react'
+import { useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { StatusBadge } from '@/components/status-badge'
@@ -30,6 +31,11 @@ import {
 } from '@/components/ui/card'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+  type VerificationMethod,
+} from '@/features/auth/secure-verification'
 import { useDialogs } from '@/hooks/use-dialog'
 
 import { useTwoFA } from '../hooks'
@@ -51,6 +57,44 @@ export function TwoFACard({ loading: pageLoading }: TwoFACardProps) {
   const { t } = useTranslation()
   const { status, loading, refetch } = useTwoFA(!pageLoading)
   const dialogs = useDialogs<DialogKey>()
+  const openDialog = dialogs.open
+  const {
+    open: verificationOpen,
+    setOpen: setVerificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    startVerification,
+    executeVerification,
+    cancel: cancelVerification,
+    setCode,
+    switchMethod,
+  } = useSecureVerification()
+
+  const handleEnable = useCallback(async () => {
+    await startVerification(
+      async () => {
+        openDialog('setup')
+      },
+      {
+        preferredMethod: 'password',
+        title: t('Security verification'),
+        description: t(
+          'Enter your current password before setting up Two-factor Authentication.'
+        ),
+      }
+    )
+  }, [openDialog, startVerification, t])
+
+  const handleDialogVerify = useCallback(
+    async (method: VerificationMethod, code?: string) => {
+      try {
+        await executeVerification(method, code)
+      } catch {
+        // Errors are already shown by the secure-verification hook.
+      }
+    },
+    [executeVerification]
+  )
 
   if (pageLoading || loading) {
     return (
@@ -126,7 +170,7 @@ export function TwoFACard({ loading: pageLoading }: TwoFACardProps) {
               {!status.enabled && (
                 <Button
                   className='w-full sm:w-auto xl:w-full 2xl:w-auto'
-                  onClick={() => dialogs.open('setup')}
+                  onClick={handleEnable}
                 >
                   {t('Enable')}
                 </Button>
@@ -181,6 +225,19 @@ export function TwoFACard({ loading: pageLoading }: TwoFACardProps) {
           open ? dialogs.open('backup') : dialogs.close('backup')
         }
         onSuccess={refetch}
+      />
+
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(next) =>
+          next ? setVerificationOpen(true) : cancelVerification()
+        }
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={handleDialogVerify}
+        onCancel={cancelVerification}
+        onCodeChange={setCode}
+        onMethodChange={switchMethod}
       />
     </>
   )
