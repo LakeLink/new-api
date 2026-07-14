@@ -33,6 +33,11 @@ func DecompressRequestMiddleware() gin.HandlerFunc {
 			maxMB = 32
 		}
 		maxBytes := int64(maxMB) << 20
+		if c.Request.ContentLength > maxBytes {
+			_ = c.Request.Body.Close()
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return
+		}
 
 		origBody := c.Request.Body
 		wrapMaxBytes := func(body io.ReadCloser) io.ReadCloser {

@@ -215,6 +215,29 @@ func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
 	require.Empty(t, decodeUserModelsResponse(t, vipRecorder))
 }
 
+func TestListModelsReturnsEmptyAnthropicPageWithoutPanicking(t *testing.T) {
+	setupModelListControllerTestDB(t)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+
+	ListModels(ctx, constant.ChannelTypeAnthropic)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload struct {
+		Data    []dto.AnthropicModel `json:"data"`
+		FirstID *string              `json:"first_id"`
+		LastID  *string              `json:"last_id"`
+		HasMore bool                 `json:"has_more"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.Empty(t, payload.Data)
+	require.Nil(t, payload.FirstID)
+	require.Nil(t, payload.LastID)
+	require.False(t, payload.HasMore)
+}
+
 func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 	withSelfUseModeDisabled(t)
 	withTieredBillingConfig(t, map[string]string{

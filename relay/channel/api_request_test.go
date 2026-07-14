@@ -2,10 +2,14 @@ package channel
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -47,6 +51,42 @@ func TestGetRelayCtxUsesRelayCancellationAndRequestFallback(t *testing.T) {
 
 	got = getRelayCtx(nil, nil)
 	require.NoError(t, got.Err())
+}
+
+func TestLimitUpstreamResponseBodyBoundsBufferedAndErrorResponses(t *testing.T) {
+	oldLimit := constant.MaxUpstreamResponseBodyMB
+	constant.MaxUpstreamResponseBodyMB = 1
+	t.Cleanup(func() { constant.MaxUpstreamResponseBodyMB = oldLimit })
+	tooLargeBody := strings.Repeat("x", (1<<20)+1)
+
+	for _, tt := range []struct {
+		name       string
+		isStream   bool
+		statusCode int
+		wantError  bool
+	}{
+		{name: "buffered success", statusCode: http.StatusOK, wantError: true},
+		{name: "stream error", isStream: true, statusCode: http.StatusBadRequest, wantError: true},
+		{name: "stream success remains incremental", isStream: true, statusCode: http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: tt.statusCode,
+				Body:       io.NopCloser(strings.NewReader(tooLargeBody)),
+			}
+			limitUpstreamResponseBody(resp, &relaycommon.RelayInfo{IsStream: tt.isStream})
+			body, err := io.ReadAll(resp.Body)
+			if tt.wantError {
+				var maxBytesError *http.MaxBytesError
+				require.Error(t, err)
+				require.True(t, errors.As(err, &maxBytesError))
+				require.Len(t, body, 1<<20)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, body, len(tooLargeBody))
+			}
+		})
+	}
 }
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {

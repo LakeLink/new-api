@@ -19,6 +19,7 @@ import (
 
 const KeyRequestBody = "key_request_body"
 const KeyBodyStorage = "key_body_storage"
+const keyMultipartForms = "key_multipart_forms"
 
 var ErrRequestBodyTooLarge = errors.New("request body too large")
 
@@ -103,6 +104,24 @@ func CleanupBodyStorage(c *gin.Context) {
 		}
 		c.Set(KeyBodyStorage, nil)
 	}
+}
+
+// CleanupMultipartForms removes any temporary files created while reparsing a
+// reusable multipart request. A request may be parsed more than once by token
+// counting and provider conversion, so every returned form is tracked.
+func CleanupMultipartForms(c *gin.Context) {
+	value, ok := c.Get(keyMultipartForms)
+	if !ok || value == nil {
+		return
+	}
+	forms, ok := value.([]*multipart.Form)
+	if !ok {
+		return
+	}
+	for _, form := range forms {
+		_ = form.RemoveAll()
+	}
+	c.Set(keyMultipartForms, nil)
 }
 
 func UnmarshalBodyReusable(c *gin.Context, v any) error {
@@ -284,9 +303,15 @@ func ParseMultipartFormReusable(c *gin.Context) (*multipart.Form, error) {
 
 	// Reset request body
 	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
+		_ = form.RemoveAll()
 		return nil, seekErr
 	}
 	c.Request.Body = io.NopCloser(storage)
+	var forms []*multipart.Form
+	if existing, ok := c.Get(keyMultipartForms); ok && existing != nil {
+		forms, _ = existing.([]*multipart.Form)
+	}
+	c.Set(keyMultipartForms, append(forms, form))
 	return form, nil
 }
 

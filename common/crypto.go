@@ -3,6 +3,7 @@ package common
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 
 	"golang.org/x/crypto/bcrypt"
@@ -17,6 +18,19 @@ func GenerateHMACWithKey(key []byte, data string) string {
 func GenerateHMAC(data string) string {
 	h := hmac.New(sha256.New, []byte(CryptoSecret))
 	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// GenerateHMACParts hashes length-delimited strings without concatenating
+// large payloads in memory or allowing ambiguous part boundaries.
+func GenerateHMACParts(parts ...string) string {
+	h := hmac.New(sha256.New, []byte(CryptoSecret))
+	var length [8]byte
+	for _, part := range parts {
+		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
+		_, _ = h.Write(length[:])
+		_, _ = h.Write([]byte(part))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

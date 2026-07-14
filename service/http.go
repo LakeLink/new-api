@@ -13,6 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var hopByHopResponseHeaders = map[string]struct{}{
+	"connection":          {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"proxy-connection":    {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
 func CloseResponseBodyGracefully(httpResponse *http.Response) {
 	if httpResponse == nil || httpResponse.Body == nil {
 		return
@@ -29,7 +41,10 @@ func CloseResponseBodyGracefully(httpResponse *http.Response) {
 // ID). When the upstream header is X-Oneapi-Request-Id, the value is captured
 // into the Gin context for later logging.
 func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
-	if strings.EqualFold(k, "Content-Length") {
+	if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Set-Cookie") {
+		return false
+	}
+	if _, blocked := hopByHopResponseHeaders[strings.ToLower(k)]; blocked {
 		return false
 	}
 	if strings.EqualFold(k, common.RequestIdKey) {
@@ -39,6 +54,31 @@ func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
 		return false
 	}
 	return true
+}
+
+// CopyUpstreamResponseHeaders copies end-to-end response headers while
+// preserving repeated values. Hop-by-hop fields, upstream cookies, and fields
+// nominated by Connection are never forwarded by the gateway.
+func CopyUpstreamResponseHeaders(c *gin.Context, headers http.Header) {
+	if c == nil || c.Writer == nil {
+		return
+	}
+	connectionHeaders := make(map[string]struct{})
+	for _, value := range headers.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				connectionHeaders[strings.ToLower(name)] = struct{}{}
+			}
+		}
+	}
+	for name, values := range headers {
+		if _, blocked := connectionHeaders[strings.ToLower(name)]; blocked || !ShouldCopyUpstreamHeader(c, name, values) {
+			continue
+		}
+		for _, value := range values {
+			c.Writer.Header().Add(name, value)
+		}
+	}
 }
 
 func IOCopyBytesGracefully(c *gin.Context, src *http.Response, data []byte) {
@@ -53,12 +93,7 @@ func IOCopyBytesGracefully(c *gin.Context, src *http.Response, data []byte) {
 	// So the httpClient will be confused by the response.
 	// For example, Postman will report error, and we cannot check the response at all.
 	if src != nil {
-		for k, v := range src.Header {
-			if !ShouldCopyUpstreamHeader(c, k, v) {
-				continue
-			}
-			c.Writer.Header().Set(k, v[0])
-		}
+		CopyUpstreamResponseHeaders(c, src.Header)
 	}
 
 	// set Content-Length header manually BEFORE calling WriteHeader

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
+	systemconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -491,6 +492,20 @@ func bindRelayContext(c *gin.Context, req *http.Request, info *common.RelayInfo)
 	return req.WithContext(getRelayCtx(c, info)), nil
 }
 
+func limitUpstreamResponseBody(resp *http.Response, info *common.RelayInfo) {
+	if resp == nil || resp.Body == nil || info == nil || (info.IsStream && resp.StatusCode < http.StatusBadRequest) {
+		return
+	}
+	maxMB := systemconstant.MaxUpstreamResponseBodyMB
+	if maxMB <= 0 {
+		maxMB = 128
+	}
+	// This is an upstream response body, not the inbound server request body,
+	// so no downstream ResponseWriter should receive MaxBytesReader's request-
+	// too-large side effects.
+	resp.Body = http.MaxBytesReader(nil, resp.Body, int64(maxMB)<<20)
+}
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	var err error
 	req, err = bindRelayContext(c, req, info)
@@ -537,6 +552,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if resp == nil {
 		return nil, errors.New("resp is nil")
 	}
+	// Most non-stream provider handlers buffer the response before validating
+	// it. Bound that shared path centrally so a malicious or broken upstream
+	// cannot force an unbounded allocation. Streaming success bodies remain
+	// incremental; error bodies are always bounded.
+	limitUpstreamResponseBody(resp, info)
 
 	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)

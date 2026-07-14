@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -81,8 +80,14 @@ func CoverPlusActionToNormalAction(midjRequest *dto.MidjourneyRequest) *dto.Midj
 		return MidjourneyErrorWrapper(constant.MjRequestError, "custom_id_is_required")
 	}
 	splits := strings.Split(customId, "::")
+	if len(splits) < 2 {
+		return MidjourneyErrorWrapper(constant.MjRequestError, "invalid_custom_id")
+	}
 	var action string
 	if splits[1] == "JOB" {
+		if len(splits) < 3 {
+			return MidjourneyErrorWrapper(constant.MjRequestError, "invalid_custom_id")
+		}
 		action = splits[2]
 	} else {
 		action = splits[1]
@@ -92,8 +97,11 @@ func CoverPlusActionToNormalAction(midjRequest *dto.MidjourneyRequest) *dto.Midj
 		return MidjourneyErrorWrapper(constant.MjRequestError, "unknown_action")
 	}
 	if strings.Contains(action, "upsample") {
+		if len(splits) < 4 {
+			return MidjourneyErrorWrapper(constant.MjRequestError, "invalid_custom_id")
+		}
 		index, err := strconv.Atoi(splits[3])
-		if err != nil {
+		if err != nil || index < 1 || index > 4 {
 			return MidjourneyErrorWrapper(constant.MjRequestError, "index_parse_failed")
 		}
 		midjRequest.Index = index
@@ -101,8 +109,11 @@ func CoverPlusActionToNormalAction(midjRequest *dto.MidjourneyRequest) *dto.Midj
 	} else if strings.Contains(action, "variation") {
 		midjRequest.Index = 1
 		if action == "variation" {
+			if len(splits) < 4 {
+				return MidjourneyErrorWrapper(constant.MjRequestError, "invalid_custom_id")
+			}
 			index, err := strconv.Atoi(splits[3])
-			if err != nil {
+			if err != nil || index < 1 || index > 4 {
 				return MidjourneyErrorWrapper(constant.MjRequestError, "index_parse_failed")
 			}
 			midjRequest.Index = index
@@ -140,16 +151,23 @@ func ConvertSimpleChangeParams(content string) *dto.MidjourneyRequest {
 	}
 
 	action := strings.ToLower(split[1])
+	if action == "" {
+		return nil
+	}
 	changeParams := &dto.MidjourneyRequest{}
 	changeParams.TaskId = split[0]
 
+	if action == "r" {
+		changeParams.Action = "REROLL"
+		return changeParams
+	}
+	if len(action) != 2 {
+		return nil
+	}
 	if action[0] == 'u' {
 		changeParams.Action = "UPSCALE"
 	} else if action[0] == 'v' {
 		changeParams.Action = "VARIATION"
-	} else if action == "r" {
-		changeParams.Action = "REROLL"
-		return changeParams
 	} else {
 		return nil
 	}
@@ -170,7 +188,7 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	var mapResult map[string]interface{}
 	// if get request, no need to read request body
 	if c.Request.Method != "GET" {
-		err := json.NewDecoder(c.Request.Body).Decode(&mapResult)
+		err := common.DecodeJson(c.Request.Body, &mapResult)
 		if err != nil {
 			return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "read_request_body_failed", http.StatusInternalServerError), nullBytes, err
 		}
@@ -192,7 +210,7 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 			mapResult["prompt"] = prompt
 		}
 	}
-	reqBody, err := json.Marshal(mapResult)
+	reqBody, err := common.Marshal(mapResult)
 	if err != nil {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "marshal_request_body_failed", http.StatusInternalServerError), nullBytes, err
 	}
@@ -230,6 +248,11 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	}
 	var midjResponse dto.MidjourneyResponse
 	var midjourneyUploadsResponse dto.MidjourneyUploadResponse
+	maxMB := constant.MaxUpstreamResponseBodyMB
+	if maxMB <= 0 {
+		maxMB = 128
+	}
+	resp.Body = http.MaxBytesReader(nil, resp.Body, int64(maxMB)<<20)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "read_response_body_failed", statusCode), nullBytes, err
@@ -239,9 +262,9 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	if len(responseBody) == 0 {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "empty_response_body", statusCode), responseBody, nil
 	} else {
-		err = json.Unmarshal(responseBody, &midjResponse)
+		err = common.Unmarshal(responseBody, &midjResponse)
 		if err != nil {
-			err2 := json.Unmarshal(responseBody, &midjourneyUploadsResponse)
+			err2 := common.Unmarshal(responseBody, &midjourneyUploadsResponse)
 			if err2 != nil {
 				return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "unmarshal_response_body_failed", statusCode), responseBody, err
 			}
