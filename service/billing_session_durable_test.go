@@ -30,7 +30,7 @@ func setupDurableBillingSessionTest(t *testing.T) *gorm.DB {
 	model.DB = db
 	model.LOG_DB = db
 	common.RedisEnabled = false
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.SystemTask{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSubscription{}, &model.SystemTask{}))
 	t.Cleanup(func() {
 		model.DB = oldDB
 		model.LOG_DB = oldLogDB
@@ -74,6 +74,55 @@ func TestBillingSessionSettlePersistsAtomicAdjustment(t *testing.T) {
 	assert.Equal(t, 370, token.RemainQuota)
 	assert.Equal(t, 130, token.UsedQuota)
 	assert.False(t, session.NeedsRefund())
+}
+
+func TestBillingSessionSettleReportsSubscriptionWalletOverflow(t *testing.T) {
+	db := setupDurableBillingSessionTest(t)
+	user := model.User{Username: "billing-session-overflow", Password: "password", Quota: 200, AffCode: "aff-session-overflow"}
+	require.NoError(t, db.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Key: "token-session-overflow", RemainQuota: 490, UsedQuota: 10}
+	require.NoError(t, db.Create(&token).Error)
+	subscription := model.UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: true,
+	}
+	require.NoError(t, db.Create(&subscription).Error)
+	info := &relaycommon.RelayInfo{
+		RequestId:                             "relay-subscription-overflow-request",
+		UserId:                                user.Id,
+		TokenId:                               token.Id,
+		TokenKey:                              token.Key,
+		BillingSource:                         BillingSourceSubscription,
+		SubscriptionId:                        subscription.Id,
+		SubscriptionPreConsumed:               10,
+		SubscriptionAmountTotal:               100,
+		SubscriptionAmountUsedAfterPreConsume: 90,
+	}
+	session := &BillingSession{
+		relayInfo:        info,
+		funding:          &SubscriptionFunding{subscriptionId: subscription.Id, preConsumed: 10},
+		preConsumedQuota: 10,
+		tokenConsumed:    10,
+	}
+
+	require.NoError(t, session.Settle(40))
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&subscription, subscription.Id).Error)
+	require.NoError(t, db.First(&token, token.Id).Error)
+	assert.Equal(t, 180, user.Quota)
+	assert.Equal(t, int64(100), subscription.AmountUsed)
+	assert.Equal(t, 460, token.RemainQuota)
+	assert.Equal(t, 40, token.UsedQuota)
+	assert.Equal(t, int64(10), info.SubscriptionPostDelta)
+	assert.Equal(t, 20, info.SubscriptionWalletOverflow)
+
+	other := map[string]interface{}{}
+	appendBillingInfo(info, other)
+	assert.Equal(t, int64(20), other["subscription_consumed"])
+	assert.Equal(t, 20, other["subscription_wallet_overflow"])
+	assert.Equal(t, 20, other["wallet_quota_deducted"])
 }
 
 func TestBillingSessionRefundIsSynchronousAndIdempotent(t *testing.T) {

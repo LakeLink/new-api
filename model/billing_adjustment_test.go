@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
@@ -109,6 +110,22 @@ func TestBillingAdjustmentFailureRollsBackAndRemainsPending(t *testing.T) {
 	assert.NotEmpty(t, task.Error)
 }
 
+func TestBillingAdjustmentRejectsOutOfRangeDeltaBeforePersistence(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &SystemTask{})
+	_, err := EnqueueBillingAdjustment(BillingAdjustment{
+		RequestID:     "request-out-of-range-adjustment",
+		Kind:          BillingAdjustmentSettle,
+		FundingSource: BillingAdjustmentWallet,
+		UserID:        1,
+		FundingDelta:  common.MaxQuota + 1,
+	})
+	require.ErrorContains(t, err, "storage range")
+
+	var count int64
+	require.NoError(t, db.Model(&SystemTask{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestBillingAdjustmentSubscriptionRefundIsAtomicAndIdempotent(t *testing.T) {
 	db := setupBillingAdjustmentTestDB(t, &User{}, &Token{}, &UserSubscription{}, &SubscriptionPreConsumeRecord{}, &SystemTask{})
 	user := User{Username: "billing-subscription", Password: "password", Quota: 100, AffCode: "subscription-aff"}
@@ -139,7 +156,7 @@ func TestBillingAdjustmentSubscriptionRefundIsAtomicAndIdempotent(t *testing.T) 
 		ExtraReserved:         20,
 	})
 	require.NoError(t, err)
-	require.NoError(t, ProcessBillingAdjustment(taskID))
+	require.NoError(t, ProcessPendingBillingAdjustments(10))
 	require.NoError(t, ProcessBillingAdjustment(taskID))
 
 	require.NoError(t, db.First(&subscription, subscription.Id).Error)
@@ -149,6 +166,172 @@ func TestBillingAdjustmentSubscriptionRefundIsAtomicAndIdempotent(t *testing.T) 
 	assert.Equal(t, "refunded", record.Status)
 	assert.Equal(t, 500, token.RemainQuota)
 	assert.Equal(t, 0, token.UsedQuota)
+}
+
+func TestBillingAdjustmentSubscriptionSettlementSplitsWalletOverflow(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &User{}, &Token{}, &UserSubscription{}, &SystemTask{})
+	user := User{Username: "billing-subscription-overflow", Password: "password", Quota: 200, AffCode: "subscription-overflow-aff"}
+	require.NoError(t, db.Create(&user).Error)
+	token := Token{UserId: user.Id, Key: "subscription-overflow-token", RemainQuota: 100}
+	require.NoError(t, db.Create(&token).Error)
+	subscription := UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: true,
+	}
+	require.NoError(t, db.Create(&subscription).Error)
+
+	taskID, err := EnqueueBillingAdjustment(BillingAdjustment{
+		RequestID:      "request-subscription-overflow",
+		Kind:           BillingAdjustmentSettle,
+		FundingSource:  BillingAdjustmentSubscription,
+		UserID:         user.Id,
+		SubscriptionID: subscription.Id,
+		TokenID:        token.Id,
+		FundingDelta:   30,
+		TokenDelta:     30,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ProcessPendingBillingAdjustments(10))
+	require.NoError(t, ProcessBillingAdjustment(taskID))
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&subscription, subscription.Id).Error)
+	require.NoError(t, db.First(&token, token.Id).Error)
+	assert.Equal(t, 180, user.Quota)
+	assert.Equal(t, int64(100), subscription.AmountUsed)
+	assert.Equal(t, 70, token.RemainQuota)
+	assert.Equal(t, 30, token.UsedQuota)
+
+	result, err := ProcessBillingAdjustmentWithResult(taskID)
+	require.NoError(t, err)
+	assert.Equal(t, BillingAdjustmentResult{
+		SubscriptionDelta: 10,
+		WalletDelta:       20,
+		TokenDelta:        30,
+	}, result)
+}
+
+func TestBillingAdjustmentStrictSubscriptionRetainsOverage(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &User{}, &Token{}, &UserSubscription{}, &SystemTask{})
+	user := User{Username: "billing-strict-subscription", Password: "password", Quota: 200, AffCode: "strict-subscription-aff"}
+	require.NoError(t, db.Create(&user).Error)
+	token := Token{UserId: user.Id, Key: "strict-subscription-token", RemainQuota: 100}
+	require.NoError(t, db.Create(&token).Error)
+	subscription := UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: false,
+	}
+	require.NoError(t, db.Create(&subscription).Error)
+
+	taskID, err := EnqueueBillingAdjustment(BillingAdjustment{
+		RequestID:      "request-strict-subscription",
+		Kind:           BillingAdjustmentSettle,
+		FundingSource:  BillingAdjustmentSubscription,
+		UserID:         user.Id,
+		SubscriptionID: subscription.Id,
+		TokenID:        token.Id,
+		FundingDelta:   30,
+		TokenDelta:     30,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ProcessBillingAdjustment(taskID))
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&subscription, subscription.Id).Error)
+	require.NoError(t, db.First(&token, token.Id).Error)
+	assert.Equal(t, 200, user.Quota)
+	assert.Equal(t, int64(120), subscription.AmountUsed)
+	assert.Equal(t, 70, token.RemainQuota)
+	assert.Equal(t, 30, token.UsedQuota)
+
+	result, err := ProcessBillingAdjustmentWithResult(taskID)
+	require.NoError(t, err)
+	assert.Equal(t, BillingAdjustmentResult{
+		SubscriptionDelta: 30,
+		TokenDelta:        30,
+	}, result)
+}
+
+func TestBillingAdjustmentActiveStrictPlanBlocksOtherSubscriptionOverflow(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &User{}, &UserSubscription{}, &SystemTask{})
+	user := User{Username: "billing-mixed-subscriptions", Password: "password", Quota: 200, AffCode: "mixed-subscriptions-aff"}
+	require.NoError(t, db.Create(&user).Error)
+	selected := UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: true,
+	}
+	require.NoError(t, db.Create(&selected).Error)
+	strict := UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		Status:              "active",
+		EndTime:             time.Now().Add(time.Hour).Unix(),
+		AllowWalletOverflow: false,
+	}
+	require.NoError(t, db.Create(&strict).Error)
+
+	taskID, err := EnqueueBillingAdjustment(BillingAdjustment{
+		RequestID:      "request-mixed-subscriptions",
+		Kind:           BillingAdjustmentSettle,
+		FundingSource:  BillingAdjustmentSubscription,
+		UserID:         user.Id,
+		SubscriptionID: selected.Id,
+		FundingDelta:   30,
+	})
+	require.NoError(t, err)
+	result, err := ProcessBillingAdjustmentWithResult(taskID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&selected, selected.Id).Error)
+	assert.Equal(t, 200, user.Quota)
+	assert.Equal(t, int64(120), selected.AmountUsed)
+	assert.Equal(t, 30, result.SubscriptionDelta)
+	assert.Zero(t, result.WalletDelta)
+}
+
+func TestBillingAdjustmentSubscriptionOverflowRollsBackAtomically(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &User{}, &Token{}, &UserSubscription{}, &SystemTask{})
+	user := User{Username: "billing-overflow-rollback", Password: "password", Quota: 200, AffCode: "overflow-rollback-aff"}
+	require.NoError(t, db.Create(&user).Error)
+	token := Token{UserId: user.Id, Key: "overflow-rollback-token", RemainQuota: 100}
+	require.NoError(t, db.Create(&token).Error)
+	subscription := UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: true,
+	}
+	require.NoError(t, db.Create(&subscription).Error)
+
+	taskID, err := EnqueueBillingAdjustment(BillingAdjustment{
+		RequestID:      "request-overflow-rollback",
+		Kind:           BillingAdjustmentSettle,
+		FundingSource:  BillingAdjustmentSubscription,
+		UserID:         user.Id,
+		SubscriptionID: subscription.Id,
+		TokenID:        token.Id,
+		FundingDelta:   30,
+		TokenDelta:     30,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Migrator().DropTable(&Token{}))
+	require.Error(t, ProcessBillingAdjustment(taskID))
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&subscription, subscription.Id).Error)
+	assert.Equal(t, 200, user.Quota)
+	assert.Equal(t, int64(90), subscription.AmountUsed)
+	var task SystemTask
+	require.NoError(t, db.Where("task_id = ?", taskID).First(&task).Error)
+	assert.Equal(t, SystemTaskStatusPending, task.Status)
+	assert.NotEmpty(t, task.Error)
 }
 
 func TestBalanceMutationsBypassBatchQueue(t *testing.T) {

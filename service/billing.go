@@ -79,6 +79,9 @@ func SettleBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, actualQuo
 		if actualQuota != 0 {
 			if relayInfo.BillingSource == BillingSourceSubscription {
 				checkAndSendSubscriptionQuotaNotify(relayInfo)
+				if relayInfo.SubscriptionWalletOverflow > 0 {
+					checkAndSendQuotaNotify(relayInfo, relayInfo.SubscriptionWalletOverflow, 0)
+				}
 			} else {
 				checkAndSendQuotaNotify(relayInfo, actualQuota-preConsumed, preConsumed)
 			}

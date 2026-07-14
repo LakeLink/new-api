@@ -140,6 +140,9 @@ type RelayInfo struct {
 	SubscriptionPreConsumed int64
 	// SubscriptionPostDelta is the post-consume delta applied to amount_used (quota units; can be negative).
 	SubscriptionPostDelta int64
+	// SubscriptionWalletOverflow is the settlement amount charged to the wallet
+	// after a wallet-overflow-enabled subscription reached its quota boundary.
+	SubscriptionWalletOverflow int
 	// SubscriptionPlanId / SubscriptionPlanTitle are used for logging/UI display.
 	SubscriptionPlanId    int
 	SubscriptionPlanTitle string

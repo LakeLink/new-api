@@ -94,12 +94,14 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		return fmt.Errorf("persist billing settlement: %w", err)
 	}
 	s.settlementQueued = true
-	if err := model.ProcessBillingAdjustment(taskID); err != nil {
+	result, err := model.ProcessBillingAdjustmentWithResult(taskID)
+	if err != nil {
 		return fmt.Errorf("billing settlement queued for retry: %w", err)
 	}
 
 	if s.funding.Source() == BillingSourceSubscription {
-		s.relayInfo.SubscriptionPostDelta += int64(delta)
+		s.relayInfo.SubscriptionPostDelta += int64(result.SubscriptionDelta)
+		s.relayInfo.SubscriptionWalletOverflow += result.WalletDelta
 	}
 	s.fundingSettled = true
 	s.settled = true
@@ -357,6 +359,7 @@ func (s *BillingSession) syncRelayInfo() {
 		info.SubscriptionId = sub.subscriptionId
 		info.SubscriptionPreConsumed = sub.preConsumed + int64(s.extraReserved)
 		info.SubscriptionPostDelta = 0
+		info.SubscriptionWalletOverflow = 0
 		info.SubscriptionAmountTotal = sub.AmountTotal
 		info.SubscriptionAmountUsedAfterPreConsume = sub.AmountUsedAfter + int64(s.extraReserved)
 		info.SubscriptionPlanId = sub.PlanId

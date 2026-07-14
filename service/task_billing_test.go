@@ -306,6 +306,7 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
 
 	RefundTaskQuota(ctx, task, "task failed: upstream error")
+	RefundTaskQuota(ctx, task, "task failed: duplicate poll")
 
 	// User quota should increase by preConsumed
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
@@ -530,6 +531,38 @@ func TestRecalculate_Subscription_NegativeDelta(t *testing.T) {
 	log := getLastLog(t)
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeRefund, log.Type)
+}
+
+func TestRecalculateSubscriptionSplitsOverflowToWallet(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID, subID = 15, 15, 15, 3
+	const preConsumed = 10
+	const actualQuota = 40
+	const tokenRemain = 490
+
+	seedUser(t, userID, 200)
+	seedToken(t, tokenID, userID, "sk-sub-overflow", tokenRemain)
+	seedChannel(t, channelID)
+	seedSubscription(t, subID, userID, 100, 90)
+	require.NoError(t, model.DB.Model(&model.UserSubscription{}).Where("id = ?", subID).Update("allow_wallet_overflow", true).Error)
+
+	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceSubscription, subID)
+	RecalculateTaskQuota(ctx, task, actualQuota, "subscription overflow")
+
+	assert.Equal(t, 180, getUserQuota(t, userID))
+	assert.Equal(t, int64(100), getSubscriptionUsed(t, subID))
+	assert.Equal(t, tokenRemain-(actualQuota-preConsumed), getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, actualQuota, task.Quota)
+
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	var other map[string]interface{}
+	require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+	assert.Equal(t, float64(10), other["subscription_post_delta"])
+	assert.Equal(t, float64(20), other["subscription_wallet_overflow"])
+	assert.Equal(t, float64(20), other["wallet_quota_deducted"])
 }
 
 // ===========================================================================

@@ -173,6 +173,18 @@ type BillingAdjustment struct {
 	ExtraReserved         int64  `json:"extra_reserved,omitempty"`
 }
 
+// BillingAdjustmentResult records how a durable adjustment was distributed.
+// A subscription settlement can cross the plan boundary: plans that allow
+// wallet overflow consume the remaining subscription quota first and charge
+// the rest to the wallet, while strict plans retain the overage on the
+// subscription so a delivered response is accounted for without touching the
+// wallet.
+type BillingAdjustmentResult struct {
+	SubscriptionDelta int `json:"subscription_delta,omitempty"`
+	WalletDelta       int `json:"wallet_delta,omitempty"`
+	TokenDelta        int `json:"token_delta,omitempty"`
+}
+
 func billingAdjustmentTaskID(requestID string, kind string) string {
 	digest := sha256.Sum256([]byte(requestID + "\x00" + kind))
 	return fmt.Sprintf("billing_%x", digest[:24])
@@ -193,6 +205,13 @@ func EnqueueBillingAdjustment(adjustment BillingAdjustment) (string, error) {
 	}
 	if adjustment.UserID <= 0 {
 		return "", errors.New("billing adjustment user id is invalid")
+	}
+	if adjustment.FundingSource == BillingAdjustmentSubscription && adjustment.SubscriptionID <= 0 {
+		return "", errors.New("billing adjustment subscription id is invalid")
+	}
+	if adjustment.FundingDelta > common.MaxQuota || adjustment.FundingDelta < common.MinQuota ||
+		adjustment.TokenDelta > common.MaxQuota || adjustment.TokenDelta < common.MinQuota {
+		return "", errors.New("billing adjustment delta exceeds quota storage range")
 	}
 	if adjustment.Kind == BillingAdjustmentRefund && (adjustment.FundingDelta > 0 || adjustment.TokenDelta > 0 || adjustment.ExtraReserved < 0) {
 		return "", errors.New("billing refund contains an invalid delta")
@@ -222,28 +241,51 @@ func EnqueueBillingAdjustment(adjustment BillingAdjustment) (string, error) {
 	return taskID, nil
 }
 
-func adjustSubscriptionUsedTx(tx *gorm.DB, subscriptionID int, delta int64) error {
+func lockBillingSubscriptionTx(tx *gorm.DB, subscriptionID int, userID int) (*UserSubscription, error) {
 	if subscriptionID <= 0 {
-		return errors.New("billing adjustment subscription id is invalid")
+		return nil, errors.New("billing adjustment subscription id is invalid")
 	}
 	var subscription UserSubscription
 	if err := lockForUpdate(tx).Where("id = ?", subscriptionID).First(&subscription).Error; err != nil {
-		return err
+		return nil, err
+	}
+	if userID <= 0 || subscription.UserId != userID {
+		return nil, errors.New("billing adjustment subscription does not belong to user")
+	}
+	return &subscription, nil
+}
+
+func updateSubscriptionUsedTx(tx *gorm.DB, subscription *UserSubscription, delta int64, capAtTotal bool) (int64, error) {
+	if subscription == nil {
+		return 0, errors.New("billing adjustment subscription is nil")
+	}
+	if subscription.AmountUsed < 0 || subscription.AmountTotal < 0 {
+		return 0, errors.New("subscription contains invalid quota values")
 	}
 	if delta > 0 && subscription.AmountUsed > math.MaxInt64-delta {
-		return errors.New("subscription used quota overflow")
+		return 0, errors.New("subscription used quota overflow")
 	}
 	if delta < 0 && subscription.AmountUsed < math.MinInt64-delta {
-		return errors.New("subscription used quota underflow")
+		return 0, errors.New("subscription used quota underflow")
 	}
 	newUsed := subscription.AmountUsed + delta
 	if newUsed < 0 {
 		newUsed = 0
 	}
-	if subscription.AmountTotal > 0 && newUsed > subscription.AmountTotal {
-		return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, subscription.AmountTotal)
+	if capAtTotal && subscription.AmountTotal > 0 && newUsed > subscription.AmountTotal {
+		newUsed = subscription.AmountTotal
+		if subscription.AmountUsed > newUsed {
+			newUsed = subscription.AmountUsed
+		}
 	}
-	return tx.Model(&subscription).Update("amount_used", newUsed).Error
+	applied := newUsed - subscription.AmountUsed
+	if applied == 0 {
+		return 0, nil
+	}
+	if err := tx.Model(subscription).Update("amount_used", newUsed).Error; err != nil {
+		return 0, err
+	}
+	return applied, nil
 }
 
 func checkedQuotaBalanceDelta(current int, delta int) (int, error) {
@@ -254,61 +296,123 @@ func checkedQuotaBalanceDelta(current int, delta int) (int, error) {
 	return int(value), nil
 }
 
-func applyBillingAdjustmentTx(tx *gorm.DB, adjustment BillingAdjustment) error {
+func applyWalletBillingDeltaTx(tx *gorm.DB, userID int, delta int) error {
+	if delta == 0 {
+		return nil
+	}
+	var user User
+	if err := lockForUpdate(tx).Where("id = ?", userID).First(&user).Error; err != nil {
+		return err
+	}
+	quota, err := checkedQuotaBalanceDelta(user.Quota, -delta)
+	if err != nil {
+		return err
+	}
+	return tx.Model(&user).Update("quota", quota).Error
+}
+
+func applyBillingAdjustmentTx(tx *gorm.DB, adjustment BillingAdjustment) (BillingAdjustmentResult, error) {
+	result := BillingAdjustmentResult{}
 	if adjustment.FundingSource == BillingAdjustmentWallet {
 		if adjustment.FundingDelta != 0 {
-			var user User
-			if err := lockForUpdate(tx).Where("id = ?", adjustment.UserID).First(&user).Error; err != nil {
-				return err
+			if err := applyWalletBillingDeltaTx(tx, adjustment.UserID, adjustment.FundingDelta); err != nil {
+				return BillingAdjustmentResult{}, err
 			}
-			quota, err := checkedQuotaBalanceDelta(user.Quota, -adjustment.FundingDelta)
-			if err != nil {
-				return err
-			}
-			if err := tx.Model(&user).Update("quota", quota).Error; err != nil {
-				return err
-			}
+			result.WalletDelta = adjustment.FundingDelta
 		}
 	} else if adjustment.Kind == BillingAdjustmentRefund {
-		var record SubscriptionPreConsumeRecord
-		err := lockForUpdate(tx).Where("request_id = ?", adjustment.SubscriptionRequestID).First(&record).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// Cleanup may remove an old pre-consume record while its durable
-			// refund is still pending. The task itself is the idempotency marker,
-			// so the captured delta remains safe to apply transactionally.
-			if adjustment.FundingDelta < 0 {
-				if err := adjustSubscriptionUsedTx(tx, adjustment.SubscriptionID, int64(adjustment.FundingDelta)); err != nil {
-					return err
+		if adjustment.SubscriptionRequestID == "" {
+			if adjustment.FundingDelta != 0 {
+				subscription, err := lockBillingSubscriptionTx(tx, adjustment.SubscriptionID, adjustment.UserID)
+				if err != nil {
+					return BillingAdjustmentResult{}, err
 				}
-			}
-		} else if err != nil {
-			return err
-		} else if record.Status != "refunded" {
-			if record.PreConsumed < 0 {
-				return errors.New("subscription pre-consume record contains negative quota")
-			}
-			if adjustment.ExtraReserved > math.MaxInt64-record.PreConsumed {
-				return errors.New("subscription refund quota overflow")
-			}
-			refundAmount := record.PreConsumed + adjustment.ExtraReserved
-			if int64(adjustment.FundingDelta) != -refundAmount {
-				return errors.New("subscription refund delta does not match pre-consume record")
-			}
-			if refundAmount > 0 {
-				if err := adjustSubscriptionUsedTx(tx, record.UserSubscriptionId, -refundAmount); err != nil {
-					return err
+				applied, err := updateSubscriptionUsedTx(tx, subscription, int64(adjustment.FundingDelta), false)
+				if err != nil {
+					return BillingAdjustmentResult{}, err
 				}
+				result.SubscriptionDelta = int(applied)
 			}
-			if err := tx.Model(&record).Updates(map[string]interface{}{
-				"status":     "refunded",
-				"updated_at": common.GetTimestamp(),
-			}).Error; err != nil {
-				return err
+		} else {
+			var record SubscriptionPreConsumeRecord
+			err := lockForUpdate(tx).Where("request_id = ?", adjustment.SubscriptionRequestID).First(&record).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// Cleanup may remove an old pre-consume record while its durable
+				// refund is still pending. The task itself is the idempotency marker,
+				// so the captured delta remains safe to apply transactionally.
+				if adjustment.FundingDelta < 0 {
+					subscription, err := lockBillingSubscriptionTx(tx, adjustment.SubscriptionID, adjustment.UserID)
+					if err != nil {
+						return BillingAdjustmentResult{}, err
+					}
+					applied, err := updateSubscriptionUsedTx(tx, subscription, int64(adjustment.FundingDelta), false)
+					if err != nil {
+						return BillingAdjustmentResult{}, err
+					}
+					result.SubscriptionDelta = int(applied)
+				}
+			} else if err != nil {
+				return BillingAdjustmentResult{}, err
+			} else if record.Status != "refunded" {
+				if record.UserId != adjustment.UserID || record.UserSubscriptionId != adjustment.SubscriptionID {
+					return BillingAdjustmentResult{}, errors.New("subscription refund record does not match adjustment")
+				}
+				if record.PreConsumed < 0 {
+					return BillingAdjustmentResult{}, errors.New("subscription pre-consume record contains negative quota")
+				}
+				if adjustment.ExtraReserved > math.MaxInt64-record.PreConsumed {
+					return BillingAdjustmentResult{}, errors.New("subscription refund quota overflow")
+				}
+				refundAmount := record.PreConsumed + adjustment.ExtraReserved
+				if int64(adjustment.FundingDelta) != -refundAmount {
+					return BillingAdjustmentResult{}, errors.New("subscription refund delta does not match pre-consume record")
+				}
+				if refundAmount > 0 {
+					subscription, err := lockBillingSubscriptionTx(tx, record.UserSubscriptionId, adjustment.UserID)
+					if err != nil {
+						return BillingAdjustmentResult{}, err
+					}
+					applied, err := updateSubscriptionUsedTx(tx, subscription, -refundAmount, false)
+					if err != nil {
+						return BillingAdjustmentResult{}, err
+					}
+					result.SubscriptionDelta = int(applied)
+				}
+				if err := tx.Model(&record).Updates(map[string]interface{}{
+					"status":     "refunded",
+					"updated_at": common.GetTimestamp(),
+				}).Error; err != nil {
+					return BillingAdjustmentResult{}, err
+				}
 			}
 		}
 	} else if adjustment.FundingDelta != 0 {
-		if err := adjustSubscriptionUsedTx(tx, adjustment.SubscriptionID, int64(adjustment.FundingDelta)); err != nil {
-			return err
+		subscription, err := lockBillingSubscriptionTx(tx, adjustment.SubscriptionID, adjustment.UserID)
+		if err != nil {
+			return BillingAdjustmentResult{}, err
+		}
+		capAtTotal := false
+		if adjustment.FundingDelta > 0 && subscription.AllowWalletOverflow {
+			var strictCount int64
+			if err := tx.Model(&UserSubscription{}).
+				Where("user_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
+					adjustment.UserID, "active", getDBTimestampTx(tx), false).
+				Count(&strictCount).Error; err != nil {
+				return BillingAdjustmentResult{}, err
+			}
+			capAtTotal = strictCount == 0
+		}
+		applied, err := updateSubscriptionUsedTx(tx, subscription, int64(adjustment.FundingDelta), capAtTotal)
+		if err != nil {
+			return BillingAdjustmentResult{}, err
+		}
+		result.SubscriptionDelta = int(applied)
+		overflow := adjustment.FundingDelta - result.SubscriptionDelta
+		if overflow > 0 {
+			if err := applyWalletBillingDeltaTx(tx, adjustment.UserID, overflow); err != nil {
+				return BillingAdjustmentResult{}, err
+			}
+			result.WalletDelta = overflow
 		}
 	}
 
@@ -319,41 +423,59 @@ func applyBillingAdjustmentTx(tx *gorm.DB, adjustment BillingAdjustment) error {
 			// Its absence must not prevent charging/refunding the user's durable
 			// funding source; there is no remaining token balance to reconcile.
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
+				return result, nil
 			}
-			return err
+			return BillingAdjustmentResult{}, err
 		}
 		remainQuota, err := checkedQuotaBalanceDelta(token.RemainQuota, -adjustment.TokenDelta)
 		if err != nil {
-			return err
+			return BillingAdjustmentResult{}, err
 		}
 		usedQuota, err := checkedQuotaBalanceDelta(token.UsedQuota, adjustment.TokenDelta)
 		if err != nil {
-			return err
+			return BillingAdjustmentResult{}, err
 		}
 		if err := tx.Model(&token).Updates(map[string]interface{}{
 			"remain_quota":  remainQuota,
 			"used_quota":    usedQuota,
 			"accessed_time": common.GetTimestamp(),
 		}).Error; err != nil {
-			return err
+			return BillingAdjustmentResult{}, err
 		}
+		result.TokenDelta = adjustment.TokenDelta
 	}
-	return nil
+	return result, nil
 }
 
-// ProcessBillingAdjustment applies one queued operation exactly once. Row
-// locking prevents multiple nodes from processing it concurrently, and the
-// balance changes roll back if the succeeded marker cannot be written.
-func ProcessBillingAdjustment(taskID string) error {
+// ProcessBillingAdjustmentWithResult applies one queued operation exactly
+// once and returns its persisted funding split. Row locking prevents multiple
+// nodes from processing it concurrently, and the balance changes roll back if
+// the succeeded marker cannot be written.
+func ProcessBillingAdjustmentWithResult(taskID string) (BillingAdjustmentResult, error) {
 	var adjustment BillingAdjustment
+	var appliedResult BillingAdjustmentResult
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var task SystemTask
 		if err := lockForUpdate(tx).Where("task_id = ? AND type = ?", taskID, SystemTaskTypeBillingAdjustment).First(&task).Error; err != nil {
 			return err
 		}
 		if task.Status == SystemTaskStatusSucceeded {
-			return nil
+			if task.Result == "" {
+				// Adjustments completed before split results were persisted remain
+				// valid idempotency markers. They could only have charged their one
+				// declared funding source, so reconstruct that legacy result.
+				if err := common.UnmarshalJsonStr(task.Payload, &adjustment); err != nil {
+					return err
+				}
+				appliedResult.TokenDelta = adjustment.TokenDelta
+				if adjustment.FundingSource == BillingAdjustmentWallet {
+					appliedResult.WalletDelta = adjustment.FundingDelta
+				} else {
+					appliedResult.SubscriptionDelta = adjustment.FundingDelta
+				}
+				return nil
+			}
+			return common.UnmarshalJsonStr(task.Result, &appliedResult)
 		}
 		if task.Status != SystemTaskStatusPending {
 			return fmt.Errorf("billing adjustment %s has invalid status %s", taskID, task.Status)
@@ -361,21 +483,28 @@ func ProcessBillingAdjustment(taskID string) error {
 		if err := common.UnmarshalJsonStr(task.Payload, &adjustment); err != nil {
 			return err
 		}
-		if err := applyBillingAdjustmentTx(tx, adjustment); err != nil {
+		result, err := applyBillingAdjustmentTx(tx, adjustment)
+		if err != nil {
 			return err
 		}
-		result := tx.Model(&SystemTask{}).
+		appliedResult = result
+		resultJSON, err := common.Marshal(result)
+		if err != nil {
+			return err
+		}
+		updateResult := tx.Model(&SystemTask{}).
 			Where("id = ? AND status = ?", task.ID, SystemTaskStatusPending).
 			Updates(map[string]interface{}{
 				"status":     SystemTaskStatusSucceeded,
 				"active_key": nil,
 				"error":      "",
+				"result":     string(resultJSON),
 				"updated_at": common.GetTimestamp(),
 			})
-		if result.Error != nil {
-			return result.Error
+		if updateResult.Error != nil {
+			return updateResult.Error
 		}
-		if result.RowsAffected == 0 {
+		if updateResult.RowsAffected == 0 {
 			return errors.New("billing adjustment status changed concurrently")
 		}
 		return nil
@@ -384,7 +513,7 @@ func ProcessBillingAdjustment(taskID string) error {
 		_ = DB.Model(&SystemTask{}).
 			Where("task_id = ? AND status = ?", taskID, SystemTaskStatusPending).
 			Updates(map[string]interface{}{"error": err.Error(), "updated_at": common.GetTimestamp()}).Error
-		return err
+		return BillingAdjustmentResult{}, err
 	}
 
 	if common.RedisEnabled && adjustment.UserID > 0 {
@@ -396,7 +525,12 @@ func ProcessBillingAdjustment(taskID string) error {
 			_ = cacheDeleteToken(tokenKey)
 		}
 	}
-	return nil
+	return appliedResult, nil
+}
+
+func ProcessBillingAdjustment(taskID string) error {
+	_, err := ProcessBillingAdjustmentWithResult(taskID)
+	return err
 }
 
 // ProcessPendingBillingAdjustments retries durable operations left behind by
