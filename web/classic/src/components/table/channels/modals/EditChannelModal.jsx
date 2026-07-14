@@ -1880,6 +1880,10 @@ const EditChannelModal = (props) => {
     delete localInputs.upstream_model_update_last_check_time;
     delete localInputs.upstream_model_update_last_detected_models;
     delete localInputs.upstream_model_update_ignored_models;
+    if (isEdit) {
+      // Existing channel status is managed by /api/channel/:id/status.
+      delete localInputs.status;
+    }
 
     let res;
     localInputs.auto_ban = localInputs.auto_ban ? 1 : 0;

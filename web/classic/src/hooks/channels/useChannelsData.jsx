@@ -471,11 +471,6 @@ export const useChannelsData = () => {
         if (data.weight < 0) data.weight = 0;
         res = await API.put('/api/channel/', data);
         break;
-      case 'enable_all':
-        data.channel_info = record.channel_info;
-        data.channel_info.multi_key_status_list = {};
-        res = await API.put('/api/channel/', data);
-        break;
     }
     const { success, message } = res.data;
     if (success) {
