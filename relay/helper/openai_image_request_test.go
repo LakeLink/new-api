@@ -158,3 +158,40 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 		require.Contains(t, err.Error(), boundErr)
 	})
 }
+
+func TestGetAndValidOpenAIImageRequestReconcilesNativeBatchSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	boundErr := fmt.Sprintf("batch_size must be an integer between 1 and %d", dto.MaxSiliconFlowImageBatchSize)
+
+	for _, test := range []struct {
+		name      string
+		batchSize string
+		wantErr   bool
+		wantN     uint
+	}{
+		{name: "native count replaces standard count", batchSize: `4`, wantN: 4},
+		{name: "null uses standard count", batchSize: `null`, wantN: 2},
+		{name: "zero is rejected", batchSize: `0`, wantErr: true},
+		{name: "fractional count is rejected", batchSize: `1.5`, wantErr: true},
+		{name: "count above provider bound is rejected", batchSize: fmt.Sprintf("%d", dto.MaxSiliconFlowImageBatchSize+1), wantErr: true},
+		{name: "count above shared bound is rejected", batchSize: fmt.Sprintf("%d", dto.MaxImageN+1), wantErr: true},
+		{name: "wrapped negative unsigned value is rejected", batchSize: `18446744073686646784`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"model":"Kwai-Kolors/Kolors","prompt":"a cat","n":2,"batch_size":%s}`, test.batchSize)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewBufferString(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			request, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+			if test.wantErr {
+				require.ErrorContains(t, err, boundErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, request.N)
+			require.Equal(t, test.wantN, *request.N)
+			require.Equal(t, float64(test.wantN), request.GetTokenCountMeta().BillingRatios["n"])
+		})
+	}
+}

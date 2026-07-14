@@ -2,13 +2,13 @@ package minimax
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
@@ -83,7 +83,8 @@ type MiniMaxTTSData struct {
 }
 
 type MiniMaxExtraInfo struct {
-	UsageCharacters int64 `json:"usage_characters"`
+	UsageCharacters int64  `json:"usage_characters"`
+	AudioFormat     string `json:"audio_format"`
 }
 
 type MiniMaxBaseResp struct {
@@ -118,7 +119,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 
 	// Parse response
 	var minimaxResp MiniMaxTTSResponse
-	if unmarshalErr := json.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
+	if unmarshalErr := common.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to unmarshal minimax TTS response: %w", unmarshalErr),
 			types.ErrorCodeBadResponseBody,
@@ -157,16 +158,27 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 			)
 		}
 
-		// Determine content type - default to mp3
-		contentType := "audio/mpeg"
+		audioFormat := minimaxResp.ExtraInfo.AudioFormat
+		if audioFormat == "" {
+			audioFormat = c.GetString("response_format")
+		}
+		contentType := getContentTypeByFormat(audioFormat)
 
 		c.Data(http.StatusOK, contentType, audioData)
 	}
 
+	promptTokens := info.GetEstimatePromptTokens()
+	if minimaxResp.ExtraInfo.UsageCharacters > 0 {
+		actualTokens, clamp := common.QuotaFromFloatChecked(float64(minimaxResp.ExtraInfo.UsageCharacters))
+		promptTokens = actualTokens
+		if clamp != nil && info.QuotaClamp == nil {
+			info.QuotaClamp = clamp
+		}
+	}
 	usage = &dto.Usage{
-		PromptTokens:     info.GetEstimatePromptTokens(),
+		PromptTokens:     promptTokens,
 		CompletionTokens: 0,
-		TotalTokens:      int(minimaxResp.ExtraInfo.UsageCharacters),
+		TotalTokens:      promptTokens,
 	}
 
 	return usage, nil
@@ -183,15 +195,7 @@ func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *rel
 	}
 	defer resp.Body.Close()
 
-	// Set response headers
-	for key, values := range resp.Header {
-		if !service.ShouldCopyUpstreamHeader(c, key, values) {
-			continue
-		}
-		for _, value := range values {
-			c.Header(key, value)
-		}
-	}
+	service.CopyUpstreamResponseHeaders(c, resp.Header)
 
 	c.Data(resp.StatusCode, "application/json", body)
 	return nil, nil

@@ -220,6 +220,23 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 			return nil, errors.New("model is required")
 		}
 
+		// Provider-native image count fields must be reconciled before pricing.
+		// SiliconFlow accepts batch_size in the passthrough fields; leaving it
+		// independent from n would pre-consume quota for one image while sending
+		// a larger native batch upstream.
+		if rawBatchSize, ok := imageRequest.Extra["batch_size"]; ok {
+			var batchSize *uint
+			if err := common.Unmarshal(rawBatchSize, &batchSize); err != nil {
+				return nil, fmt.Errorf("batch_size must be an integer between 1 and %d", dto.MaxSiliconFlowImageBatchSize)
+			}
+			if batchSize != nil {
+				if *batchSize < 1 || *batchSize > dto.MaxImageN || *batchSize > dto.MaxSiliconFlowImageBatchSize {
+					return nil, fmt.Errorf("batch_size must be an integer between 1 and %d", dto.MaxSiliconFlowImageBatchSize)
+				}
+				imageRequest.N = common.GetPointer(*batchSize)
+			}
+		}
+
 		if strings.Contains(imageRequest.Size, "×") {
 			return nil, errors.New("size an unexpected error occurred in the parameter, please use 'x' instead of the multiplication sign '×'")
 		}

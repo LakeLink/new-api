@@ -15,6 +15,12 @@ import (
 // wrapped-negative n overflows quota calculation into a negative charge.
 const MaxImageN = 128
 
+// MaxSiliconFlowImageBatchSize is SiliconFlow's documented native
+// batch_size limit. The generic image validator uses it because validation and
+// pre-consume happen before channel selection, while batch_size is accepted as
+// a top-level passthrough field.
+const MaxSiliconFlowImageBatchSize = 4
+
 type ImageRequest struct {
 	Model             string          `json:"model"`
 	Prompt            string          `json:"prompt" binding:"required"`

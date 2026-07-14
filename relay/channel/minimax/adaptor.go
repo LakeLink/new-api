@@ -2,12 +2,12 @@ package minimax
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -38,38 +38,62 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	voiceID := request.Voice
-	speed := lo.FromPtrOr(request.Speed, 0.0)
-	outputFormat := request.ResponseFormat
+	speed := lo.FromPtrOr(request.Speed, 1.0)
+	if speed < 0.5 || speed > 2.0 {
+		return nil, errors.New("speed must be between 0.5 and 2.0 for MiniMax TTS")
+	}
+
+	audioFormat := request.ResponseFormat
+	if audioFormat == "" {
+		audioFormat = "mp3"
+	}
+	switch audioFormat {
+	case "mp3", "pcm", "flac", "wav":
+	default:
+		return nil, fmt.Errorf("unsupported MiniMax TTS response format: %s", audioFormat)
+	}
 
 	minimaxRequest := MiniMaxTTSRequest{
-		Model: info.OriginModelName,
+		Model: request.Model,
 		Text:  request.Input,
 		VoiceSetting: VoiceSetting{
 			VoiceID: voiceID,
 			Speed:   speed,
 		},
 		AudioSetting: &AudioSetting{
-			Format: outputFormat,
+			Format: audioFormat,
 		},
-		OutputFormat: outputFormat,
+		OutputFormat: "hex",
 	}
 
 	// 同步扩展字段的厂商自定义metadata
 	if len(request.Metadata) > 0 {
-		if err := json.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
+		if err := common.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
 			return nil, fmt.Errorf("error unmarshalling metadata to minimax request: %w", err)
 		}
+
+		// Metadata may add provider-specific options, but the standard request
+		// remains authoritative for every field that affects routing, billing,
+		// or the response contract.
+		minimaxRequest.Model = request.Model
+		minimaxRequest.Text = request.Input
+		minimaxRequest.Stream = false
+		minimaxRequest.StreamOptions = nil
+		minimaxRequest.VoiceSetting.VoiceID = voiceID
+		minimaxRequest.VoiceSetting.Speed = speed
+		if minimaxRequest.AudioSetting == nil {
+			minimaxRequest.AudioSetting = &AudioSetting{}
+		}
+		minimaxRequest.AudioSetting.Format = audioFormat
+		minimaxRequest.OutputFormat = "hex"
 	}
 
-	jsonData, err := json.Marshal(minimaxRequest)
+	jsonData, err := common.Marshal(minimaxRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling minimax request: %w", err)
 	}
-	if outputFormat != "hex" {
-		outputFormat = "url"
-	}
 
-	c.Set("response_format", outputFormat)
+	c.Set("response_format", audioFormat)
 
 	// Debug: log the request structure
 	// fmt.Printf("MiniMax TTS Request: %s\n", string(jsonData))

@@ -29,6 +29,15 @@ func updateOpenAIImageCount(info *relaycommon.RelayInfo, count int64) {
 	info.PriceData.AddOtherRatio("n", float64(count))
 }
 
+func getImageCountFromResponse(responseBody []byte) (int64, string) {
+	dataCount := gjson.GetBytes(responseBody, "data.#").Int()
+	imagesCount := gjson.GetBytes(responseBody, "images.#").Int()
+	if imagesCount > dataCount {
+		return imagesCount, "images"
+	}
+	return dataCount, "data"
+}
+
 // OpenaiImageHandler handles non-streaming OpenAI image responses
 // (generations/edits), returning the parsed usage for billing.
 func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -49,7 +58,8 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
-	updateOpenAIImageCount(info, gjson.GetBytes(responseBody, "data.#").Int())
+	imageCount, _ := getImageCountFromResponse(responseBody)
+	updateOpenAIImageCount(info, imageCount)
 
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
@@ -252,7 +262,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
 
-	imageCount := gjson.GetBytes(responseBody, "data.#").Int()
+	imageCount, imageField := getImageCountFromResponse(responseBody)
 	updateOpenAIImageCount(info, imageCount)
 
 	helper.SetEventStreamHeaders(c)
@@ -276,7 +286,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	}
 
 	for i := int64(0); i < imageCount; i++ {
-		image := gjson.GetBytes(responseBody, "data."+strconv.FormatInt(i, 10))
+		image := gjson.GetBytes(responseBody, imageField+"."+strconv.FormatInt(i, 10))
 		payload := []byte(`{"type":"image_generation.completed"}`)
 		payload, err = sjson.SetBytes(payload, "created_at", created)
 		if err != nil {

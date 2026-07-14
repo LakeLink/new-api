@@ -15,8 +15,9 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 )
+
+const siliconFlowBatchSizeModel = "Kwai-Kolors/Kolors"
 
 type Adaptor struct {
 }
@@ -37,14 +38,13 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	// 解析extra到SFImageRequest里，以填入SiliconFlow特殊字段。若失败重建一个空的。
 	sfRequest := &SFImageRequest{}
 	extra, err := common.Marshal(request.Extra)
-	if err == nil {
-		err = common.Unmarshal(extra, sfRequest)
-		if err != nil {
-			sfRequest = &SFImageRequest{}
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal SiliconFlow image options: %w", err)
+	}
+	if err := common.Unmarshal(extra, sfRequest); err != nil {
+		return nil, fmt.Errorf("invalid SiliconFlow image options: %w", err)
 	}
 
 	sfRequest.Model = request.Model
@@ -53,9 +53,23 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	if sfRequest.ImageSize == "" {
 		sfRequest.ImageSize = request.Size
 	}
-	if sfRequest.BatchSize == 0 {
-		if request.N != nil {
-			sfRequest.BatchSize = lo.FromPtr(request.N)
+	if sfRequest.BatchSize == nil {
+		sfRequest.BatchSize = request.N
+	}
+	if sfRequest.BatchSize != nil {
+		batchSize := *sfRequest.BatchSize
+		if batchSize < 1 || batchSize > dto.MaxImageN || batchSize > dto.MaxSiliconFlowImageBatchSize {
+			return nil, fmt.Errorf("batch_size must be an integer between 1 and %d for SiliconFlow", dto.MaxSiliconFlowImageBatchSize)
+		}
+		if sfRequest.Model != siliconFlowBatchSizeModel {
+			if batchSize > 1 {
+				return nil, fmt.Errorf("batch_size greater than 1 is only supported for %s", siliconFlowBatchSizeModel)
+			}
+			sfRequest.BatchSize = nil
+			return sfRequest, nil
+		}
+		if info != nil && info.PriceData.UsePrice {
+			info.PriceData.AddOtherRatio("n", float64(batchSize))
 		}
 	}
 

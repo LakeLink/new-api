@@ -314,6 +314,24 @@ func TestOpenaiImageStreamHandlerWrapsJSONResponse(t *testing.T) {
 	require.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 }
 
+func TestOpenaiImageStreamHandlerWrapsSiliconFlowImages(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	body := `{"images":[{"url":"https://example.com/first.png"},{"url":"https://example.com/second.png"}]}`
+	c, recorder, resp, info := newImageTestContext(t, body, "application/json", true)
+	info.PriceData.UsePrice = true
+	info.PriceData.AddOtherRatio("n", 1)
+
+	_, err := OpenaiImageStreamHandler(c, info, resp)
+	require.Nil(t, err)
+	require.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+	require.Equal(t, 2, strings.Count(recorder.Body.String(), `event: image_generation.completed`))
+	require.Contains(t, recorder.Body.String(), `"url":"https://example.com/first.png"`)
+	require.Contains(t, recorder.Body.String(), `"url":"https://example.com/second.png"`)
+}
+
 func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 	oldMode := gin.Mode()
 	gin.SetMode(gin.TestMode)
@@ -331,6 +349,12 @@ func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 			body:      `{"data":[{"b64_json":"` + longImage + `"},{"b64_json":"second"}]}`,
 			usePrice:  true,
 			wantCount: 2,
+		},
+		{
+			name:      "fixed price uses SiliconFlow images length",
+			body:      `{"images":[{"url":"first"},{"url":"second"},{"url":"third"}]}`,
+			usePrice:  true,
+			wantCount: 3,
 		},
 		{
 			name:      "empty data keeps requested count",
