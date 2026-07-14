@@ -2,15 +2,17 @@ package replicate
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -111,7 +113,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 	if len(request.OutputFormat) > 0 {
 		var outputFormat string
-		if err := json.Unmarshal(request.OutputFormat, &outputFormat); err == nil && strings.TrimSpace(outputFormat) != "" {
+		if err := common.Unmarshal(request.OutputFormat, &outputFormat); err == nil && strings.TrimSpace(outputFormat) != "" {
 			inputPayload["output_format"] = outputFormat
 		}
 	}
@@ -166,6 +168,14 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		inputPayload[key] = val
 	}
 
+	// The generic image validator reconciles every supported num_outputs
+	// passthrough path into N before pricing. Re-apply that validated value last
+	// so map iteration order cannot let Extra or Extra["input"] silently change
+	// the number of billed outputs.
+	if request.N != nil {
+		inputPayload["num_outputs"] = int(*request.N)
+	}
+
 	return map[string]any{
 		"input": inputPayload,
 	}, nil
@@ -191,53 +201,32 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return nil, types.NewError(fmt.Errorf("replicate adaptor: failed to decode response: %w", err), types.ErrorCodeBadResponseBody)
 	}
 
-	if prediction.Error != nil {
-		errMsg := prediction.Error.Message
-		if errMsg == "" {
-			errMsg = prediction.Error.Detail
+	urls := predictionOutputURLs(prediction.Output)
+	if (strings.EqualFold(prediction.Status, "starting") || strings.EqualFold(prediction.Status, "processing")) && len(urls) == 0 {
+		prediction, err = pollPrediction(c, info, resp, prediction)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
 		}
-		if errMsg == "" {
-			errMsg = prediction.Error.Code
-		}
-		if errMsg == "" {
-			errMsg = "replicate adaptor: prediction error"
-		}
+		urls = predictionOutputURLs(prediction.Output)
+	}
+
+	if errMsg := predictionErrorMessage(prediction.Error); errMsg != "" {
 		return nil, types.NewError(errors.New(errMsg), types.ErrorCodeBadResponse)
 	}
 
-	if prediction.Status != "" && !strings.EqualFold(prediction.Status, "succeeded") {
+	status := strings.ToLower(strings.TrimSpace(prediction.Status))
+	if status != "" && status != "succeeded" && !((status == "starting" || status == "processing") && len(urls) > 0) {
 		return nil, types.NewError(fmt.Errorf("replicate adaptor: prediction status %q", prediction.Status), types.ErrorCodeBadResponse)
-	}
-
-	var urls []string
-
-	appendOutput := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		urls = append(urls, value)
-	}
-
-	switch output := prediction.Output.(type) {
-	case string:
-		appendOutput(output)
-	case []any:
-		for _, item := range output {
-			if str, ok := item.(string); ok {
-				appendOutput(str)
-			}
-		}
-	case nil:
-		// no output
-	default:
-		if str, ok := output.(fmt.Stringer); ok {
-			appendOutput(str.String())
-		}
 	}
 
 	if len(urls) == 0 {
 		return nil, types.NewError(errors.New("replicate adaptor: empty prediction output"), types.ErrorCodeBadResponseBody)
+	}
+	if len(urls) > dto.MaxImageN {
+		return nil, types.NewError(fmt.Errorf("replicate adaptor: prediction returned %d outputs, maximum is %d", len(urls), dto.MaxImageN), types.ErrorCodeBadResponseBody)
+	}
+	if info != nil {
+		info.PriceData.AddOtherRatio("n", float64(len(urls)))
 	}
 
 	var imageReq *dto.ImageRequest
@@ -289,6 +278,168 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 
 	usage := &dto.Usage{}
 	return usage, nil
+}
+
+func predictionOutputURLs(output any) []string {
+	urls := make([]string, 0)
+	appendOutput := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			urls = append(urls, value)
+		}
+	}
+	switch value := output.(type) {
+	case string:
+		appendOutput(value)
+	case []any:
+		for _, item := range value {
+			if str, ok := item.(string); ok {
+				appendOutput(str)
+			}
+		}
+	case fmt.Stringer:
+		appendOutput(value.String())
+	}
+	return urls
+}
+
+// pollPrediction follows Replicate's documented synchronous-timeout flow:
+// Prefer: wait may return a still-running prediction, which must be fetched
+// through the prediction GET endpoint until it reaches a terminal state.
+func pollPrediction(c *gin.Context, info *relaycommon.RelayInfo, createResp *http.Response, prediction PredictionResponse) (PredictionResponse, error) {
+	baseURL := constant.ChannelBaseURLs[constant.ChannelTypeReplicate]
+	if info != nil && strings.TrimSpace(info.ChannelBaseUrl) != "" {
+		baseURL = strings.TrimRight(info.ChannelBaseUrl, "/")
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return prediction, fmt.Errorf("replicate adaptor: invalid channel base URL")
+	}
+
+	pollTarget := strings.TrimSpace(prediction.Urls.Get)
+	if pollTarget == "" && createResp != nil {
+		pollTarget = strings.TrimSpace(createResp.Header.Get("Location"))
+	}
+	if pollTarget == "" && prediction.ID != "" {
+		pollTarget = "/v1/predictions/" + url.PathEscape(prediction.ID)
+	}
+	if pollTarget == "" {
+		return prediction, errors.New("replicate adaptor: incomplete prediction response is missing a polling URL and id")
+	}
+
+	ref, err := url.Parse(pollTarget)
+	if err != nil {
+		return prediction, fmt.Errorf("replicate adaptor: invalid prediction polling URL: %w", err)
+	}
+	pollURL := base.ResolveReference(ref)
+	if !strings.EqualFold(pollURL.Scheme, base.Scheme) || !strings.EqualFold(pollURL.Host, base.Host) {
+		return prediction, errors.New("replicate adaptor: prediction polling URL must use the configured channel origin")
+	}
+	// Normalize escaped path segments while retaining an optional proxy prefix
+	// from a relative Location header.
+	pollURL.Path = path.Clean(pollURL.Path)
+
+	parentCtx := c.Request.Context()
+	if info != nil {
+		parentCtx = info.GetRelayContext(parentCtx)
+	}
+	pollCtx := parentCtx
+	proxyURL := ""
+	var headerOverride map[string]string
+	if info != nil {
+		proxyURL = info.ChannelSetting.Proxy
+		headerOverride, err = channel.ResolveHeaderOverride(info, c)
+		if err != nil {
+			return prediction, fmt.Errorf("replicate adaptor: resolve prediction poll headers failed: %w", err)
+		}
+	}
+	httpClient, err := service.NewProxyHttpClient(proxyURL)
+	if err != nil {
+		return prediction, fmt.Errorf("replicate adaptor: create prediction poll client failed: %w", err)
+	}
+
+	for {
+		req, err := http.NewRequestWithContext(pollCtx, http.MethodGet, pollURL.String(), nil)
+		if err != nil {
+			return prediction, fmt.Errorf("replicate adaptor: create prediction poll request failed: %w", err)
+		}
+		if info != nil && info.ApiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+info.ApiKey)
+		}
+		req.Header.Set("Accept", "application/json")
+		for key, value := range headerOverride {
+			req.Header.Set(key, value)
+		}
+
+		pollResp, err := httpClient.Do(req)
+		if err != nil {
+			return prediction, fmt.Errorf("replicate adaptor: prediction poll failed: %w", err)
+		}
+		maxMB := constant.MaxUpstreamResponseBodyMB
+		if maxMB <= 0 {
+			maxMB = 128
+		}
+		maxBytes := int64(maxMB) << 20
+		pollBody, readErr := io.ReadAll(io.LimitReader(pollResp.Body, maxBytes+1))
+		_ = pollResp.Body.Close()
+		if readErr != nil {
+			return prediction, fmt.Errorf("replicate adaptor: read prediction poll response failed: %w", readErr)
+		}
+		if int64(len(pollBody)) > maxBytes {
+			return prediction, fmt.Errorf("replicate adaptor: prediction poll response exceeds %d MB", maxMB)
+		}
+		if pollResp.StatusCode < http.StatusOK || pollResp.StatusCode >= http.StatusMultipleChoices {
+			return prediction, fmt.Errorf("replicate adaptor: prediction poll returned status %d: %s", pollResp.StatusCode, strings.TrimSpace(string(pollBody)))
+		}
+		if err := common.Unmarshal(pollBody, &prediction); err != nil {
+			return prediction, fmt.Errorf("replicate adaptor: decode prediction poll response failed: %w", err)
+		}
+
+		switch strings.ToLower(strings.TrimSpace(prediction.Status)) {
+		case "succeeded":
+			return prediction, nil
+		case "failed", "canceled":
+			message := predictionErrorMessage(prediction.Error)
+			if message == "" {
+				message = prediction.Status
+			}
+			return prediction, fmt.Errorf("replicate adaptor: prediction %s: %s", prediction.Status, message)
+		case "starting", "processing":
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-timer.C:
+			case <-pollCtx.Done():
+				timer.Stop()
+				return prediction, fmt.Errorf("replicate adaptor: prediction polling stopped: %w", pollCtx.Err())
+			}
+		default:
+			return prediction, fmt.Errorf("replicate adaptor: unexpected prediction status %q", prediction.Status)
+		}
+	}
+}
+
+func predictionErrorMessage(raw []byte) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var message string
+	if err := common.Unmarshal(raw, &message); err == nil {
+		return strings.TrimSpace(message)
+	}
+	var detail PredictionError
+	if err := common.Unmarshal(raw, &detail); err == nil {
+		if detail.Message != "" {
+			return detail.Message
+		}
+		if detail.Detail != "" {
+			return detail.Detail
+		}
+		if detail.Code != "" {
+			return detail.Code
+		}
+	}
+	return trimmed
 }
 
 func (a *Adaptor) GetModelList() []string {

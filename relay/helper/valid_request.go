@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -221,19 +222,45 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		}
 
 		// Provider-native image count fields must be reconciled before pricing.
-		// SiliconFlow accepts batch_size in the passthrough fields; leaving it
-		// independent from n would pre-consume quota for one image while sending
-		// a larger native batch upstream.
+		// Leaving them independent from n would pre-consume quota for one image
+		// while sending a larger native batch upstream.
 		if rawBatchSize, ok := imageRequest.Extra["batch_size"]; ok {
-			var batchSize *uint
-			if err := common.Unmarshal(rawBatchSize, &batchSize); err != nil {
-				return nil, fmt.Errorf("batch_size must be an integer between 1 and %d", dto.MaxSiliconFlowImageBatchSize)
+			batchSize, err := validateNativeImageCount(rawBatchSize, "batch_size", dto.MaxSiliconFlowImageBatchSize)
+			if err != nil {
+				return nil, err
 			}
 			if batchSize != nil {
-				if *batchSize < 1 || *batchSize > dto.MaxImageN || *batchSize > dto.MaxSiliconFlowImageBatchSize {
-					return nil, fmt.Errorf("batch_size must be an integer between 1 and %d", dto.MaxSiliconFlowImageBatchSize)
-				}
 				imageRequest.N = common.GetPointer(*batchSize)
+			}
+		}
+
+		var replicateCounts [][]byte
+		if len(imageRequest.ExtraFields) > 0 {
+			var fields map[string]json.RawMessage
+			if err := common.Unmarshal(imageRequest.ExtraFields, &fields); err == nil {
+				if raw, ok := fields["num_outputs"]; ok {
+					replicateCounts = append(replicateCounts, raw)
+				}
+			}
+		}
+		if rawInput, ok := imageRequest.Extra["input"]; ok {
+			var input map[string]json.RawMessage
+			if err := common.Unmarshal(rawInput, &input); err == nil {
+				if raw, ok := input["num_outputs"]; ok {
+					replicateCounts = append(replicateCounts, raw)
+				}
+			}
+		}
+		if raw, ok := imageRequest.Extra["num_outputs"]; ok {
+			replicateCounts = append(replicateCounts, raw)
+		}
+		for _, raw := range replicateCounts {
+			numOutputs, err := validateNativeImageCount(raw, "num_outputs", dto.MaxImageN)
+			if err != nil {
+				return nil, err
+			}
+			if numOutputs != nil {
+				imageRequest.N = common.GetPointer(*numOutputs)
 			}
 		}
 
@@ -279,6 +306,14 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 	}
 
 	return imageRequest, nil
+}
+
+func validateNativeImageCount(raw []byte, field string, max uint) (*uint, error) {
+	var value *uint
+	if err := common.Unmarshal(raw, &value); err != nil || (value != nil && (*value < 1 || *value > max || *value > dto.MaxImageN)) {
+		return nil, fmt.Errorf("%s must be an integer between 1 and %d", field, max)
+	}
+	return value, nil
 }
 
 func GetAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest, err error) {

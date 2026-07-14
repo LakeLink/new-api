@@ -17,6 +17,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newImageRequestJSONContext(t *testing.T, body string) *gin.Context {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	return c
+}
+
 // TestGetAndValidOpenAIImageRequestMultipartStream verifies multipart image
 // edit parsing: the stream field is parsed and validated, and the request body
 // stays replayable for the upstream request.
@@ -183,6 +191,40 @@ func TestGetAndValidOpenAIImageRequestReconcilesNativeBatchSize(t *testing.T) {
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewBufferString(body))
 			c.Request.Header.Set("Content-Type", "application/json")
 
+			request, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+			if test.wantErr {
+				require.ErrorContains(t, err, boundErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, request.N)
+			require.Equal(t, test.wantN, *request.N)
+			require.Equal(t, float64(test.wantN), request.GetTokenCountMeta().BillingRatios["n"])
+		})
+	}
+}
+
+func TestGetAndValidOpenAIImageRequestReconcilesReplicateOutputCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	boundErr := fmt.Sprintf("num_outputs must be an integer between 1 and %d", dto.MaxImageN)
+
+	for _, test := range []struct {
+		name    string
+		body    string
+		wantErr bool
+		wantN   uint
+	}{
+		{name: "top-level native count", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","n":2,"num_outputs":3}`, wantN: 3},
+		{name: "nested input count", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","n":2,"input":{"num_outputs":4}}`, wantN: 4},
+		{name: "extra fields count", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","n":2,"extra_fields":{"num_outputs":5}}`, wantN: 5},
+		{name: "top level deterministically wins", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","input":{"num_outputs":4},"num_outputs":6}`, wantN: 6},
+		{name: "zero rejected", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","num_outputs":0}`, wantErr: true},
+		{name: "fraction rejected", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","num_outputs":1.5}`, wantErr: true},
+		{name: "shared bound enforced", body: fmt.Sprintf(`{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","num_outputs":%d}`, dto.MaxImageN+1), wantErr: true},
+		{name: "wrapped negative unsigned rejected", body: `{"model":"black-forest-labs/flux-1.1-pro","prompt":"cat","num_outputs":18446744073686646784}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := newImageRequestJSONContext(t, test.body)
 			request, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
 			if test.wantErr {
 				require.ErrorContains(t, err, boundErr)
