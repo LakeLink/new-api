@@ -473,6 +473,9 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if channel == nil {
 		return fmt.Errorf("channel cannot be empty")
 	}
+	if channel.Weight != nil && *channel.Weight > model.MaxChannelWeight {
+		return fmt.Errorf("channel weight cannot exceed %d", model.MaxChannelWeight)
+	}
 
 	if constant.IsRetiredChannelType(channel.Type) {
 		switch channel.Type {
@@ -837,6 +840,13 @@ func EditTagChannels(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "tag不能为空",
+		})
+		return
+	}
+	if channelTag.Weight != nil && *channelTag.Weight > model.MaxChannelWeight {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("channel weight cannot exceed %d", model.MaxChannelWeight),
 		})
 		return
 	}

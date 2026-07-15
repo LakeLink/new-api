@@ -59,6 +59,11 @@ type Channel struct {
 	Keys []string `json:"-" gorm:"-"`
 }
 
+// MaxChannelWeight keeps weighted selection arithmetic within a predictable
+// range. The value is intentionally much larger than normal operational
+// weights while still making sums safe for any realistic channel count.
+const MaxChannelWeight uint = 1_000_000
+
 type ChannelInfo struct {
 	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
 	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
@@ -488,6 +493,9 @@ func (channel *Channel) GetPriority() int64 {
 func (channel *Channel) GetWeight() int {
 	if channel.Weight == nil {
 		return 0
+	}
+	if *channel.Weight > MaxChannelWeight {
+		return int(MaxChannelWeight)
 	}
 	return int(*channel.Weight)
 }
