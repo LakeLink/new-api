@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/thanhpk/randstr"
 )
 
@@ -64,6 +65,17 @@ type CreemProduct struct {
 type CreemAdaptor struct {
 }
 
+func creemAmountCents(price float64) (int, error) {
+	if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+		return 0, errors.New("Creem product price must be finite and positive")
+	}
+	cents := decimal.NewFromFloat(price).Mul(decimal.NewFromInt(100)).Round(0)
+	if !cents.IsPositive() || cents.GreaterThan(decimal.NewFromInt(math.MaxInt32)) {
+		return 0, errors.New("Creem product price exceeds the supported cent range")
+	}
+	return int(cents.IntPart()), nil
+}
+
 func (*CreemAdaptor) RequestPay(c *gin.Context, req *CreemPayRequest) {
 	if req.PaymentMethod != model.PaymentMethodCreem {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "不支持的支付渠道"})
@@ -97,7 +109,7 @@ func (*CreemAdaptor) RequestPay(c *gin.Context, req *CreemPayRequest) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "产品不存在"})
 		return
 	}
-	if selectedProduct.Price <= 0 || math.IsNaN(selectedProduct.Price) || math.IsInf(selectedProduct.Price, 0) {
+	if _, err := creemAmountCents(selectedProduct.Price); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "error", "data": "产品价格配置错误"})
 		return
 	}
@@ -486,8 +498,8 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
-	expectedBaseAmount := int(math.Round(topUp.Money * 100))
-	if expectedBaseAmount <= 0 || event.Object.Order.Amount != expectedBaseAmount {
+	expectedBaseAmount, err := creemAmountCents(topUp.Money)
+	if err != nil || event.Object.Order.Amount != expectedBaseAmount {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 充值金额不匹配 trade_no=%s expected=%d actual=%d", referenceId, expectedBaseAmount, event.Object.Order.Amount))
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
@@ -505,7 +517,7 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("Creem 回调客户姓名为空 trade_no=%s creem_order_id=%s", referenceId, event.Object.Order.Id))
 	}
 
-	err := model.RechargeCreem(referenceId, event.Object.Order.Transaction, customerEmail, customerName, c.ClientIP())
+	err = model.RechargeCreem(referenceId, event.Object.Order.Transaction, customerEmail, customerName, c.ClientIP())
 	if err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 充值处理失败 trade_no=%s creem_order_id=%s client_ip=%s error=%q", referenceId, event.Object.Order.Id, c.ClientIP(), err.Error()))
 		c.AbortWithStatus(http.StatusInternalServerError)
