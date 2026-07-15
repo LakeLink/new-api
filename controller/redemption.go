@@ -79,6 +79,14 @@ func AddRedemption(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgRedemptionCountMax)
 		return
 	}
+	if redemption.Quota <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgQuotaNegative)
+		return
+	}
+	if redemption.Quota > common.MaxQuota {
+		common.ApiErrorI18n(c, i18n.MsgQuotaExceedMax)
+		return
+	}
 	if valid, msg := validateExpiredTime(c, redemption.ExpiredTime); !valid {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": msg})
 		return
@@ -147,6 +155,14 @@ func UpdateRedemption(c *gin.Context) {
 		return
 	}
 	if statusOnly == "" {
+		if redemption.Quota <= 0 {
+			common.ApiErrorI18n(c, i18n.MsgQuotaNegative)
+			return
+		}
+		if redemption.Quota > common.MaxQuota {
+			common.ApiErrorI18n(c, i18n.MsgQuotaExceedMax)
+			return
+		}
 		if valid, msg := validateExpiredTime(c, redemption.ExpiredTime); !valid {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": msg})
 			return

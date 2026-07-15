@@ -159,6 +159,17 @@ func Redeem(key string, userId int) (quota int, err error) {
 		if redemption.ExpiredTime != 0 && redemption.ExpiredTime < common.GetTimestamp() {
 			return errors.New("该兑换码已过期")
 		}
+		if err := redemption.validateQuota(); err != nil {
+			return err
+		}
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
+			return err
+		}
+		newQuota, err := checkedQuotaBalanceDelta(user.Quota, redemption.Quota)
+		if err != nil {
+			return err
+		}
 		// Compare-and-swap on status: only the transaction that flips
 		// enabled -> used may credit quota, so a concurrent redeem of the
 		// same code loses here even without a row lock (e.g. on SQLite).
@@ -175,20 +186,24 @@ func Redeem(key string, userId int) (quota int, err error) {
 		if result.RowsAffected == 0 {
 			return errors.New("该兑换码已被使用")
 		}
-		return tx.Model(&User{}).Where("id = ?", userId).Update("quota", gorm.Expr("quota + ?", redemption.Quota)).Error
+		return tx.Model(&user).Update("quota", newQuota).Error
 	})
 	if err != nil {
 		common.SysError("redemption failed: " + err.Error())
 		return 0, ErrRedeemFailed
+	}
+	if err := InvalidateUserCache(userId); err != nil {
+		common.SysLog("failed to invalidate user cache after redemption: " + err.Error())
 	}
 	RecordLog(userId, LogTypeTopup, fmt.Sprintf("通过兑换码充值 %s，兑换码ID %d", logger.LogQuota(redemption.Quota), redemption.Id))
 	return redemption.Quota, nil
 }
 
 func (redemption *Redemption) Insert() error {
-	var err error
-	err = DB.Create(redemption).Error
-	return err
+	if err := redemption.validateQuota(); err != nil {
+		return err
+	}
+	return DB.Create(redemption).Error
 }
 
 func (redemption *Redemption) SelectUpdate() error {
@@ -198,9 +213,17 @@ func (redemption *Redemption) SelectUpdate() error {
 
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (redemption *Redemption) Update() error {
-	var err error
-	err = DB.Model(redemption).Select("name", "status", "quota", "redeemed_time", "expired_time").Updates(redemption).Error
-	return err
+	if err := redemption.validateQuota(); err != nil {
+		return err
+	}
+	return DB.Model(redemption).Select("name", "status", "quota", "redeemed_time", "expired_time").Updates(redemption).Error
+}
+
+func (redemption *Redemption) validateQuota() error {
+	if redemption.Quota <= 0 || redemption.Quota > common.MaxQuota {
+		return errors.New("redemption quota must be positive and within the supported range")
+	}
+	return nil
 }
 
 func (redemption *Redemption) Delete() error {
