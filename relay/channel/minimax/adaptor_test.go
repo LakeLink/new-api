@@ -1,13 +1,13 @@
 package minimax
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -57,14 +57,14 @@ func TestConvertImageRequest(t *testing.T) {
 		t.Fatalf("ConvertImageRequest returned error: %v", err)
 	}
 
-	body, err := json.Marshal(got)
+	body, err := common.Marshal(got)
 	if err != nil {
-		t.Fatalf("json.Marshal returned error: %v", err)
+		t.Fatalf("common.Marshal returned error: %v", err)
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v", err)
+	if err := common.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("common.Unmarshal returned error: %v", err)
 	}
 
 	if payload["model"] != "image-01" {
