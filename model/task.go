@@ -42,7 +42,7 @@ const (
 )
 
 type Task struct {
-	ID         int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
+	ID         int64                 `json:"id" gorm:"primaryKey"`
 	CreatedAt  int64                 `json:"created_at" gorm:"index"`
 	UpdatedAt  int64                 `json:"updated_at"`
 	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
@@ -81,12 +81,8 @@ type Properties struct {
 }
 
 func (m *Properties) Scan(val interface{}) error {
-	bytesValue, _ := val.([]byte)
-	if len(bytesValue) == 0 {
-		*m = Properties{}
-		return nil
-	}
-	return common.Unmarshal(bytesValue, m)
+	*m = Properties{}
+	return scanJSONObject(val, m)
 }
 
 func (m Properties) Value() (driver.Value, error) {
@@ -143,11 +139,8 @@ func GenerateTaskID() string {
 }
 
 func (p *TaskPrivateData) Scan(val interface{}) error {
-	bytesValue, _ := val.([]byte)
-	if len(bytesValue) == 0 {
-		return nil
-	}
-	return common.Unmarshal(bytesValue, p)
+	*p = TaskPrivateData{}
+	return scanJSONObject(val, p)
 }
 
 func (p TaskPrivateData) Value() (driver.Value, error) {

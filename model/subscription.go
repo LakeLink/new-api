@@ -158,7 +158,7 @@ type SubscriptionPlan struct {
 	DurationValue int    `json:"duration_value" gorm:"type:int;not null;default:1"`
 	CustomSeconds int64  `json:"custom_seconds" gorm:"type:bigint;not null;default:0"`
 
-	Enabled   bool `json:"enabled" gorm:"default:true"`
+	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order" gorm:"type:int;default:0"`
 
 	AllowBalancePay *bool `json:"allow_balance_pay"`
@@ -188,6 +188,18 @@ type SubscriptionPlan struct {
 
 	CreatedAt int64 `json:"created_at" gorm:"bigint"`
 	UpdatedAt int64 `json:"updated_at" gorm:"bigint"`
+}
+
+// UnmarshalJSON applies the public API default without encoding it as a
+// database schema default. Explicit false values remain false.
+func (p *SubscriptionPlan) UnmarshalJSON(data []byte) error {
+	type subscriptionPlanAlias SubscriptionPlan
+	decoded := subscriptionPlanAlias{Enabled: true}
+	if err := common.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = SubscriptionPlan(decoded)
+	return nil
 }
 
 func (p *SubscriptionPlan) BeforeCreate(tx *gorm.DB) error {

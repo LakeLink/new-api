@@ -1,8 +1,8 @@
 package ratio_setting
 
 import (
-	"encoding/json"
 	"errors"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -107,13 +107,13 @@ func UpdateGroupGroupRatioByJSONString(jsonStr string) error {
 
 func CheckGroupRatio(jsonStr string) error {
 	checkGroupRatio := make(map[string]float64)
-	err := json.Unmarshal([]byte(jsonStr), &checkGroupRatio)
+	err := common.UnmarshalJsonStr(jsonStr, &checkGroupRatio)
 	if err != nil {
 		return err
 	}
 	for name, ratio := range checkGroupRatio {
-		if ratio < 0 {
-			return errors.New("group ratio must be not less than 0: " + name)
+		if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+			return errors.New("group ratio must be finite and not less than 0: " + name)
 		}
 	}
 	return nil
