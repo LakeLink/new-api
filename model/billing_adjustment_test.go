@@ -62,8 +62,12 @@ func TestBillingAdjustmentWalletSettlementIsAtomicAndIdempotent(t *testing.T) {
 	}
 	taskID, err := EnqueueBillingAdjustment(adjustment)
 	require.NoError(t, err)
-	require.NoError(t, ProcessBillingAdjustment(taskID))
-	require.NoError(t, ProcessBillingAdjustment(taskID))
+	firstResult, err := ProcessBillingAdjustmentWithResult(taskID)
+	require.NoError(t, err)
+	assert.False(t, firstResult.AlreadyProcessed)
+	secondResult, err := ProcessBillingAdjustmentWithResult(taskID)
+	require.NoError(t, err)
+	assert.True(t, secondResult.AlreadyProcessed)
 
 	require.NoError(t, db.First(&user, user.Id).Error)
 	require.NoError(t, db.First(&token, token.Id).Error)
@@ -210,6 +214,7 @@ func TestBillingAdjustmentSubscriptionSettlementSplitsWalletOverflow(t *testing.
 		SubscriptionDelta: 10,
 		WalletDelta:       20,
 		TokenDelta:        30,
+		AlreadyProcessed:  true,
 	}, result)
 }
 
@@ -253,6 +258,7 @@ func TestBillingAdjustmentStrictSubscriptionRetainsOverage(t *testing.T) {
 	assert.Equal(t, BillingAdjustmentResult{
 		SubscriptionDelta: 30,
 		TokenDelta:        30,
+		AlreadyProcessed:  true,
 	}, result)
 }
 

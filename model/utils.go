@@ -183,6 +183,10 @@ type BillingAdjustmentResult struct {
 	SubscriptionDelta int `json:"subscription_delta,omitempty"`
 	WalletDelta       int `json:"wallet_delta,omitempty"`
 	TokenDelta        int `json:"token_delta,omitempty"`
+	// AlreadyProcessed is transient caller metadata. It is true when the
+	// durable task had already succeeded before this processing attempt, which
+	// lets callers avoid duplicating consume logs and aggregate counters.
+	AlreadyProcessed bool `json:"-"`
 }
 
 func billingAdjustmentTaskID(requestID string, kind string) string {
@@ -473,9 +477,14 @@ func ProcessBillingAdjustmentWithResult(taskID string) (BillingAdjustmentResult,
 				} else {
 					appliedResult.SubscriptionDelta = adjustment.FundingDelta
 				}
+				appliedResult.AlreadyProcessed = true
 				return nil
 			}
-			return common.UnmarshalJsonStr(task.Result, &appliedResult)
+			if err := common.UnmarshalJsonStr(task.Result, &appliedResult); err != nil {
+				return err
+			}
+			appliedResult.AlreadyProcessed = true
+			return nil
 		}
 		if task.Status != SystemTaskStatusPending {
 			return fmt.Errorf("billing adjustment %s has invalid status %s", taskID, task.Status)

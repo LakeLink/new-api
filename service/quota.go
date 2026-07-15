@@ -86,15 +86,13 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 	return common.QuotaFromDecimalChecked(quota)
 }
 
+// PreWssConsumeQuota extends the request's reservation to cover cumulative
+// realtime usage. Charging each response independently here would be charged
+// again by the final BillingSession settlement.
 func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
 	if relayInfo.UsePrice {
 		return nil
 	}
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
-	if err != nil {
-		return err
-	}
-
 	token, err := model.GetTokenByKey(strings.TrimPrefix(relayInfo.TokenKey, "sk-"), false)
 	if err != nil {
 		return err
@@ -138,20 +136,44 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
 	noteQuotaClamp(relayInfo, clamp)
-
-	if userQuota < quota {
-		return fmt.Errorf("user quota is not enough, user quota: %s, need quota: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quota))
+	if clamp != nil {
+		return clamp
+	}
+	reservedQuota := relayInfo.FinalPreConsumedQuota
+	if relayInfo.Billing != nil {
+		reservedQuota = relayInfo.Billing.GetPreConsumedQuota()
+	}
+	quotaToReserve := quota - reservedQuota
+	if quotaToReserve <= 0 {
+		return nil
 	}
 
-	if !token.UnlimitedQuota && token.RemainQuota < quota {
-		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota))
+	if relayInfo.BillingSource != BillingSourceSubscription {
+		userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+		if err != nil {
+			return err
+		}
+		if userQuota < quotaToReserve {
+			return fmt.Errorf("user quota is not enough, user quota: %s, need quota: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quotaToReserve))
+		}
 	}
 
-	err = PostConsumeQuota(relayInfo, quota, 0, false)
-	if err != nil {
-		return err
+	if !token.UnlimitedQuota && token.RemainQuota < quotaToReserve {
+		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quotaToReserve))
 	}
-	logger.LogInfo(ctx, "realtime streaming consume quota success, quota: "+fmt.Sprintf("%d", quota))
+
+	if relayInfo.Billing != nil {
+		if err := relayInfo.Billing.Reserve(quota); err != nil {
+			return err
+		}
+	} else {
+		purpose := fmt.Sprintf("realtime-reserve:%d", quota)
+		if _, _, err := ApplyDurableQuotaAdjustment(relayInfo, purpose, quotaToReserve, 0, false); err != nil {
+			return err
+		}
+		relayInfo.FinalPreConsumedQuota = quota
+	}
+	logger.LogInfo(ctx, "realtime streaming reserve quota success, quota: "+fmt.Sprintf("%d", quota))
 	return nil
 }
 
@@ -267,7 +289,10 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 	promptCacheReadPrice := quotaPrice * priceData.CacheRatio
 	completionPrice := quotaPrice * priceData.CompletionRatio
 
-	cost, _ := usage.Cost.(float64)
+	cost, ok := usage.Cost.(float64)
+	if !ok || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+		return -1
+	}
 	totalPromptTokens := float64(usage.PromptTokens)
 	completionTokens := float64(usage.CompletionTokens)
 	promptCacheReadTokens := float64(usage.PromptTokensDetails.CachedTokens)
