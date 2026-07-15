@@ -1072,6 +1072,19 @@ func IncreaseUserQuota(id int, quota int, _ bool) (err error) {
 	return nil
 }
 
+func SetUserQuota(id int, quota int) error {
+	if quota < common.MinQuota || quota > common.MaxQuota {
+		return errors.New("quota 必须在有效范围内！")
+	}
+	if err := DB.Model(&User{}).Where("id = ?", id).Update("quota", quota).Error; err != nil {
+		return err
+	}
+	if err := invalidateUserCache(id); err != nil {
+		common.SysLog("failed to invalidate user quota cache: " + err.Error())
+	}
+	return nil
+}
+
 func increaseUserQuota(id int, quota int) (err error) {
 	result := DB.Model(&User{}).
 		Where("id = ? AND quota <= ?", id, common.MaxQuota-quota).
