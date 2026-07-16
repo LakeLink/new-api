@@ -73,7 +73,11 @@ export const useAuthStore = create<AuthState>()((set) => {
     } catch {
       // Clear dirty data when parsing fails
       if (typeof window !== 'undefined') {
-        window.localStorage.removeItem('user')
+        try {
+          window.localStorage.removeItem('user')
+        } catch {
+          // Storage can be unavailable in restrictive browser contexts.
+        }
       }
     }
     return null
@@ -86,10 +90,14 @@ export const useAuthStore = create<AuthState>()((set) => {
         set((state) => {
           // Persist user to localStorage
           if (typeof window !== 'undefined') {
-            if (user) {
-              window.localStorage.setItem('user', JSON.stringify(user))
-            } else {
-              window.localStorage.removeItem('user')
+            try {
+              if (user) {
+                window.localStorage.setItem('user', JSON.stringify(user))
+              } else {
+                window.localStorage.removeItem('user')
+              }
+            } catch {
+              // Authentication state must still update when storage is blocked.
             }
           }
           return { ...state, auth: { ...state.auth, user } }
@@ -98,7 +106,11 @@ export const useAuthStore = create<AuthState>()((set) => {
         set((state) => {
           if (typeof window !== 'undefined') {
             clearPlaygroundData(state.auth.user?.id)
-            window.localStorage.removeItem('user')
+            try {
+              window.localStorage.removeItem('user')
+            } catch {
+              // The in-memory session reset remains authoritative.
+            }
           }
           return {
             ...state,

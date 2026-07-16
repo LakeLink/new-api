@@ -546,6 +546,14 @@ export function SubscriptionPlansCard({
               const count = planPurchaseCountMap.get(plan.id) || 0
               const reached = limit > 0 && count >= limit
 
+              let displayedPrice = t('Provider price')
+              if (allowsBalanceRedemption) {
+                displayedPrice =
+                  balanceCost === null
+                    ? t('Not available')
+                    : formatQuota(balanceCost)
+              }
+
               const benefits = [
                 `${t('Validity Period')}: ${formatDuration(plan, t)}`,
                 formatResetPeriod(plan, t) !== t('No Reset')
@@ -597,11 +605,7 @@ export function SubscriptionPlansCard({
                           : t('External checkout')}
                       </p>
                       <span className='text-primary text-2xl font-bold'>
-                        {allowsBalanceRedemption
-                          ? balanceCost === null
-                            ? t('Not available')
-                            : formatQuota(balanceCost)
-                          : t('Provider price')}
+                        {displayedPrice}
                       </span>
                     </div>
 

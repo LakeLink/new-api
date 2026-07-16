@@ -254,6 +254,31 @@ export function SubscriptionPurchaseDialog(props: Props) {
     }
   }
 
+  let balanceStatusAlert = null
+  if (balanceCost === null) {
+    balanceStatusAlert = (
+      <Alert variant='destructive'>
+        <AlertDescription>
+          {t('Balance cost')}: {t('Not available')}
+        </AlertDescription>
+      </Alert>
+    )
+  } else if (!allowBalancePay) {
+    balanceStatusAlert = (
+      <Alert variant='destructive'>
+        <AlertDescription>
+          {t('This plan does not allow balance redemption')}
+        </AlertDescription>
+      </Alert>
+    )
+  } else if (insufficientBalance) {
+    balanceStatusAlert = (
+      <Alert variant='destructive'>
+        <AlertDescription>{t('Insufficient balance')}</AlertDescription>
+      </Alert>
+    )
+  }
+
   return (
     <Dialog
       open={props.open}
@@ -343,25 +368,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
             <span className='text-muted-foreground'>{t('Available')}</span>
             <span>{formatQuota(userQuota)}</span>
           </div>
-          {balanceCost === null ? (
-            <Alert variant='destructive'>
-              <AlertDescription>
-                {t('Balance cost')}: {t('Not available')}
-              </AlertDescription>
-            </Alert>
-          ) : !allowBalancePay ? (
-            <Alert variant='destructive'>
-              <AlertDescription>
-                {t('This plan does not allow balance redemption')}
-              </AlertDescription>
-            </Alert>
-          ) : (
-            insufficientBalance && (
-              <Alert variant='destructive'>
-                <AlertDescription>{t('Insufficient balance')}</AlertDescription>
-              </Alert>
-            )
-          )}
+          {balanceStatusAlert}
           <Button
             variant='outline'
             onClick={handlePayBalance}
