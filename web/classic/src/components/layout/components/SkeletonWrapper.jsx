@@ -271,22 +271,34 @@ const SkeletonWrapper = ({
           {Array(2)
             .fill(null)
             .map((_, i) => (
-              <CollapsedRow keyPrefix='c-chat' index={i} />
+              <CollapsedRow key={`c-chat-${i}`} keyPrefix='c-chat' index={i} />
             ))}
           {Array(5)
             .fill(null)
             .map((_, i) => (
-              <CollapsedRow keyPrefix='c-console' index={i} />
+              <CollapsedRow
+                key={`c-console-${i}`}
+                keyPrefix='c-console'
+                index={i}
+              />
             ))}
           {Array(2)
             .fill(null)
             .map((_, i) => (
-              <CollapsedRow keyPrefix='c-personal' index={i} />
+              <CollapsedRow
+                key={`c-personal-${i}`}
+                keyPrefix='c-personal'
+                index={i}
+              />
             ))}
           {Array(5)
             .fill(null)
             .map((_, i) => (
-              <CollapsedRow keyPrefix='c-admin' index={i} />
+              <CollapsedRow
+                key={`c-admin-${i}`}
+                keyPrefix='c-admin'
+                index={i}
+              />
             ))}
         </div>
       );

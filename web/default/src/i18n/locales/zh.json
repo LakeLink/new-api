@@ -2119,6 +2119,7 @@
     "Gemini will continue to auto-detect thinking mode even with the adapter disabled. Enable this only when you need finer control over pricing and budgeting.": "即使禁用适配器，Gemini 也会继续自动检测思维模式。仅当您需要对定价和预算进行更精细的控制时才启用此选项。",
     "General": "常规",
     "General Settings": "通用设置",
+    "Generate": "生成",
     "Generate and manage your API access token": "生成和管理您的 API 访问令牌",
     "Generate Lyrics": "生成歌词",
     "Generate Music": "生成音乐",

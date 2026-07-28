@@ -46,9 +46,8 @@ export function useTwoFA(enabled = true) {
       if (response.success && response.data) {
         setStatus(response.data)
       }
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('Failed to fetch 2FA status:', error)
+    } catch {
+      setStatus(DEFAULT_STATUS)
     } finally {
       setLoading(false)
     }

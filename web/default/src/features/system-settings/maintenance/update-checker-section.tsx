@@ -25,6 +25,7 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Markdown } from '@/components/ui/markdown'
 import { formatTimestamp, formatTimestampToDate } from '@/lib/format'
+import { openExternalHttpUrl } from '@/lib/safe-navigation'
 
 import { SettingsSection } from '../components/settings-section'
 
@@ -99,7 +100,7 @@ export function UpdateCheckerSection({
 
   const goToRelease = () => {
     if (release?.html_url) {
-      window.open(release.html_url, '_blank', 'noopener,noreferrer')
+      openExternalHttpUrl(release.html_url)
     }
   }
 

@@ -28,12 +28,39 @@ import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import { OAuthCallbackScreen } from '@/features/auth/components/oauth-callback-screen'
-import { OAUTH_BIND_STORAGE_KEY } from '@/features/auth/constants'
+import {
+  OAUTH_BIND_PENDING_STORAGE_KEY,
+  OAUTH_BIND_STORAGE_KEY,
+} from '@/features/auth/constants'
 import { api, getSelf } from '@/lib/api'
+import { normalizeInternalNavigationUrl } from '@/lib/safe-navigation'
 import { useAuthStore, type AuthUser } from '@/stores/auth-store'
 
 type OAuthRequestConfig = AxiosRequestConfig & {
   skipBusinessError?: boolean
+}
+
+const OAUTH_BIND_PENDING_TTL_MS = 10 * 60 * 1000
+
+function hasPendingOAuthBinding(provider: string, state?: string): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    const raw = window.localStorage.getItem(OAUTH_BIND_PENDING_STORAGE_KEY)
+    if (!raw) return false
+    const pending = JSON.parse(raw) as {
+      provider?: string
+      state?: string
+      timestamp?: number
+    }
+    return (
+      pending.provider === provider &&
+      pending.state === state &&
+      typeof pending.timestamp === 'number' &&
+      Date.now() - pending.timestamp < OAUTH_BIND_PENDING_TTL_MS
+    )
+  } catch {
+    return false
+  }
 }
 
 function OAuthCallback() {
@@ -46,33 +73,31 @@ function OAuthCallback() {
     state?: string
     redirect?: string
   }
-  const [mode, setMode] = useState<'login' | 'bind'>(() => {
-    if (typeof window === 'undefined') return 'login'
-    return window.opener ? 'bind' : 'login'
-  })
+  const [mode, setMode] = useState<'login' | 'bind'>(() =>
+    hasPendingOAuthBinding(provider, search?.state) ? 'bind' : 'login'
+  )
 
   useEffect(() => {
     if (typeof window === 'undefined') return
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMode(window.opener ? 'bind' : 'login')
-  }, [])
+    setMode(hasPendingOAuthBinding(provider, search?.state) ? 'bind' : 'login')
+  }, [provider, search?.state])
 
   useEffect(() => {
     ;(async () => {
       const safeNavigate = (target: string) => {
-        navigate({ to: target as never, replace: true })
+        const safeTarget = normalizeInternalNavigationUrl(target, '/sign-in')
+        navigate({ to: safeTarget as never, replace: true })
         if (typeof window !== 'undefined') {
           setTimeout(() => {
-            const normalizedTarget = target.startsWith('/')
-              ? target
-              : `/${target}`
+            const normalizedTarget = safeTarget
             const currentPath =
               window.location.pathname + window.location.search
             if (
               currentPath !== normalizedTarget &&
               currentPath !== `${normalizedTarget}/`
             ) {
-              window.location.replace(target)
+              window.location.replace(safeTarget)
             }
           }, 100)
         }
@@ -84,7 +109,7 @@ function OAuthCallback() {
         return
       }
       const isBindingFlow =
-        typeof window !== 'undefined' ? Boolean(window.opener) : mode === 'bind'
+        hasPendingOAuthBinding(provider, search?.state) || mode === 'bind'
       if (isBindingFlow && mode !== 'bind') {
         setMode('bind')
       } else if (!isBindingFlow && mode !== 'login') {
@@ -93,6 +118,7 @@ function OAuthCallback() {
       const notifyBindingResult = (status: 'success' | 'error') => {
         if (typeof window === 'undefined') return
         try {
+          window.localStorage.removeItem(OAUTH_BIND_PENDING_STORAGE_KEY)
           window.localStorage.setItem(
             OAUTH_BIND_STORAGE_KEY,
             JSON.stringify({
@@ -144,7 +170,10 @@ function OAuthCallback() {
       }
 
       const redirectAfterLogin = (target?: string) => {
-        const to = target || search?.redirect || '/dashboard'
+        const to = normalizeInternalNavigationUrl(
+          target || search?.redirect,
+          '/dashboard'
+        )
         safeNavigate(to)
         toast.success(i18next.t('Signed in successfully!'))
       }
@@ -173,7 +202,7 @@ function OAuthCallback() {
           const { message } = res.data
           const loginUser = (res.data?.data ?? null) as AuthUser | null
           // Check if this is a bind operation
-          if (message === 'bind') {
+          if (res.data?.data?.action === 'bind' || message === 'bind') {
             toast.success(i18next.t('Binding successful!'))
             notifyBindingResult('success')
             if (isBindingFlow) {

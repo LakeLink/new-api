@@ -46,6 +46,12 @@ export function NavLinkItem({ link, className }: NavLinkItemProps) {
         rel='noopener noreferrer'
         className={linkClassName}
         aria-disabled={link.disabled}
+        tabIndex={link.disabled ? -1 : undefined}
+        onClick={(event) => {
+          if (link.disabled) {
+            event.preventDefault()
+          }
+        }}
       >
         {link.title}
       </a>
@@ -76,9 +82,9 @@ export function NavLinkList({
 }: NavLinkListProps) {
   return (
     <>
-      {links.map((link, index) => (
+      {links.map((link) => (
         <NavLinkItem
-          key={index}
+          key={`${link.href}-${link.title}`}
           link={link}
           className={cn(className, itemClassName)}
         />

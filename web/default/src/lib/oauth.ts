@@ -16,7 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { OAUTH_BIND_PENDING_STORAGE_KEY } from '@/features/auth/constants'
+
 import { api } from './api'
+import { normalizeHttpUrl } from './safe-navigation'
 
 // ============================================================================
 // OAuth URL Builders
@@ -26,7 +29,11 @@ import { api } from './api'
  * Build GitHub OAuth URL
  */
 export function buildGitHubOAuthUrl(clientId: string, state: string): string {
-  return `https://github.com/login/oauth/authorize?client_id=${clientId}&state=${state}&scope=user:email`
+  const url = new URL('https://github.com/login/oauth/authorize')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set('state', state)
+  url.searchParams.set('scope', 'user:email')
+  return url.toString()
 }
 
 /**
@@ -40,7 +47,7 @@ export function buildDiscordOAuthUrl(clientId: string, state: string): string {
     `${window.location.origin}/oauth/discord`
   )
   url.searchParams.set('response_type', 'code')
-  url.searchParams.set('scope', 'identify+openid')
+  url.searchParams.set('scope', 'identify openid')
   url.searchParams.set('state', state)
   return url.toString()
 }
@@ -53,7 +60,11 @@ export function buildOIDCOAuthUrl(
   clientId: string,
   state: string
 ): string {
-  const url = new URL(authUrl)
+  const safeAuthUrl = normalizeHttpUrl(authUrl)
+  if (!safeAuthUrl) {
+    throw new Error('OAuth authorization endpoint must use HTTP or HTTPS')
+  }
+  const url = new URL(safeAuthUrl)
   url.searchParams.set('client_id', clientId)
   url.searchParams.set('redirect_uri', `${window.location.origin}/oauth/oidc`)
   url.searchParams.set('response_type', 'code')
@@ -66,7 +77,11 @@ export function buildOIDCOAuthUrl(
  * Build LinuxDO OAuth URL
  */
 export function buildLinuxDOOAuthUrl(clientId: string, state: string): string {
-  return `https://connect.linux.do/oauth2/authorize?response_type=code&client_id=${clientId}&state=${state}`
+  const url = new URL('https://connect.linux.do/oauth2/authorize')
+  url.searchParams.set('response_type', 'code')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set('state', state)
+  return url.toString()
 }
 
 // ============================================================================
@@ -79,21 +94,27 @@ export function buildLinuxDOOAuthUrl(clientId: string, state: string): string {
  */
 export async function getOAuthState(): Promise<string | null> {
   try {
-    let path = '/api/oauth/state'
     const affCode = localStorage.getItem('aff')
-    if (affCode && affCode.length > 0) {
-      path += `?aff=${affCode}`
-    }
-    const res = await api.get(path)
+    const res = await api.post('/api/oauth/state', { aff: affCode || '' })
     if (res.data.success) {
       return res.data.data
     }
     return null
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Failed to get OAuth state:', error)
+  } catch {
     return null
   }
+}
+
+function openOAuthBindingUrl(
+  url: string,
+  provider: string,
+  state: string
+): void {
+  localStorage.setItem(
+    OAUTH_BIND_PENDING_STORAGE_KEY,
+    JSON.stringify({ provider, state, timestamp: Date.now() })
+  )
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 /**
@@ -104,7 +125,7 @@ export async function handleGitHubOAuth(clientId: string): Promise<void> {
   if (!state) return
 
   const url = buildGitHubOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  openOAuthBindingUrl(url, 'github', state)
 }
 
 /**
@@ -115,7 +136,7 @@ export async function handleDiscordOAuth(clientId: string): Promise<void> {
   if (!state) return
 
   const url = buildDiscordOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  openOAuthBindingUrl(url, 'discord', state)
 }
 
 /**
@@ -129,7 +150,7 @@ export async function handleOIDCOAuth(
   if (!state) return
 
   const url = buildOIDCOAuthUrl(authUrl, clientId, state)
-  window.open(url, '_blank')
+  openOAuthBindingUrl(url, 'oidc', state)
 }
 
 /**
@@ -140,5 +161,31 @@ export async function handleLinuxDOOAuth(clientId: string): Promise<void> {
   if (!state) return
 
   const url = buildLinuxDOOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  openOAuthBindingUrl(url, 'linuxdo', state)
+}
+
+export async function handleCustomOAuth(provider: {
+  slug: string
+  client_id: string
+  authorization_endpoint: string
+  scopes?: string
+}): Promise<void> {
+  const state = await getOAuthState()
+  if (!state) return
+
+  const safeEndpoint = normalizeHttpUrl(provider.authorization_endpoint)
+  if (!safeEndpoint) {
+    throw new Error('OAuth authorization endpoint must use HTTP or HTTPS')
+  }
+
+  const url = new URL(safeEndpoint)
+  url.searchParams.set('client_id', provider.client_id)
+  url.searchParams.set(
+    'redirect_uri',
+    `${window.location.origin}/oauth/${encodeURIComponent(provider.slug)}`
+  )
+  url.searchParams.set('response_type', 'code')
+  url.searchParams.set('scope', provider.scopes || 'openid profile email')
+  url.searchParams.set('state', state)
+  openOAuthBindingUrl(url.toString(), provider.slug, state)
 }

@@ -153,12 +153,19 @@ function ChatRouteComponent() {
     )
   }
 
+  const iframeSandbox =
+    new URL(iframeSrc).origin === window.location.origin
+      ? 'allow-downloads allow-forms allow-popups allow-presentation allow-scripts'
+      : undefined
+
   return (
     <iframe
       src={iframeSrc}
       key={iframeSrc}
       className='h-full w-full border-0'
       allow='camera; microphone'
+      referrerPolicy='no-referrer'
+      sandbox={iframeSandbox}
       title={`Chat preset: ${preset.name}`}
     />
   )

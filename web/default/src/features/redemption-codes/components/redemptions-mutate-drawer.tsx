@@ -89,18 +89,34 @@ export function RedemptionsMutateDrawer({
 
   // Load existing data when updating
   useEffect(() => {
+    let cancelled = false
+
     if (open && isUpdate && currentRow) {
       // For update, fetch fresh data
-      getRedemption(currentRow.id).then((result) => {
-        if (result.success && result.data) {
-          form.reset(transformRedemptionToFormDefaults(result.data))
+      void (async () => {
+        try {
+          const result = await getRedemption(currentRow.id)
+          if (cancelled) return
+          if (result.success && result.data) {
+            form.reset(transformRedemptionToFormDefaults(result.data))
+          } else {
+            toast.error(result.message || t('Request failed'))
+          }
+        } catch {
+          if (!cancelled) {
+            toast.error(t('Request failed'))
+          }
         }
-      })
+      })()
     } else if (open && !isUpdate) {
       // For create, reset to defaults
       form.reset(REDEMPTION_FORM_DEFAULT_VALUES)
     }
-  }, [open, isUpdate, currentRow, form])
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, isUpdate, currentRow, form, t])
 
   const onSubmit = async (data: RedemptionFormValues) => {
     setIsSubmitting(true)

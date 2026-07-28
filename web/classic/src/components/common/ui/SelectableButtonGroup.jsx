@@ -133,6 +133,10 @@ const SelectableButtonGroup = ({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
+    width: '100%',
+    padding: 0,
+    border: 0,
+    background: 'transparent',
   };
 
   const renderSkeletonButtons = () => {
@@ -206,7 +210,9 @@ const SelectableButtonGroup = ({
                   {item.icon && <span className='sbg-icon'>{item.icon}</span>}
                   <ConditionalTooltipText text={item.label} />
                   {item.tagCount !== undefined && shouldShowTags && (
-                    <span className={`sbg-badge ${isActive ? 'sbg-badge-active' : ''}`}>
+                    <span
+                      className={`sbg-badge ${isActive ? 'sbg-badge-active' : ''}`}
+                    >
                       {item.tagCount}
                     </span>
                   )}
@@ -228,11 +234,15 @@ const SelectableButtonGroup = ({
               <div className='sbg-content'>
                 {item.icon && <span className='sbg-icon'>{item.icon}</span>}
                 <ConditionalTooltipText text={item.label} />
-                {item.tagCount !== undefined && shouldShowTags && item.tagCount !== '' && (
-                  <span className={`sbg-badge ${isActive ? 'sbg-badge-active' : ''}`}>
-                    {item.tagCount}
-                  </span>
-                )}
+                {item.tagCount !== undefined &&
+                  shouldShowTags &&
+                  item.tagCount !== '' && (
+                    <span
+                      className={`sbg-badge ${isActive ? 'sbg-badge-active' : ''}`}
+                    >
+                      {item.tagCount}
+                    </span>
+                  )}
               </div>
             </Button>
           </Col>
@@ -265,13 +275,14 @@ const SelectableButtonGroup = ({
             {contentElement}
           </Collapsible>
           {isOpen ? null : (
-            <div onClick={toggle} style={{ ...linkStyle }}>
+            <button type='button' onClick={toggle} style={{ ...linkStyle }}>
               <IconChevronDown size='small' />
               <span>{t('展开更多')}</span>
-            </div>
+            </button>
           )}
           {isOpen && (
-            <div
+            <button
+              type='button'
               onClick={toggle}
               style={{
                 ...linkStyle,
@@ -282,7 +293,7 @@ const SelectableButtonGroup = ({
             >
               <IconChevronUp size='small' />
               <span>{t('收起')}</span>
-            </div>
+            </button>
           )}
         </div>
       ) : (

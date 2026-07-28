@@ -84,13 +84,13 @@ const DebugPanel = ({
         }
       >
         {pos === 'start' ? (
-          <div style={style} onClick={handleArrowClick}>
+          <button type='button' style={style} onClick={handleArrowClick}>
             ←
-          </div>
+          </button>
         ) : (
-          <div style={style} onClick={handleArrowClick}>
+          <button type='button' style={style} onClick={handleArrowClick}>
             →
-          </div>
+          </button>
         )}
       </Dropdown>
     );

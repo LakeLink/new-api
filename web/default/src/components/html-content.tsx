@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import DOMPurify, { type Config } from 'dompurify'
 import { useEffect, useMemo, useRef } from 'react'
 
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { cn } from '@/lib/utils'
 
 export type HtmlContentVariant = 'inline' | 'isolated'
@@ -87,7 +88,26 @@ const isolatedSanitizeOptions = {
   FORCE_BODY: true,
 } satisfies Config
 
-function hardenIsolatedHtml(html: string): string {
+const inlineSanitizeOptions = {
+  FORBID_ATTR: ['formaction', 'srcdoc', 'style'],
+  FORBID_TAGS: [
+    'base',
+    'button',
+    'embed',
+    'form',
+    'iframe',
+    'input',
+    'link',
+    'meta',
+    'object',
+    'script',
+    'select',
+    'style',
+    'textarea',
+  ],
+} satisfies Config
+
+function hardenSanitizedHtml(html: string): string {
   if (typeof document === 'undefined') {
     return html
   }
@@ -97,10 +117,7 @@ function hardenIsolatedHtml(html: string): string {
 
   template.content.querySelectorAll('a[target="_blank"]').forEach((link) => {
     const rel = new Set(
-      link
-        .getAttribute('rel')
-        ?.split(/\s+/)
-        .filter(Boolean) ?? []
+      link.getAttribute('rel')?.split(/\s+/).filter(Boolean) ?? []
     )
 
     rel.add('noopener')
@@ -109,6 +126,12 @@ function hardenIsolatedHtml(html: string): string {
   })
 
   template.content.querySelectorAll('iframe').forEach((frame) => {
+    const safeUrl = normalizeHttpUrl(frame.getAttribute('src'))
+    if (!safeUrl) {
+      frame.remove()
+      return
+    }
+    frame.setAttribute('src', safeUrl)
     frame.removeAttribute('srcdoc')
     frame.setAttribute('sandbox', isolatedContentSandbox)
     frame.setAttribute('referrerpolicy', 'no-referrer')
@@ -128,10 +151,11 @@ function sanitizeHtmlContent(
   if (variant === 'isolated') {
     const html = DOMPurify.sanitize(content, isolatedSanitizeOptions)
 
-    return hardenIsolatedHtml(html)
+    return hardenSanitizedHtml(html)
   }
 
-  return DOMPurify.sanitize(content)
+  const html = DOMPurify.sanitize(content, inlineSanitizeOptions)
+  return hardenSanitizedHtml(html)
 }
 
 function syncDarkClass(wrapper: HTMLElement): void {
@@ -182,10 +206,7 @@ function IsolatedHtmlContent(props: {
   }, [props.html])
 
   return (
-    <div
-      ref={containerRef}
-      className={cn('block w-full', props.className)}
-    />
+    <div ref={containerRef} className={cn('block w-full', props.className)} />
   )
 }
 

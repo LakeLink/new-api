@@ -134,18 +134,34 @@ export function UsersMutateDrawer({
 
   // Load existing data when updating
   useEffect(() => {
+    let cancelled = false
+
     if (open && isUpdate && currentRow) {
       // For update, fetch fresh data
-      getUser(currentRow.id).then((result) => {
-        if (result.success && result.data) {
-          form.reset(transformUserToFormDefaults(result.data))
+      void (async () => {
+        try {
+          const result = await getUser(currentRow.id)
+          if (cancelled) return
+          if (result.success && result.data) {
+            form.reset(transformUserToFormDefaults(result.data))
+          } else {
+            toast.error(result.message || t('Failed to fetch user information'))
+          }
+        } catch {
+          if (!cancelled) {
+            toast.error(t('Failed to fetch user information'))
+          }
         }
-      })
+      })()
     } else if (open && !isUpdate) {
       // For create, reset to defaults
       form.reset(USER_FORM_DEFAULT_VALUES)
     }
-  }, [open, isUpdate, currentRow, form])
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, isUpdate, currentRow, form, t])
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()

@@ -23,6 +23,10 @@ import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import { useStatus } from '@/hooks/use-status'
+import {
+  normalizeHttpUrl,
+  normalizeInternalNavigationUrl,
+} from '@/lib/safe-navigation'
 
 import { HeroTerminalDemo } from '../hero-terminal-demo'
 
@@ -48,12 +52,15 @@ const MoreIcon = () => (
 export function Hero(props: HeroProps) {
   const { t } = useTranslation()
   const { status } = useStatus()
-  const docsUrl =
+  const configuredDocsUrl =
     (status?.docs_link as string | undefined) || 'https://docs.newapi.pro'
+  const externalDocsUrl = normalizeHttpUrl(configuredDocsUrl)
+  const docsUrl =
+    externalDocsUrl ||
+    normalizeInternalNavigationUrl(configuredDocsUrl, '/docs')
 
   const renderDocsButton = () => {
-    const isExternal = docsUrl.startsWith('http')
-    if (isExternal) {
+    if (externalDocsUrl) {
       return (
         <Button
           variant='outline'

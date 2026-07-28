@@ -170,7 +170,11 @@ const EditUserModal = (props) => {
   const adjustQuota = async () => {
     const quotaVal = parseInt(adjustQuotaLocal) || 0;
     if (quotaVal <= 0 && adjustMode !== 'override') return;
-    if (adjustMode === 'override' && (adjustQuotaLocal === '' || adjustQuotaLocal == null)) return;
+    if (
+      adjustMode === 'override' &&
+      (adjustQuotaLocal === '' || adjustQuotaLocal == null)
+    )
+      return;
     setAdjustLoading(true);
     try {
       const res = await API.post('/api/user/manage', {
@@ -392,16 +396,20 @@ const EditUserModal = (props) => {
                       </Col>
 
                       <Col span={24}>
-                        <div
-                          className='text-xs cursor-pointer'
+                        <button
+                          type='button'
+                          className='cursor-pointer border-0 bg-transparent p-0 text-left text-xs'
                           style={{ color: 'var(--semi-color-text-2)' }}
                           onClick={() => setShowQuotaInput((v) => !v)}
                         >
                           {showQuotaInput
                             ? `▾ ${t('收起原生额度输入')}`
                             : `▸ ${t('使用原生额度输入')}`}
-                        </div>
-                        <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                        </button>
+                        <div
+                          style={{ display: showQuotaInput ? 'block' : 'none' }}
+                          className='mt-2'
+                        >
                           <Form.InputNumber
                             field='quota'
                             label={t('额度')}
@@ -530,16 +538,20 @@ const EditUserModal = (props) => {
             showClear
           />
         </div>
-        <div
-          className='text-xs cursor-pointer mt-2'
+        <button
+          type='button'
+          className='mt-2 cursor-pointer border-0 bg-transparent p-0 text-left text-xs'
           style={{ color: 'var(--semi-color-text-2)' }}
           onClick={() => setShowAdjustQuotaRaw((v) => !v)}
         >
           {showAdjustQuotaRaw
             ? `▾ ${t('收起原生额度输入')}`
             : `▸ ${t('使用原生额度输入')}`}
-        </div>
-        <div style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }} className='mt-2'>
+        </button>
+        <div
+          style={{ display: showAdjustQuotaRaw ? 'block' : 'none' }}
+          className='mt-2'
+        >
           <div className='mb-1'>
             <Text size='small'>{t('额度')}</Text>
           </div>

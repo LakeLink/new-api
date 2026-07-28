@@ -2119,6 +2119,7 @@
     "Gemini will continue to auto-detect thinking mode even with the adapter disabled. Enable this only when you need finer control over pricing and budgeting.": "Gemini sẽ tiếp tục tự động phát hiện chế độ suy nghĩ ngay cả khi bộ điều hợp bị tắt. Chỉ bật tính năng này khi bạn cần kiểm soát chi tiết hơn về giá cả và lập ngân sách.",
     "General": "Chung",
     "General Settings": "General settings",
+    "Generate": "Tạo",
     "Generate and manage your API access token": "Tạo và quản lý mã thông báo truy cập API của bạn",
     "Generate Lyrics": "Tạo lời bài hát",
     "Generate Music": "Tạo nhạc",

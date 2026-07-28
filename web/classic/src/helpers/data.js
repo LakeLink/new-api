@@ -57,6 +57,39 @@ export function setStatusData(data) {
   }
 }
 
+function sanitizeUserDataForStorage(data) {
+  const storedUser = { ...data };
+  if (storedUser.setting) {
+    try {
+      const settings =
+        typeof storedUser.setting === 'string'
+          ? JSON.parse(storedUser.setting)
+          : { ...storedUser.setting };
+      delete settings.webhook_secret;
+      delete settings.gotify_token;
+      storedUser.setting =
+        typeof storedUser.setting === 'string'
+          ? JSON.stringify(settings)
+          : settings;
+    } catch {
+      delete storedUser.setting;
+    }
+  }
+  return storedUser;
+}
+
 export function setUserData(data) {
-  localStorage.setItem('user', JSON.stringify(data));
+  const storedUser = sanitizeUserDataForStorage(data);
+  localStorage.setItem('user', JSON.stringify(storedUser));
+}
+
+export function sanitizeStoredUserData() {
+  const rawUser = localStorage.getItem('user');
+  if (!rawUser) return;
+
+  try {
+    setUserData(JSON.parse(rawUser));
+  } catch {
+    localStorage.removeItem('user');
+  }
 }

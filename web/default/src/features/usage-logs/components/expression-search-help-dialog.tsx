@@ -293,7 +293,7 @@ function ExpressionSchemaReference(props: {
                   <Badge variant='outline'>{t('Admins only')}</Badge>
                 ) : null}
               </div>
-              <code className='bg-muted mt-2 block break-all rounded px-2 py-1.5 font-mono text-xs'>
+              <code className='bg-muted mt-2 block rounded px-2 py-1.5 font-mono text-xs break-all'>
                 {example.expression}
               </code>
               <p className='text-muted-foreground mt-2 text-sm'>

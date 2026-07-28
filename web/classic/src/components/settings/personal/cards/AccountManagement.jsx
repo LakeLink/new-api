@@ -40,7 +40,7 @@ import {
 } from '@douyinfe/semi-icons';
 import { SiTelegram, SiWechat, SiLinux, SiDiscord } from 'react-icons/si';
 import { UserPlus, ShieldCheck } from 'lucide-react';
-import TelegramLoginButton from 'react-telegram-login';
+import TelegramLoginButton from '../../../common/TelegramLoginButton';
 import {
   API,
   showError,
@@ -71,6 +71,7 @@ const AccountManagement = ({
   passkeyDeleteLoading,
   onPasskeyRegister,
   onPasskeyDelete,
+  startSensitiveAction,
 }) => {
   const renderAccountInfo = (accountId, label) => {
     if (!accountId || accountId === '') {
@@ -112,7 +113,9 @@ const AccountManagement = ({
         showError(res.data.message || t('获取绑定信息失败'));
       }
     } catch (error) {
-      showError(error.response?.data?.message || error.message || t('获取绑定信息失败'));
+      showError(
+        error.response?.data?.message || error.message || t('获取绑定信息失败'),
+      );
     }
   };
 
@@ -124,39 +127,86 @@ const AccountManagement = ({
       okText: t('确认'),
       cancelText: t('取消'),
       onOk: async () => {
-        setCustomOAuthLoading((prev) => ({ ...prev, [providerId]: true }));
-        try {
-          const res = await API.delete(`/api/user/oauth/bindings/${providerId}`);
-          if (res.data.success) {
-            showSuccess(t('解绑成功'));
-            await loadCustomOAuthBindings();
-          } else {
-            showError(res.data.message);
+        await startSensitiveAction(async () => {
+          setCustomOAuthLoading((prev) => ({ ...prev, [providerId]: true }));
+          try {
+            const res = await API.delete(
+              `/api/user/oauth/bindings/${providerId}`,
+            );
+            if (res.data.success) {
+              showSuccess(t('解绑成功'));
+              await loadCustomOAuthBindings();
+            } else {
+              showError(res.data.message);
+            }
+          } catch (error) {
+            showError(
+              error.response?.data?.message || error.message || t('操作失败'),
+            );
+          } finally {
+            setCustomOAuthLoading((prev) => ({
+              ...prev,
+              [providerId]: false,
+            }));
           }
-        } catch (error) {
-          showError(error.response?.data?.message || error.message || t('操作失败'));
-        } finally {
-          setCustomOAuthLoading((prev) => ({ ...prev, [providerId]: false }));
-        }
+        });
       },
     });
   };
 
   // Handle bind custom OAuth
-  const handleBindCustomOAuth = (provider) => {
-    onCustomOAuthClicked(provider);
+  const handleBindCustomOAuth = async (provider) => {
+    await startSensitiveAction(() => onCustomOAuthClicked(provider));
+  };
+
+  const handleTelegramBind = async (response) => {
+    const fields = [
+      'id',
+      'first_name',
+      'last_name',
+      'username',
+      'photo_url',
+      'auth_date',
+      'hash',
+      'lang',
+    ];
+    const payload = {};
+    fields.forEach((field) => {
+      if (response[field] !== undefined && response[field] !== null) {
+        payload[field] = response[field];
+      }
+    });
+
+    try {
+      const res = await API.post('/api/oauth/telegram/bind', payload);
+      if (res.data.success) {
+        showSuccess(t('绑定成功'));
+        setShowTelegramBindModal(false);
+        window.location.reload();
+      } else {
+        showError(res.data.message || t('操作失败'));
+      }
+    } catch (error) {
+      showError(
+        error.response?.data?.message || error.message || t('操作失败'),
+      );
+    }
   };
 
   // Check if custom OAuth provider is bound
   const isCustomOAuthBound = (providerId) => {
     const normalizedId = Number(providerId);
-    return customOAuthBindings.some((b) => Number(b.provider_id) === normalizedId);
+    return customOAuthBindings.some(
+      (b) => Number(b.provider_id) === normalizedId,
+    );
   };
 
   // Get binding info for a provider
   const getCustomOAuthBinding = (providerId) => {
     const normalizedId = Number(providerId);
-    return customOAuthBindings.find((b) => Number(b.provider_id) === normalizedId);
+    return customOAuthBindings.find(
+      (b) => Number(b.provider_id) === normalizedId,
+    );
   };
 
   React.useEffect(() => {
@@ -304,7 +354,9 @@ const AccountManagement = ({
                       theme='outline'
                       size='small'
                       onClick={() =>
-                        onGitHubOAuthClicked(status.github_client_id)
+                        startSensitiveAction(() =>
+                          onGitHubOAuthClicked(status.github_client_id),
+                        )
                       }
                       disabled={
                         isBound(userState.user?.github_id) ||
@@ -345,7 +397,9 @@ const AccountManagement = ({
                       theme='outline'
                       size='small'
                       onClick={() =>
-                        onDiscordOAuthClicked(status.discord_client_id)
+                        startSensitiveAction(() =>
+                          onDiscordOAuthClicked(status.discord_client_id),
+                        )
                       }
                       disabled={
                         isBound(userState.user?.discord_id) ||
@@ -386,9 +440,11 @@ const AccountManagement = ({
                       theme='outline'
                       size='small'
                       onClick={() =>
-                        onOIDCClicked(
-                          status.oidc_authorization_endpoint,
-                          status.oidc_client_id,
+                        startSensitiveAction(() =>
+                          onOIDCClicked(
+                            status.oidc_authorization_endpoint,
+                            status.oidc_client_id,
+                          ),
                         )
                       }
                       disabled={
@@ -439,7 +495,11 @@ const AccountManagement = ({
                           type='primary'
                           theme='outline'
                           size='small'
-                          onClick={() => setShowTelegramBindModal(true)}
+                          onClick={() =>
+                            startSensitiveAction(() =>
+                              setShowTelegramBindModal(true),
+                            )
+                          }
                         >
                           {t('绑定')}
                         </Button>
@@ -469,7 +529,7 @@ const AccountManagement = ({
                 <div className='flex justify-center'>
                   <div className='scale-90'>
                     <TelegramLoginButton
-                      dataAuthUrl='/api/oauth/telegram/bind'
+                      dataOnauth={handleTelegramBind}
                       botName={status.telegram_bot_name}
                     />
                   </div>
@@ -504,7 +564,9 @@ const AccountManagement = ({
                       theme='outline'
                       size='small'
                       onClick={() =>
-                        onLinuxDOOAuthClicked(status.linuxdo_client_id)
+                        startSensitiveAction(() =>
+                          onLinuxDOOAuthClicked(status.linuxdo_client_id),
+                        )
                       }
                       disabled={
                         isBound(userState.user?.linux_do_id) ||
@@ -554,7 +616,10 @@ const AccountManagement = ({
                               size='small'
                               loading={customOAuthLoading[provider.id]}
                               onClick={() =>
-                                handleUnbindCustomOAuth(provider.id, provider.name)
+                                handleUnbindCustomOAuth(
+                                  provider.id,
+                                  provider.name,
+                                )
                               }
                             >
                               {t('解绑')}

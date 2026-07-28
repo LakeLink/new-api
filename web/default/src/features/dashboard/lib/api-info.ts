@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { PingStatus } from '@/features/dashboard/types'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 
 /**
  * Get color class for latency status
@@ -36,8 +37,12 @@ export function getLatencyColorClass(latency: number): string {
  */
 export async function testUrlLatency(url: string): Promise<PingStatus> {
   try {
+    const safeUrl = normalizeHttpUrl(url)
+    if (!safeUrl) {
+      return { latency: null, testing: false, error: true }
+    }
     const startTime = performance.now()
-    await fetch(url, {
+    await fetch(safeUrl, {
       method: 'HEAD',
       mode: 'no-cors',
       cache: 'no-cache',
@@ -46,7 +51,7 @@ export async function testUrlLatency(url: string): Promise<PingStatus> {
     const latency = Math.round(endTime - startTime)
 
     return { latency, testing: false, error: false }
-  } catch (_error) {
+  } catch {
     return { latency: null, testing: false, error: true }
   }
 }

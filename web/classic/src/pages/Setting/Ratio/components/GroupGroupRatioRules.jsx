@@ -64,7 +64,15 @@ export function serializeGroupGroupRatio(rules) {
     : JSON.stringify(nested, null, 2);
 }
 
-function GroupSection({ groupName, items, groupOptions, onUpdate, onRemove, onAdd, t }) {
+function GroupSection({
+  groupName,
+  items,
+  groupOptions,
+  onUpdate,
+  onRemove,
+  onAdd,
+  t,
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -76,19 +84,28 @@ function GroupSection({ groupName, items, groupOptions, onUpdate, onRemove, onAd
       }}
     >
       <div
-        className='flex items-center justify-between cursor-pointer'
+        className='flex items-center justify-between'
         style={{
           padding: '8px 12px',
           background: 'var(--semi-color-fill-0)',
         }}
-        onClick={() => setOpen(!open)}
       >
-        <div className='flex items-center gap-2'>
-          {open ? <IconChevronUp size='small' /> : <IconChevronDown size='small' />}
+        <button
+          type='button'
+          className='flex flex-1 items-center gap-2 border-0 bg-transparent p-0 text-left cursor-pointer'
+          onClick={() => setOpen(!open)}
+        >
+          {open ? (
+            <IconChevronUp size='small' />
+          ) : (
+            <IconChevronDown size='small' />
+          )}
           <Text strong>{groupName}</Text>
-          <Tag size='small' color='blue'>{items.length} {t('条规则')}</Tag>
-        </div>
-        <div className='flex items-center gap-1' onClick={(e) => e.stopPropagation()}>
+          <Tag size='small' color='blue'>
+            {items.length} {t('条规则')}
+          </Tag>
+        </button>
+        <div className='flex items-center gap-1'>
           <Button
             icon={<IconPlus />}
             size='small'

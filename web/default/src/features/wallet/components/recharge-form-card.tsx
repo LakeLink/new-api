@@ -35,6 +35,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatNumber } from '@/lib/format'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { cn } from '@/lib/utils'
 
 import {
@@ -114,6 +115,7 @@ export function RechargeFormCard({
 }: RechargeFormCardProps) {
   const { t } = useTranslation()
   const [localAmount, setLocalAmount] = useState(topupAmount.toString())
+  const safeTopupLink = normalizeHttpUrl(topupLink)
 
   useEffect(() => {
     setLocalAmount(topupAmount.toString())
@@ -527,11 +529,11 @@ export function RechargeFormCard({
             {t('Redeem')}
           </Button>
         </div>
-        {topupLink && (
+        {safeTopupLink && (
           <p className='text-muted-foreground text-xs'>
             {t('Need a redemption code?')}{' '}
             <a
-              href={topupLink}
+              href={safeTopupLink}
               target='_blank'
               rel='noopener noreferrer'
               className='inline-flex items-center gap-1 underline-offset-4 hover:underline'

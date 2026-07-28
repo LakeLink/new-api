@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
+
 import {
   PAYMENT_TYPES,
   DEFAULT_PRESET_MULTIPLIERS,
@@ -33,8 +35,8 @@ import type { PresetAmount, TopupInfo } from '../types'
  */
 function isSafariBrowser(): boolean {
   return (
-    navigator.userAgent.indexOf('Safari') > -1 &&
-    navigator.userAgent.indexOf('Chrome') < 1
+    navigator.userAgent.includes('Safari') &&
+    !navigator.userAgent.includes('Chrome')
   )
 }
 
@@ -44,10 +46,16 @@ function isSafariBrowser(): boolean {
 export function submitPaymentForm(
   url: string,
   params: Record<string, unknown>
-): void {
+): boolean {
+  const safeUrl = normalizeHttpUrl(url)
+  if (!safeUrl) {
+    return false
+  }
+
   const form = document.createElement('form')
-  form.action = url
+  form.action = safeUrl
   form.method = 'POST'
+  form.setAttribute('rel', 'noopener noreferrer')
 
   // Don't open in new tab for Safari
   if (!isSafariBrowser()) {
@@ -66,6 +74,7 @@ export function submitPaymentForm(
   document.body.appendChild(form)
   form.submit()
   document.body.removeChild(form)
+  return true
 }
 
 /**

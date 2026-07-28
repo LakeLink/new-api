@@ -16,11 +16,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { isAxiosError } from 'axios'
 import { Send } from 'lucide-react'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { TelegramLoginWidget } from '@/features/auth/components/telegram-login-widget'
+import type { TelegramAuthPayload } from '@/features/auth/types'
+
+import { bindTelegram } from '../../api'
 
 // ============================================================================
 // Telegram Bind Dialog Component
@@ -33,16 +40,49 @@ interface TelegramBindDialogProps {
   onSuccess: () => void
 }
 
-export function TelegramBindDialog({
-  open,
-  onOpenChange,
-  botName,
-}: TelegramBindDialogProps) {
+export function TelegramBindDialog(props: TelegramBindDialogProps) {
   const { t } = useTranslation()
+  const [binding, setBinding] = useState(false)
+  const bindingRef = useRef(false)
+
+  const handleOpenChange = (open: boolean) => {
+    if (!bindingRef.current) {
+      props.onOpenChange(open)
+    }
+  }
+
+  const handleAuthorization = async (payload: TelegramAuthPayload) => {
+    if (bindingRef.current) return
+
+    bindingRef.current = true
+    setBinding(true)
+    try {
+      const response = await bindTelegram(payload)
+      if (!response.success) {
+        toast.error(response.message || t('Request failed'))
+        return
+      }
+
+      toast.success(t('Binding successful!'))
+      props.onOpenChange(false)
+      props.onSuccess()
+    } catch (error: unknown) {
+      const message = isAxiosError<{ message?: unknown }>(error)
+        ? error.response?.data?.message
+        : undefined
+      toast.error(
+        typeof message === 'string' && message ? message : t('Request failed')
+      )
+    } finally {
+      bindingRef.current = false
+      setBinding(false)
+    }
+  }
+
   return (
     <Dialog
-      open={open}
-      onOpenChange={onOpenChange}
+      open={props.open}
+      onOpenChange={handleOpenChange}
       title={t('Bind Telegram Account')}
       description={t('Click the button below to bind your Telegram account')}
       contentClassName='sm:max-w-md'
@@ -51,23 +91,26 @@ export function TelegramBindDialog({
     >
       <div className='space-y-4 py-4'>
         <Alert>
-          <Send className='h-4 w-4' />
+          <Send aria-hidden='true' className='h-4 w-4' />
           <AlertDescription>
-            {t(
-              'You will be redirected to Telegram to complete the binding process.'
-            )}
+            {t('The binding will complete automatically after authorization')}
           </AlertDescription>
         </Alert>
 
         <div className='flex flex-col items-center justify-center gap-4 rounded-lg border p-6'>
           <div className='flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 dark:bg-blue-900'>
-            <Send className='h-6 w-6 text-blue-600 dark:text-blue-400' />
+            <Send
+              aria-hidden='true'
+              className='h-6 w-6 text-blue-600 dark:text-blue-400'
+            />
           </div>
 
           <div className='text-center'>
             <p className='text-muted-foreground text-sm'>
               {t('Bot:')}{' '}
-              <span className='font-mono font-semibold'>@{botName}</span>
+              <span className='font-mono font-semibold'>
+                @{props.botName.replace(/^@/, '')}
+              </span>
             </p>
             <p className='text-muted-foreground mt-1 text-xs'>
               {t(
@@ -76,13 +119,14 @@ export function TelegramBindDialog({
             </p>
           </div>
 
-          {/* Telegram Login Widget will be injected here by react-telegram-login */}
-          <div id='telegram-login-widget' className='flex justify-center'>
-            {/* This would require the react-telegram-login library */}
-            <div className='text-muted-foreground rounded-lg border border-dashed px-6 py-3 text-sm'>
-              {t('Telegram Login Widget')}
-            </div>
-          </div>
+          <TelegramLoginWidget
+            botName={props.botName}
+            disabled={binding}
+            loading={binding}
+            loadingLabel={t('Binding...')}
+            onAuth={handleAuthorization}
+            onInvalidAuth={() => toast.error(t('Request failed'))}
+          />
         </div>
 
         <p className='text-muted-foreground text-center text-xs'>

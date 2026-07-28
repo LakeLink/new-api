@@ -543,16 +543,20 @@ const EditTokenModal = (props) => {
                     />
                   </Col>
                   <Col span={24}>
-                    <div
-                      className='text-xs cursor-pointer mt-1'
+                    <button
+                      type='button'
+                      className='mt-1 cursor-pointer border-0 bg-transparent p-0 text-left text-xs'
                       style={{ color: 'var(--semi-color-text-2)' }}
                       onClick={() => setShowQuotaInput((v) => !v)}
                     >
                       {showQuotaInput
                         ? `▾ ${t('收起原生额度输入')}`
                         : `▸ ${t('使用原生额度输入')}`}
-                    </div>
-                    <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                    </button>
+                    <div
+                      style={{ display: showQuotaInput ? 'block' : 'none' }}
+                      className='mt-2'
+                    >
                       <Form.InputNumber
                         field='remain_quota'
                         label={t('额度')}

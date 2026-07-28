@@ -39,10 +39,23 @@ import { useTranslation } from 'react-i18next';
 mermaid.initialize({
   startOnLoad: false,
   theme: 'default',
-  securityLevel: 'loose',
+  securityLevel: 'strict',
 });
 
+const HTML_PREVIEW_CSP =
+  "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data: blob:; media-src data: blob:; style-src 'unsafe-inline'; font-src data:;\">";
+
+function hardenPreviewDocument(code) {
+  if (/<head(?:\s[^>]*)?>/i.test(code)) {
+    return code.replace(/<head(?:\s[^>]*)?>/i, (head) => {
+      return `${head}${HTML_PREVIEW_CSP}`;
+    });
+  }
+  return `${HTML_PREVIEW_CSP}${code}`;
+}
+
 export function Mermaid(props) {
+  const { t } = useTranslation();
   const ref = useRef(null);
   const [hasError, setHasError] = useState(false);
 
@@ -66,7 +79,8 @@ export function Mermaid(props) {
     const text = new XMLSerializer().serializeToString(svg);
     const blob = new Blob([text], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
-    window.open(url, '_blank');
+    window.open(url, '_blank', 'noopener,noreferrer');
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   if (hasError) {
@@ -74,9 +88,13 @@ export function Mermaid(props) {
   }
 
   return (
-    <div
+    <button
+      type='button'
+      aria-label={t('查看')}
       className={clsx('mermaid-container')}
       style={{
+        width: '100%',
+        textAlign: 'left',
         cursor: 'pointer',
         overflow: 'auto',
         padding: '12px',
@@ -89,7 +107,7 @@ export function Mermaid(props) {
       onClick={() => viewSvgInNewWindow()}
     >
       {props.code}
-    </div>
+    </button>
   );
 }
 
@@ -122,8 +140,9 @@ function SandboxedHtmlPreview({ code }) {
     <iframe
       ref={iframeRef}
       sandbox='allow-same-origin'
-      srcDoc={code}
+      srcDoc={hardenPreviewDocument(code)}
       title='HTML Preview'
+      referrerPolicy='no-referrer'
       style={{
         width: '100%',
         height: `${iframeHeight}px`,
@@ -378,7 +397,7 @@ function tryWrapHtmlCode(text) {
     );
 }
 
-function _MarkdownContent(props) {
+function MarkdownContentImpl(props) {
   const {
     content,
     className,
@@ -448,10 +467,12 @@ function _MarkdownContent(props) {
           }
           const isInternal = /^\/#/i.test(href);
           const target = isInternal ? '_self' : (aProps.target ?? '_blank');
+          const rel = target === '_blank' ? 'noopener noreferrer' : aProps.rel;
           return (
             <a
               {...aProps}
               target={target}
+              rel={rel}
               style={{
                 color: isUserMessage ? '#87CEEB' : 'var(--semi-color-primary)',
                 textDecoration: 'none',
@@ -632,7 +653,7 @@ function _MarkdownContent(props) {
   );
 }
 
-export const MarkdownContent = React.memo(_MarkdownContent);
+export const MarkdownContent = React.memo(MarkdownContentImpl);
 
 export function MarkdownRenderer(props) {
   const {

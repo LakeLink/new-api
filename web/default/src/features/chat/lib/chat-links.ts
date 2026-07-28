@@ -17,6 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { API_KEY_STATUS } from '@/features/keys/constants'
+import {
+  normalizeExternalProtocolUrl,
+  normalizeHttpUrl,
+} from '@/lib/safe-navigation'
 
 export type ChatLinkType = 'web' | 'custom-protocol' | 'fluent'
 
@@ -45,7 +49,7 @@ export type ActiveApiKey = {
   status: number
 }
 
-const HTTP_REGEX = /^https?:\/\//i
+const SAFE_SYMBOLIC_CHAT_LINKS = new Set(['ccswitch', 'fluentread'])
 
 function toBase64(value: string) {
   if (typeof window !== 'undefined' && typeof window.btoa === 'function') {
@@ -75,13 +79,24 @@ function toBase64(value: string) {
 }
 
 export function detectChatLinkType(url: string): ChatLinkType {
-  if (HTTP_REGEX.test(url)) {
+  if (normalizeHttpUrl(url)) {
     return 'web'
   }
   if (url.toLowerCase().startsWith('fluent')) {
     return 'fluent'
   }
   return 'custom-protocol'
+}
+
+export function isSafeChatLink(url: string): boolean {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return false
+  }
+  if (SAFE_SYMBOLIC_CHAT_LINKS.has(trimmed.toLowerCase())) {
+    return true
+  }
+  return normalizeExternalProtocolUrl(trimmed) !== null
 }
 
 export function chatLinkRequiresApiKey(url: string): boolean {
@@ -125,7 +140,7 @@ export function parseChatConfig(raw: RawChatConfig): ChatPreset[] {
       }
 
       const url = value.trim()
-      if (!url) {
+      if (!isSafeChatLink(url)) {
         return null
       }
 
@@ -166,7 +181,8 @@ export function resolveChatUrl({
       apiKey: safeApiKey,
     }
     const encoded = encodeURIComponent(toBase64(JSON.stringify(payload)))
-    return replaceToken(url, '{cherryConfig}', encoded)
+    const resolved = replaceToken(url, '{cherryConfig}', encoded)
+    return isSafeChatLink(resolved) ? resolved : ''
   }
 
   if (url.includes('{aionuiConfig}')) {
@@ -176,7 +192,8 @@ export function resolveChatUrl({
       apiKey: safeApiKey,
     }
     const encoded = encodeURIComponent(toBase64(JSON.stringify(payload)))
-    return replaceToken(url, '{aionuiConfig}', encoded)
+    const resolved = replaceToken(url, '{aionuiConfig}', encoded)
+    return isSafeChatLink(resolved) ? resolved : ''
   }
 
   if (url.includes('{deepchatConfig}')) {
@@ -186,7 +203,8 @@ export function resolveChatUrl({
       apiKey: safeApiKey,
     }
     const encoded = encodeURIComponent(toBase64(JSON.stringify(payload)))
-    return replaceToken(url, '{deepchatConfig}', encoded)
+    const resolved = replaceToken(url, '{deepchatConfig}', encoded)
+    return isSafeChatLink(resolved) ? resolved : ''
   }
 
   if (safeServerAddress) {
@@ -198,7 +216,7 @@ export function resolveChatUrl({
     url = replaceToken(url, '{key}', safeApiKey)
   }
 
-  return url
+  return isSafeChatLink(url) ? url : ''
 }
 
 export function getFirstActiveKey(

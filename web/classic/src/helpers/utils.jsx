@@ -32,9 +32,11 @@ import {
 import { TABLE_COMPACT_MODES_KEY } from '../constants';
 import { MOBILE_BREAKPOINT } from '../hooks/common/useIsMobile';
 import { clearPlaygroundData } from '../components/playground/configStorage';
+import SafeHtml from '../components/common/SafeHtml';
+import { normalizeExternalProtocolUrl } from './safeNavigation';
 
 const HTMLToastContent = ({ htmlContent }) => {
-  return <div dangerouslySetInnerHTML={{ __html: htmlContent }} />;
+  return <SafeHtml content={htmlContent} />;
 };
 export default HTMLToastContent;
 export function isAdmin() {
@@ -177,7 +179,9 @@ export function showNotice(message, isHTML = false) {
 }
 
 export function openPage(url) {
-  window.open(url);
+  const safeUrl = normalizeExternalProtocolUrl(url);
+  if (!safeUrl) return null;
+  return window.open(safeUrl, '_blank', 'noopener,noreferrer');
 }
 
 export function removeTrailingSlash(url) {

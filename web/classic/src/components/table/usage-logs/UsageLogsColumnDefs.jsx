@@ -551,7 +551,9 @@ export const getLogsColumns = ({
                     </div>
                   }
                 >
-                  <span
+                  <button
+                    type='button'
+                    aria-label={t('查看详情')}
                     style={{
                       position: 'absolute',
                       right: -4,
@@ -561,6 +563,9 @@ export const getLogsColumns = ({
                       color: '#f59e0b',
                       cursor: 'pointer',
                       userSelect: 'none',
+                      padding: 0,
+                      border: 0,
+                      background: 'transparent',
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -573,7 +578,7 @@ export const getLogsColumns = ({
                       color='currentColor'
                       fill='currentColor'
                     />
-                  </span>
+                  </button>
                 </Tooltip>
               )}
             </span>

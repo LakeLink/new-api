@@ -1,5 +1,3 @@
-import { useQuery } from '@tanstack/react-query'
-import { Copy, ExternalLink, Loader2, RefreshCcw } from 'lucide-react'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -18,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
+import { Copy, ExternalLink, Loader2, RefreshCcw } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -30,6 +30,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
+import { openExternalHttpUrl } from '@/lib/safe-navigation'
 
 import { getDeployment, listDeploymentContainers } from '../../api'
 
@@ -258,7 +259,7 @@ export function ViewDetailsDialog({
                           <Button
                             variant='outline'
                             size='sm'
-                            onClick={() => window.open(url, '_blank')}
+                            onClick={() => openExternalHttpUrl(url)}
                           >
                             <ExternalLink className='mr-2 h-4 w-4' />
                             {t('Open')}

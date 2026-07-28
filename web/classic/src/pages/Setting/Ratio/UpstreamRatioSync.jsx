@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Button,
   Table,
@@ -700,8 +700,8 @@ export default function UpstreamRatioSync(props) {
   );
 
   const renderDifferenceTable = () => {
-    const dataSource = useMemo(() => {
-      return Object.entries(differences).map(([model, ratioTypes]) => {
+    const dataSource = Object.entries(differences).map(
+      ([model, ratioTypes]) => {
         const hasPrice = 'model_price' in ratioTypes;
         const hasOtherRatio = ratioSyncFields.some((rt) => rt in ratioTypes);
 
@@ -711,37 +711,34 @@ export default function UpstreamRatioSync(props) {
           ratioTypes,
           billingConflict: hasPrice && hasOtherRatio,
         };
+      },
+    );
+
+    const normalizedSearchKeyword = searchKeyword.toLowerCase().trim();
+    const filteredDataSource =
+      normalizedSearchKeyword || ratioTypeFilter
+        ? dataSource.filter((item) => {
+            const matchesKeyword =
+              !normalizedSearchKeyword ||
+              item.model.toLowerCase().includes(normalizedSearchKeyword);
+            const matchesRatioType =
+              !ratioTypeFilter || ratioTypeFilter in item.ratioTypes;
+
+            return matchesKeyword && matchesRatioType;
+          })
+        : dataSource;
+
+    const upstreamNameSet = new Set();
+    filteredDataSource.forEach((row) => {
+      getOrderedRatioTypes(row.ratioTypes).forEach((ratioType) => {
+        Object.keys(row.ratioTypes[ratioType]?.upstreams || {}).forEach(
+          (name) => {
+            upstreamNameSet.add(name);
+          },
+        );
       });
-    }, [differences]);
-
-    const filteredDataSource = useMemo(() => {
-      if (!searchKeyword.trim() && !ratioTypeFilter) {
-        return dataSource;
-      }
-
-      return dataSource.filter((item) => {
-        const matchesKeyword =
-          !searchKeyword.trim() ||
-          item.model.toLowerCase().includes(searchKeyword.toLowerCase().trim());
-
-        const matchesRatioType =
-          !ratioTypeFilter || ratioTypeFilter in item.ratioTypes;
-
-        return matchesKeyword && matchesRatioType;
-      });
-    }, [dataSource, searchKeyword, ratioTypeFilter]);
-
-    const upstreamNames = useMemo(() => {
-      const set = new Set();
-      filteredDataSource.forEach((row) => {
-        getOrderedRatioTypes(row.ratioTypes).forEach((ratioType) => {
-          Object.keys(row.ratioTypes[ratioType]?.upstreams || {}).forEach(
-            (name) => set.add(name),
-          );
-        });
-      });
-      return Array.from(set);
-    }, [filteredDataSource, ratioTypeFilter]);
+    });
+    const upstreamNames = Array.from(upstreamNameSet);
 
     const renderValueTag = (value, color = 'default') => {
       if (value === null || value === undefined) {

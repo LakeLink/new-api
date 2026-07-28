@@ -35,21 +35,24 @@ const StatsCards = ({
   return (
     <div className='mb-4'>
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
-        {groupedStatsData.map((group, idx) => (
+        {groupedStatsData.map((group) => (
           <Card
-            key={idx}
+            key={group.title}
             {...CARD_PROPS}
             className={`${group.color} border-0 !rounded-2xl w-full`}
             title={group.title}
           >
             <div className='space-y-4'>
-              {group.items.map((item, itemIdx) => (
+              {group.items.map((item) => (
                 <div
-                  key={itemIdx}
-                  className='flex items-center justify-between cursor-pointer'
-                  onClick={item.onClick}
+                  key={item.title}
+                  className='flex w-full items-center justify-between'
                 >
-                  <div className='flex items-center'>
+                  <button
+                    type='button'
+                    className='flex flex-1 cursor-pointer items-center border-0 bg-transparent p-0 text-left'
+                    onClick={item.onClick}
+                  >
                     <Avatar
                       className='mr-3'
                       size='small'
@@ -84,19 +87,17 @@ const StatsCards = ({
                         </div>
                       )}
                     </div>
-                  </div>
+                  </button>
                   {item.title === t('当前余额') ? (
-                    <Tag
-                      color='white'
-                      shape='circle'
-                      size='large'
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate('/console/topup');
-                      }}
+                    <button
+                      type='button'
+                      className='cursor-pointer border-0 bg-transparent p-0'
+                      onClick={() => navigate('/console/topup')}
                     >
-                      {t('充值')}
-                    </Tag>
+                      <Tag color='white' shape='circle' size='large'>
+                        {t('充值')}
+                      </Tag>
+                    </button>
                   ) : (
                     !item.hideTrend &&
                     (loading ||

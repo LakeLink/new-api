@@ -22,6 +22,10 @@ import { useTokenKeys } from '../../hooks/chat/useTokenKeys';
 import { Spin } from '@douyinfe/semi-ui';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import {
+  parseWebChatPresets,
+  resolveWebChatUrl,
+} from '../../helpers/chatLinks';
 
 const ChatPage = () => {
   const { t } = useTranslation();
@@ -29,29 +33,18 @@ const ChatPage = () => {
   const { keys, serverAddress, isLoading } = useTokenKeys(id);
 
   const comLink = (key) => {
-    // console.log('chatLink:', chatLink);
-    if (!serverAddress || !key) return '';
-    let link = '';
-    if (id) {
-      let chats = localStorage.getItem('chats');
-      if (chats) {
-        chats = JSON.parse(chats);
-        if (Array.isArray(chats) && chats.length > 0) {
-          for (let k in chats[id]) {
-            link = chats[id][k];
-            link = link.replaceAll(
-              '{address}',
-              encodeURIComponent(serverAddress),
-            );
-            link = link.replaceAll('{key}', 'sk-' + key);
-          }
-        }
-      }
-    }
-    return link;
+    if (!id) return '';
+    const preset = parseWebChatPresets(localStorage.getItem('chats')).find(
+      (item) => item.index === Number(id),
+    );
+    return preset ? resolveWebChatUrl(preset.template, key, serverAddress) : '';
   };
 
   const iframeSrc = keys.length > 0 ? comLink(keys[0]) : '';
+  const iframeSandbox =
+    iframeSrc && new URL(iframeSrc).origin === window.location.origin
+      ? 'allow-downloads allow-forms allow-popups allow-presentation allow-scripts'
+      : undefined;
 
   return !isLoading && iframeSrc ? (
     <iframe
@@ -64,6 +57,8 @@ const ChatPage = () => {
       }}
       title='Token Frame'
       allow='camera;microphone'
+      referrerPolicy='no-referrer'
+      sandbox={iframeSandbox}
     />
   ) : (
     <div className='fixed inset-0 w-screen h-screen flex items-center justify-center bg-white/80 z-[1000] mt-[60px]'>

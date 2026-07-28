@@ -1,4 +1,3 @@
-import { AlertCircle, AlertTriangle, Settings } from 'lucide-react'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -17,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { AlertCircle, AlertTriangle, Settings } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -71,7 +71,13 @@ export function MessageError({
             <Button
               variant='outline'
               size='sm'
-              onClick={() => window.open(MODEL_PRICING_SETTINGS_PATH, '_blank')}
+              onClick={() =>
+                window.open(
+                  MODEL_PRICING_SETTINGS_PATH,
+                  '_blank',
+                  'noopener,noreferrer'
+                )
+              }
             >
               <Settings className='mr-1 h-3.5 w-3.5' />
               {t('Go to Settings')}

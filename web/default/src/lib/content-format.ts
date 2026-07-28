@@ -16,13 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
+
 export function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
+  return normalizeHttpUrl(value) !== null
 }
 
 export function isLikelyHtml(value: string): boolean {

@@ -135,9 +135,10 @@ export const useSecureVerification = ({
   );
 
   // 执行验证
+  const verificationApiCall = verificationState.apiCall;
   const executeVerification = useCallback(
     async (method, code = '') => {
-      if (!verificationState.apiCall) {
+      if (!verificationApiCall) {
         showError(t('验证配置错误'));
         return;
       }
@@ -149,7 +150,7 @@ export const useSecureVerification = ({
         await SecureVerificationService.verify(method, code);
 
         // 验证成功，调用业务 API（此时中间件会通过）
-        const result = await verificationState.apiCall();
+        const result = await verificationApiCall();
 
         // 显示成功消息
         if (successMessage) {
@@ -174,7 +175,7 @@ export const useSecureVerification = ({
       }
     },
     [
-      verificationState.apiCall,
+      verificationApiCall,
       successMessage,
       onSuccess,
       onError,

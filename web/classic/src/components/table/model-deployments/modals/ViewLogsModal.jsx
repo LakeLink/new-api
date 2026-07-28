@@ -51,6 +51,7 @@ import {
   copy,
   timestamp2string,
 } from '../../../../helpers';
+import { openExternalHttpUrl } from '../../../../helpers/safeNavigation';
 
 const { Text } = Typography;
 
@@ -573,7 +574,7 @@ const ViewLogsModal = ({ visible, onCancel, deployment, t }) => {
                           size='small'
                           theme='borderless'
                           onClick={() =>
-                            window.open(containerDetails.public_url, '_blank')
+                            openExternalHttpUrl(containerDetails.public_url)
                           }
                         />
                       </Tooltip>

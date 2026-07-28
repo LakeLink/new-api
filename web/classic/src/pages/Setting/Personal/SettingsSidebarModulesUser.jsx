@@ -54,16 +54,6 @@ export default function SettingsSidebarModulesUser() {
   // 使用useSidebar钩子获取刷新方法
   const { refreshUserConfig } = useSidebar();
 
-  // 如果没有边栏设置权限，不显示此组件
-  if (!permissionsLoading && !hasSidebarSettingsPermission()) {
-    return null;
-  }
-
-  // 权限加载中，显示加载状态
-  if (permissionsLoading) {
-    return null;
-  }
-
   // 根据用户权限生成默认配置
   const generateDefaultConfig = () => {
     const defaultConfig = {};
@@ -275,6 +265,11 @@ export default function SettingsSidebarModulesUser() {
     isSidebarSectionAllowed,
     isSidebarModuleAllowed,
   ]);
+
+  // Hooks must run in the same order while permissions are loading or denied.
+  if (permissionsLoading || !hasSidebarSettingsPermission()) {
+    return null;
+  }
 
   // 检查功能是否被管理员允许
   const isAllowedByAdmin = (sectionKey, moduleKey = null) => {

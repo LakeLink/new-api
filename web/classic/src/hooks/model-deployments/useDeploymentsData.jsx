@@ -218,9 +218,10 @@ export const useDeploymentsData = () => {
       setDeployments([]);
       setDeploymentCount(0);
     } finally {
-      if (seq !== requestSeq.current) return;
-      setLoading(false);
-      setSearching(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setSearching(false);
+      }
     }
   };
 

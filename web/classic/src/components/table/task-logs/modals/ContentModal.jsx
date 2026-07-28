@@ -21,6 +21,7 @@ import React, { useState, useEffect } from 'react';
 import { Modal, Button, Typography, Spin } from '@douyinfe/semi-ui';
 import { IconExternalOpen, IconCopy } from '@douyinfe/semi-icons';
 import { useTranslation } from 'react-i18next';
+import { openExternalHttpUrl } from '../../../../helpers/safeNavigation';
 
 const { Text } = Typography;
 
@@ -55,7 +56,7 @@ const ContentModal = ({
   };
 
   const handleOpenInNewTab = () => {
-    window.open(modalContent, '_blank');
+    openExternalHttpUrl(modalContent);
   };
 
   const renderVideoContent = () => {

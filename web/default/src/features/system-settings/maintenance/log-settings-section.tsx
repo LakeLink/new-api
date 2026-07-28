@@ -172,7 +172,10 @@ export function LogSettingsSection({ defaultValues }: LogSettingsSectionProps) {
   }, [])
 
   useEffect(() => {
-    form.reset(defaultValues)
+    form.reset({
+      LogConsumeEnabled: defaultValues.LogConsumeEnabled,
+      LogExportPermission: defaultValues.LogExportPermission,
+    })
   }, [defaultValues.LogConsumeEnabled, defaultValues.LogExportPermission, form])
 
   useEffect(() => {

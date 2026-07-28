@@ -211,7 +211,7 @@ const PersonalSetting = () => {
   };
 
   const generateAccessToken = async () => {
-    const res = await API.get('/api/user/token');
+    const res = await API.post('/api/user/token');
     const { success, message, data } = res.data;
     if (success) {
       setSystemToken(data);
@@ -365,19 +365,16 @@ const PersonalSetting = () => {
     showSuccess(t('系统令牌已复制到剪切板'));
   };
 
-  const deleteAccount = async () => {
-    if (inputs.self_account_deletion_confirmation !== userState.user.username) {
-      showError(t('请输入你的账户名以确认删除！'));
-      return;
-    }
-
+  const performDeleteAccount = async () => {
     const res = await API.delete('/api/user/self');
     const { success, message } = res.data;
 
     if (success) {
       showSuccess(t('账户已删除！'));
       try {
-        await API.get('/api/user/logout', { skipErrorHandler: true });
+        await API.post('/api/user/logout', undefined, {
+          skipErrorHandler: true,
+        });
       } catch {
         // The account is already deleted; continue local cleanup.
       }
@@ -390,7 +387,17 @@ const PersonalSetting = () => {
     }
   };
 
-  const bindWeChat = async () => {
+  const deleteAccount = async () => {
+    if (inputs.self_account_deletion_confirmation !== userState.user.username) {
+      showError(t('请输入你的账户名以确认删除！'));
+      return;
+    }
+    await startPasskeyManagementVerification(performDeleteAccount, {
+      description: t('需要安全验证'),
+    });
+  };
+
+  const performBindWeChat = async () => {
     if (inputs.wechat_verification_code === '') return;
     const res = await API.post('/api/oauth/wechat/bind', {
       code: inputs.wechat_verification_code,
@@ -402,6 +409,13 @@ const PersonalSetting = () => {
     } else {
       showError(message);
     }
+  };
+
+  const bindWeChat = async () => {
+    if (inputs.wechat_verification_code === '') return;
+    await startPasskeyManagementVerification(performBindWeChat, {
+      description: t('需要安全验证'),
+    });
   };
 
   const changePassword = async () => {
@@ -440,14 +454,16 @@ const PersonalSetting = () => {
       showError(t('请输入邮箱！'));
       return;
     }
-    setDisableButton(true);
     if (turnstileEnabled && turnstileToken === '') {
       showInfo(t('请稍后几秒重试，Turnstile 正在检查用户环境！'));
       return;
     }
+    setDisableButton(true);
     setLoading(true);
-    const res = await API.get(
-      `/api/verification?email=${inputs.email}&turnstile=${turnstileToken}`,
+    const res = await API.post(
+      '/api/verification',
+      { email: inputs.email },
+      { params: { turnstile: turnstileToken } },
     );
     const { success, message } = res.data;
     if (success) {
@@ -564,7 +580,12 @@ const PersonalSetting = () => {
                 systemToken={systemToken}
                 setShowEmailBindModal={setShowEmailBindModal}
                 setShowWeChatBindModal={setShowWeChatBindModal}
-                generateAccessToken={generateAccessToken}
+                generateAccessToken={() =>
+                  startPasskeyManagementVerification(generateAccessToken, {
+                    title: t('安全验证'),
+                    description: t('需要安全验证'),
+                  })
+                }
                 handleSystemTokenClick={handleSystemTokenClick}
                 setShowChangePasswordModal={setShowChangePasswordModal}
                 setShowAccountDeleteModal={setShowAccountDeleteModal}
@@ -574,6 +595,11 @@ const PersonalSetting = () => {
                 passkeyDeleteLoading={passkeyDeleteLoading}
                 onPasskeyRegister={handleRegisterPasskey}
                 onPasskeyDelete={handleRemovePasskey}
+                startSensitiveAction={(action) =>
+                  startPasskeyManagementVerification(action, {
+                    description: t('需要安全验证'),
+                  })
+                }
               />
 
               {/* 偏好设置（语言等） */}

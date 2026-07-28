@@ -25,7 +25,8 @@ import { RichContent } from '@/components/rich-content'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { isHttpUrl, isLikelyHtml } from '@/lib/content-format'
+import { isLikelyHtml } from '@/lib/content-format'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 
 import type { LegalDocumentResponse } from './types'
 
@@ -51,7 +52,8 @@ export function LegalDocument({
 
   const rawContent = data?.data?.trim() ?? ''
   const hasContent = rawContent.length > 0
-  const isUrl = hasContent && isHttpUrl(rawContent)
+  const externalUrl = hasContent ? normalizeHttpUrl(rawContent) : null
+  const isUrl = externalUrl !== null
   const contentIsHtml = hasContent && isLikelyHtml(rawContent)
   const success = data?.success ?? false
 
@@ -107,7 +109,7 @@ export function LegalDocument({
               <Button
                 render={
                   <a
-                    href={rawContent}
+                    href={externalUrl ?? undefined}
                     target='_blank'
                     rel='noopener noreferrer'
                   />
@@ -125,11 +127,7 @@ export function LegalDocument({
   return (
     <PublicLayout showMainContainer={!contentIsHtml}>
       {contentIsHtml ? (
-        <RichContent
-          mode='html'
-          htmlVariant='isolated'
-          content={rawContent}
-        />
+        <RichContent mode='html' htmlVariant='isolated' content={rawContent} />
       ) : (
         <div className='mx-auto max-w-4xl space-y-6 py-12'>
           <div className='space-y-2'>

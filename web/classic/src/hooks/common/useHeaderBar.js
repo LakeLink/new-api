@@ -23,12 +23,28 @@ import { useTranslation } from 'react-i18next';
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
 import { useSetTheme, useTheme, useActualTheme } from '../../context/Theme';
-import { getLogo, getSystemName, API, showSuccess } from '../../helpers';
+import {
+  getLogo,
+  getSystemName,
+  API,
+  setUserData,
+  showSuccess,
+} from '../../helpers';
 import { normalizeLanguage } from '../../i18n/language';
 import { useIsMobile } from './useIsMobile';
 import { useSidebarCollapsed } from './useSidebarCollapsed';
 import { useMinimumLoadingTime } from './useMinimumLoadingTime';
 import { clearPlaygroundData } from '../../components/playground/configStorage';
+import { normalizeHttpUrl } from '../../helpers/safeNavigation';
+
+function postHomeIframePreference(message) {
+  const iframe = document.querySelector('iframe[data-preference-sync-origin]');
+  const targetUrl = normalizeHttpUrl(iframe?.src);
+  if (!targetUrl || !iframe?.contentWindow) {
+    return;
+  }
+  iframe.contentWindow.postMessage(message, new URL(targetUrl).origin);
+}
 
 export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
   const { t, i18n } = useTranslation();
@@ -109,11 +125,7 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
   // Send theme to iframe
   useEffect(() => {
     try {
-      const iframe = document.querySelector('iframe');
-      const cw = iframe && iframe.contentWindow;
-      if (cw) {
-        cw.postMessage({ themeMode: actualTheme }, '*');
-      }
+      postHomeIframePreference({ themeMode: actualTheme });
     } catch (e) {
       // Silently ignore cross-origin or access errors
     }
@@ -125,11 +137,7 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
       const normalizedLang = normalizeLanguage(lng);
       setCurrentLang(normalizedLang);
       try {
-        const iframe = document.querySelector('iframe');
-        const cw = iframe && iframe.contentWindow;
-        if (cw) {
-          cw.postMessage({ lang: normalizedLang }, '*');
-        }
+        postHomeIframePreference({ lang: normalizedLang });
       } catch (e) {
         // Silently ignore cross-origin or access errors
       }
@@ -144,7 +152,9 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
   // Actions
   const logout = useCallback(async () => {
     try {
-      await API.get('/api/user/logout', { skipErrorHandler: true });
+      await API.post('/api/user/logout', undefined, {
+        skipErrorHandler: true,
+      });
     } catch {
       // Local sensitive state must still be cleared if logout is unavailable.
     }
@@ -190,7 +200,7 @@ export const useHeaderBar = ({ onMobileMenuToggle, drawerOpen }) => {
               type: 'login',
               payload: nextUser,
             });
-            localStorage.setItem('user', JSON.stringify(nextUser));
+            setUserData(nextUser);
           }
         } catch (error) {
           if (previousLang) {

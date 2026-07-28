@@ -16,12 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, RefreshCw, TimerReset } from 'lucide-react'
+import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { formatDateTimeStr, formatQuota } from '@/lib/format'
-import { computeTimeRange } from '@/lib/time'
+
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -37,6 +36,9 @@ import {
   formatBurnDurationPrecise,
   type BalanceBurnForecast,
 } from '@/features/dashboard/lib/stats'
+import { formatDateTimeStr, formatQuota } from '@/lib/format'
+import { computeTimeRange } from '@/lib/time'
+
 import type { User } from '../../types'
 
 interface Props {

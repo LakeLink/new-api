@@ -727,43 +727,29 @@ export const PromptInput = ({
     }
 
     // Convert blob URLs to data URLs asynchronously
-    Promise.all(
-      files.map(async ({ id, ...item }) => {
-        if (item.url && item.url.startsWith('blob:')) {
-          return {
-            ...item,
-            url: await convertBlobUrlToDataUrl(item.url),
-          }
-        }
-        return item
-      })
-    ).then((convertedFiles: FileUIPart[]) => {
+    void (async () => {
       try {
-        const result = onSubmit({ text, files: convertedFiles }, event)
-
-        // Handle both sync and async onSubmit
-        if (result instanceof Promise) {
-          result
-            .then(() => {
-              clear()
-              if (usingProvider) {
-                controller.textInput.clear()
+        const convertedFiles = await Promise.all(
+          files.map(async ({ id, ...item }) => {
+            if (item.url && item.url.startsWith('blob:')) {
+              return {
+                ...item,
+                url: await convertBlobUrlToDataUrl(item.url),
               }
-            })
-            .catch(() => {
-              // Don't clear on error - user may want to retry
-            })
-        } else {
-          // Sync function completed without throwing, clear attachments
-          clear()
-          if (usingProvider) {
-            controller.textInput.clear()
-          }
+            }
+            return item
+          })
+        )
+
+        await onSubmit({ text, files: convertedFiles }, event)
+        clear()
+        if (usingProvider) {
+          controller.textInput.clear()
         }
-      } catch (_error) {
-        // Don't clear on error - user may want to retry
+      } catch {
+        // Don't clear attachments on error - user may want to retry.
       }
-    })
+    })()
   }
 
   // Render with or without local provider

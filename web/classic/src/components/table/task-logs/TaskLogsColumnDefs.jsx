@@ -301,15 +301,10 @@ export const getTaskLogsColumns = ({
         const displayText = String(record.username || userId || '?');
         return (
           <Space>
-            <Avatar
-              size='extra-small'
-              color={stringToColor(displayText)}
-            >
+            <Avatar size='extra-small' color={stringToColor(displayText)}>
               {displayText.slice(0, 1)}
             </Avatar>
-            <Typography.Text>
-              {displayText}
-            </Typography.Text>
+            <Typography.Text>{displayText}</Typography.Text>
           </Space>
         );
       },
@@ -395,15 +390,13 @@ export const getTaskLogsColumns = ({
           record.data.some((c) => c.audio_url);
         if (isSunoSuccess) {
           return (
-            <a
-              href='#'
-              onClick={(e) => {
-                e.preventDefault();
-                openAudioModal(record.data);
-              }}
+            <button
+              type='button'
+              className='cursor-pointer border-0 bg-transparent p-0 text-semi-color-primary'
+              onClick={() => openAudioModal(record.data)}
             >
               {t('点击预览音乐')}
-            </a>
+            </button>
           );
         }
 
@@ -416,18 +409,17 @@ export const getTaskLogsColumns = ({
           record.action === TASK_ACTION_REMIX_GENERATE;
         const isSuccess = record.status === 'SUCCESS';
         const resultUrl = record.result_url;
-        const hasResultUrl = typeof resultUrl === 'string' && /^https?:\/\//.test(resultUrl);
+        const hasResultUrl =
+          typeof resultUrl === 'string' && /^https?:\/\//.test(resultUrl);
         if (isSuccess && isVideoTask && hasResultUrl) {
           return (
-            <a
-              href='#'
-              onClick={(e) => {
-                e.preventDefault();
-                openVideoModal(resultUrl);
-              }}
+            <button
+              type='button'
+              className='cursor-pointer border-0 bg-transparent p-0 text-semi-color-primary'
+              onClick={() => openVideoModal(resultUrl)}
             >
               {t('点击预览视频')}
-            </a>
+            </button>
           );
         }
         if (!text) {

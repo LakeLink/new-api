@@ -19,13 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 
 import React, { useEffect, useState } from 'react';
 import { API, showError } from '../../helpers';
-import { marked } from 'marked';
 import { Empty } from '@douyinfe/semi-ui';
 import {
   IllustrationConstruction,
   IllustrationConstructionDark,
 } from '@douyinfe/semi-illustrations';
 import { useTranslation } from 'react-i18next';
+import SafeHtml from '../../components/common/SafeHtml';
+import { renderSafeMarkdown } from '../../helpers/safeHtml';
+import { normalizeHttpUrl } from '../../helpers/safeNavigation';
 
 const About = () => {
   const { t } = useTranslation();
@@ -38,10 +40,8 @@ const About = () => {
     const res = await API.get('/api/about');
     const { success, message, data } = res.data;
     if (success) {
-      let aboutContent = data;
-      if (!data.startsWith('https://')) {
-        aboutContent = marked.parse(data);
-      }
+      const externalUrl = normalizeHttpUrl(data);
+      const aboutContent = externalUrl || renderSafeMarkdown(data);
       setAbout(aboutContent);
       localStorage.setItem('about', aboutContent);
     } else {
@@ -131,6 +131,7 @@ const About = () => {
       </p>
     </div>
   );
+  const externalUrl = normalizeHttpUrl(about);
 
   return (
     <div className='classic-page-fill flex flex-col pt-[60px] px-2'>
@@ -153,21 +154,27 @@ const About = () => {
         </div>
       ) : (
         <>
-          {about.startsWith('https://') ? (
+          {externalUrl ? (
             <iframe
-              src={about}
+              src={externalUrl}
               style={{
                 width: '100%',
                 flex: '1 1 auto',
                 minHeight: 0,
                 border: 'none',
               }}
+              loading='lazy'
+              referrerPolicy='no-referrer'
+              sandbox='allow-forms allow-popups allow-popups-to-escape-sandbox allow-scripts'
+              title={t('关于')}
             />
           ) : (
-            <div
+            <SafeHtml
               style={{ fontSize: 'larger' }}
-              dangerouslySetInnerHTML={{ __html: about }}
-            ></div>
+              content={about}
+              isolated
+              rich
+            />
           )}
         </>
       )}

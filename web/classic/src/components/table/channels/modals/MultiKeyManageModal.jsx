@@ -109,8 +109,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       } else {
         showError(res.data.message);
       }
-    } catch (error) {
-      console.error(error);
+    } catch {
       showError(t('获取密钥状态失败'));
     } finally {
       setLoading(false);
@@ -132,7 +131,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       if (res.data.success) {
         showSuccess(t('密钥已禁用'));
         await loadKeyStatus(currentPage, pageSize); // Reload current page
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }
@@ -158,7 +157,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       if (res.data.success) {
         showSuccess(t('密钥已启用'));
         await loadKeyStatus(currentPage, pageSize); // Reload current page
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }
@@ -184,7 +183,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
         // Reset to first page after bulk operation
         setCurrentPage(1);
         await loadKeyStatus(1, pageSize);
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }
@@ -210,7 +209,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
         // Reset to first page after bulk operation
         setCurrentPage(1);
         await loadKeyStatus(1, pageSize);
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }
@@ -236,7 +235,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
         // Reset to first page after deletion as data structure might change
         setCurrentPage(1);
         await loadKeyStatus(1, pageSize);
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }
@@ -262,7 +261,7 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       if (res.data.success) {
         showSuccess(t('密钥已删除'));
         await loadKeyStatus(currentPage, pageSize); // Reload current page
-        onRefresh && onRefresh(); // Refresh parent component
+        onRefresh?.(); // Refresh parent component
       } else {
         showError(res.data.message);
       }

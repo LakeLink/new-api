@@ -72,8 +72,9 @@ const ThinkingContent = ({
 
   return (
     <div className='rounded-xl sm:rounded-2xl mb-2 sm:mb-4 overflow-hidden shadow-sm backdrop-blur-sm'>
-      <div
-        className='flex items-center justify-between p-3 cursor-pointer hover:bg-gradient-to-r hover:from-white/20 hover:to-purple-50/30 transition-all'
+      <button
+        type='button'
+        className='flex w-full items-center justify-between border-0 p-3 text-left cursor-pointer hover:bg-gradient-to-r hover:from-white/20 hover:to-purple-50/30 transition-all'
         style={{
           background:
             'linear-gradient(135deg, #4c1d95 0%, #6d28d9 50%, #7c3aed 100%)',
@@ -142,7 +143,7 @@ const ThinkingContent = ({
             </div>
           )}
         </div>
-      </div>
+      </button>
       <div
         className={`transition-all duration-500 ease-out ${
           message.isReasoningExpanded

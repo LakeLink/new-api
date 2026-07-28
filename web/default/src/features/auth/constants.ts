@@ -76,3 +76,4 @@ export const PASSWORD_RESET_COUNTDOWN = 30 // seconds
 // ============================================================================
 
 export const OAUTH_BIND_STORAGE_KEY = 'oauth:binding:result'
+export const OAUTH_BIND_PENDING_STORAGE_KEY = 'oauth:binding:pending'

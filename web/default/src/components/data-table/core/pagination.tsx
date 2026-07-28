@@ -118,31 +118,40 @@ export function DataTablePagination<TData>({
             <ChevronLeftIcon className='h-4 w-4' />
           </Button>
 
-          {pageNumbers.map((pageNumber, index) => (
-            <div key={`${pageNumber}-${index}`} className='flex items-center'>
-              {pageNumber === '...' ? (
-                <span className='text-muted-foreground/60 px-0.5 text-sm @lg/pagination:px-1'>
-                  ...
-                </span>
-              ) : (
-                <Button
-                  variant={currentPage === pageNumber ? 'default' : 'outline'}
-                  className={cn(
-                    'h-8 min-w-8 px-2 tabular-nums',
-                    currentPage === pageNumber
-                      ? 'font-semibold'
-                      : 'text-muted-foreground hover:text-foreground'
-                  )}
-                  onClick={() => table.setPageIndex((pageNumber as number) - 1)}
-                >
-                  <span className='sr-only'>
-                    {t('Go to page {{page}}', { page: pageNumber })}
+          {pageNumbers.map((pageNumber, index) => {
+            let key = `page-${pageNumber}`
+            if (pageNumber === '...') {
+              key = index === 1 ? 'leading-ellipsis' : 'trailing-ellipsis'
+            }
+
+            return (
+              <div key={key} className='flex items-center'>
+                {pageNumber === '...' ? (
+                  <span className='text-muted-foreground/60 px-0.5 text-sm @lg/pagination:px-1'>
+                    ...
                   </span>
-                  {pageNumber}
-                </Button>
-              )}
-            </div>
-          ))}
+                ) : (
+                  <Button
+                    variant={currentPage === pageNumber ? 'default' : 'outline'}
+                    className={cn(
+                      'h-8 min-w-8 px-2 tabular-nums',
+                      currentPage === pageNumber
+                        ? 'font-semibold'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                    onClick={() =>
+                      table.setPageIndex((pageNumber as number) - 1)
+                    }
+                  >
+                    <span className='sr-only'>
+                      {t('Go to page {{page}}', { page: pageNumber })}
+                    </span>
+                    {pageNumber}
+                  </Button>
+                )}
+              </div>
+            )
+          })}
 
           <Button
             variant='outline'

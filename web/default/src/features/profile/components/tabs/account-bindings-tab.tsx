@@ -28,10 +28,17 @@ import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { OAUTH_BIND_STORAGE_KEY } from '@/features/auth/constants'
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+  type VerificationMethod,
+} from '@/features/auth/secure-verification'
+import type { CustomOAuthProviderInfo } from '@/features/auth/types'
 import { useDialogs } from '@/hooks/use-dialog'
 import { useStatus } from '@/hooks/use-status'
 import {
   handleGitHubOAuth,
+  handleCustomOAuth,
   handleOIDCOAuth,
   handleDiscordOAuth,
   handleLinuxDOOAuth,
@@ -70,10 +77,35 @@ export function AccountBindingsTab({
     null
   )
   const [unbinding, setUnbinding] = useState(false)
+  const {
+    open: verificationOpen,
+    setOpen: setVerificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    startVerification,
+    executeVerification,
+    cancel: cancelVerification,
+    setCode,
+    switchMethod,
+    withVerification,
+  } = useSecureVerification()
 
   const customProviders = status?.custom_oauth_providers as
-    | Array<{ id: string; name: string }>
+    | CustomOAuthProviderInfo[]
     | undefined
+  const wechatQrCodeUrl =
+    status?.wechat_qrcode ||
+    status?.wechat_qr_code ||
+    status?.wechat_qrcode_image_url ||
+    status?.wechat_qr_code_image_url ||
+    status?.wechat_account_qrcode_image_url ||
+    status?.WeChatAccountQRCodeImageURL ||
+    status?.data?.wechat_qrcode ||
+    status?.data?.WeChatAccountQRCodeImageURL ||
+    undefined
+  const telegramBotName = (
+    status?.telegram_bot_name ?? status?.data?.telegram_bot_name
+  )?.trim()
 
   const fetchCustomBindings = useCallback(async () => {
     if (!customProviders || customProviders.length === 0) return
@@ -91,33 +123,77 @@ export function AccountBindingsTab({
     fetchCustomBindings()
   }, [fetchCustomBindings])
 
-  const handleUnbindCustom = async () => {
-    if (!unbindTarget) return
+  const unbindCustom = async (target: CustomOAuthBinding) => {
     setUnbinding(true)
     try {
-      const res = await unbindCustomOAuth(unbindTarget.provider_id)
+      const res = await unbindCustomOAuth(target.provider_id)
       if (res.success) {
         toast.success(
           t('Unbound {{provider}}', {
-            provider: unbindTarget.provider_name,
+            provider: target.provider_name,
           })
         )
         await fetchCustomBindings()
         onUpdate()
+        setUnbindTarget(null)
       } else {
         toast.error(res.message || t('Unbind failed'))
       }
-    } catch {
-      toast.error(t('Unbind failed'))
     } finally {
       setUnbinding(false)
-      setUnbindTarget(null)
     }
   }
 
-  const handleBindCustomOAuth = (provider: { id: string; name: string }) => {
-    const redirectUrl = `${window.location.origin}/oauth/${provider.id}?bind=true`
-    window.location.href = `/api/oauth/${provider.id}?redirect=${encodeURIComponent(redirectUrl)}`
+  const secureVerificationConfig = useMemo(
+    () => ({
+      title: t('Security verification'),
+      description: t(
+        'Confirm your identity before accessing this sensitive action.'
+      ),
+    }),
+    [t]
+  )
+
+  const startSensitiveBinding = useCallback(
+    async (action: () => Promise<unknown> | unknown) => {
+      try {
+        await startVerification(async () => action(), secureVerificationConfig)
+      } catch {
+        toast.error(t('Verification failed'))
+      }
+    },
+    [secureVerificationConfig, startVerification, t]
+  )
+
+  const handleUnbindCustom = async () => {
+    if (!unbindTarget) return
+    const target = unbindTarget
+    try {
+      await withVerification(
+        () => unbindCustom(target),
+        secureVerificationConfig
+      )
+    } catch {
+      toast.error(t('Unbind failed'))
+    }
+  }
+
+  const handleBindCustomOAuth = useCallback(
+    async (provider: CustomOAuthProviderInfo) => {
+      await startSensitiveBinding(() => handleCustomOAuth(provider))
+    },
+    [startSensitiveBinding]
+  )
+
+  const handleVerification = async (
+    method: VerificationMethod,
+    code?: string
+  ) => {
+    try {
+      await executeVerification(method, code)
+    } catch {
+      // Errors are already shown by the secure-verification hook.
+    }
   }
 
   useEffect(() => {
@@ -171,7 +247,9 @@ export function AccountBindingsTab({
           (profile as unknown as Record<string, unknown>).wechat_id
         ),
         isEnabled: status?.wechat_login || false,
-        onBind: () => dialogs.open('wechat'),
+        onBind: () => {
+          void startSensitiveBinding(() => dialogs.open('wechat'))
+        },
       },
       {
         id: 'github',
@@ -185,8 +263,9 @@ export function AccountBindingsTab({
         ),
         isEnabled: status?.github_oauth || false,
         onBind: () => {
-          if (status?.github_client_id) {
-            handleGitHubOAuth(status.github_client_id)
+          const clientID = status?.github_client_id
+          if (clientID) {
+            void startSensitiveBinding(() => handleGitHubOAuth(clientID))
           }
         },
       },
@@ -202,8 +281,9 @@ export function AccountBindingsTab({
         ),
         isEnabled: status?.discord_oauth || false,
         onBind: () => {
-          if (status?.discord_client_id) {
-            handleDiscordOAuth(status.discord_client_id)
+          const clientID = status?.discord_client_id
+          if (clientID) {
+            void startSensitiveBinding(() => handleDiscordOAuth(clientID))
           }
         },
       },
@@ -219,10 +299,11 @@ export function AccountBindingsTab({
         ),
         isEnabled: status?.oidc_enabled || false,
         onBind: () => {
-          if (status?.oidc_authorization_endpoint && status?.oidc_client_id) {
-            handleOIDCOAuth(
-              status.oidc_authorization_endpoint,
-              status.oidc_client_id
+          const authorizationEndpoint = status?.oidc_authorization_endpoint
+          const clientID = status?.oidc_client_id
+          if (authorizationEndpoint && clientID) {
+            void startSensitiveBinding(() =>
+              handleOIDCOAuth(authorizationEndpoint, clientID)
             )
           }
         },
@@ -237,8 +318,10 @@ export function AccountBindingsTab({
         isBound: Boolean(
           (profile as unknown as Record<string, unknown>).telegram_id
         ),
-        isEnabled: status?.telegram_oauth || false,
-        onBind: () => dialogs.open('telegram'),
+        isEnabled: Boolean(status?.telegram_oauth && telegramBotName),
+        onBind: () => {
+          void startSensitiveBinding(() => dialogs.open('telegram'))
+        },
       },
       {
         id: 'linuxdo',
@@ -252,60 +335,63 @@ export function AccountBindingsTab({
         ),
         isEnabled: status?.linuxdo_oauth || false,
         onBind: () => {
-          if (status?.linuxdo_client_id) {
-            handleLinuxDOOAuth(status.linuxdo_client_id)
+          const clientID = status?.linuxdo_client_id
+          if (clientID) {
+            void startSensitiveBinding(() => handleLinuxDOOAuth(clientID))
           }
         },
       },
     ].filter((binding) => binding.isEnabled)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, status, t])
+  }, [dialogs, profile, startSensitiveBinding, status, t, telegramBotName])
 
   if (!profile || loading) return null
 
   return (
     <>
       <div className='grid grid-cols-1 gap-2.5 sm:grid-cols-2 sm:gap-3'>
-        {bindings.map((binding) => (
-          <div
-            key={binding.id}
-            className='flex items-center justify-between gap-2.5 rounded-lg border p-2.5 sm:gap-3 sm:p-3'
-          >
-            <div className='flex min-w-0 items-center gap-2.5 sm:gap-3'>
-              <div className='bg-muted shrink-0 rounded-md p-1.5 sm:p-2'>
-                <binding.icon className='h-4 w-4' />
-              </div>
-              <div className='min-w-0'>
-                <div className='flex items-center gap-1.5'>
-                  <p className='text-sm font-medium'>{binding.label}</p>
-                  {binding.isBound && (
-                    <StatusBadge
-                      label={t('Bound')}
-                      variant='success'
-                      copyable={false}
-                    />
-                  )}
-                </div>
-                <p className='text-muted-foreground truncate text-xs'>
-                  {binding.value || t('Not bound')}
-                </p>
-              </div>
-            </div>
-            <Button
-              variant='outline'
-              size='sm'
-              className='h-7 shrink-0 px-2.5 text-xs'
-              onClick={binding.onBind}
-              disabled={binding.isBound && binding.id !== 'email'}
+        {bindings.map((binding) => {
+          let buttonLabel = t('Bind')
+          if (binding.isBound) {
+            buttonLabel = binding.id === 'email' ? t('Change') : t('Bound')
+          }
+
+          return (
+            <div
+              key={binding.id}
+              className='flex items-center justify-between gap-2.5 rounded-lg border p-2.5 sm:gap-3 sm:p-3'
             >
-              {binding.isBound
-                ? binding.id === 'email'
-                  ? t('Change')
-                  : t('Bound')
-                : t('Bind')}
-            </Button>
-          </div>
-        ))}
+              <div className='flex min-w-0 items-center gap-2.5 sm:gap-3'>
+                <div className='bg-muted shrink-0 rounded-md p-1.5 sm:p-2'>
+                  <binding.icon className='h-4 w-4' />
+                </div>
+                <div className='min-w-0'>
+                  <div className='flex items-center gap-1.5'>
+                    <p className='text-sm font-medium'>{binding.label}</p>
+                    {binding.isBound && (
+                      <StatusBadge
+                        label={t('Bound')}
+                        variant='success'
+                        copyable={false}
+                      />
+                    )}
+                  </div>
+                  <p className='text-muted-foreground truncate text-xs'>
+                    {binding.value || t('Not bound')}
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant='outline'
+                size='sm'
+                className='h-7 shrink-0 px-2.5 text-xs'
+                onClick={binding.onBind}
+                disabled={binding.isBound && binding.id !== 'email'}
+              >
+                {buttonLabel}
+              </Button>
+            </div>
+          )
+        })}
       </div>
 
       {/* Custom OAuth Bindings */}
@@ -343,7 +429,7 @@ export function AccountBindingsTab({
                       </div>
                       <p className='text-muted-foreground truncate text-xs'>
                         {isBound
-                          ? binding?.external_id || t('Bound')
+                          ? binding?.provider_user_id || t('Bound')
                           : t('Not bound')}
                       </p>
                     </div>
@@ -409,19 +495,33 @@ export function AccountBindingsTab({
           open ? dialogs.open('wechat') : dialogs.close('wechat')
         }
         onSuccess={onUpdate}
+        qrCodeUrl={wechatQrCodeUrl}
       />
 
       {/* Telegram Bind Dialog */}
-      {status?.telegram_bot_name && (
+      {telegramBotName && (
         <TelegramBindDialog
           open={dialogs.isOpen('telegram')}
           onOpenChange={(open) =>
             open ? dialogs.open('telegram') : dialogs.close('telegram')
           }
-          botName={status.telegram_bot_name as string}
+          botName={telegramBotName}
           onSuccess={onUpdate}
         />
       )}
+
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(next) =>
+          next ? setVerificationOpen(true) : cancelVerification()
+        }
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={handleVerification}
+        onCancel={cancelVerification}
+        onCodeChange={setCode}
+        onMethodChange={switchMethod}
+      />
     </>
   )
 }

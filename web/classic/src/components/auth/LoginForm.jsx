@@ -52,7 +52,6 @@ import {
 } from '@douyinfe/semi-ui';
 import Title from '@douyinfe/semi-ui/lib/es/typography/title';
 import Text from '@douyinfe/semi-ui/lib/es/typography/text';
-import TelegramLoginButton from 'react-telegram-login';
 
 import {
   IconGithubLogo,
@@ -63,6 +62,7 @@ import {
 import OIDCIcon from '../common/logo/OIDCIcon';
 import WeChatIcon from '../common/logo/WeChatIcon';
 import LinuxDoIcon from '../common/logo/LinuxDoIcon';
+import TelegramLoginButton from '../common/TelegramLoginButton';
 import TwoFAVerification from './TwoFAVerification';
 import { useTranslation } from 'react-i18next';
 import { SiDiscord } from 'react-icons/si';
@@ -135,12 +135,12 @@ const LoginForm = () => {
     (status.custom_oauth_providers || []).length > 0;
   const hasOAuthLoginOptions = Boolean(
     status.github_oauth ||
-      status.discord_oauth ||
-      status.oidc_enabled ||
-      status.wechat_login ||
-      status.linuxdo_oauth ||
-      status.telegram_oauth ||
-      hasCustomOAuthProviders,
+    status.discord_oauth ||
+    status.oidc_enabled ||
+    status.wechat_login ||
+    status.linuxdo_oauth ||
+    status.telegram_oauth ||
+    hasCustomOAuthProviders,
   );
 
   useEffect(() => {
@@ -189,13 +189,12 @@ const LoginForm = () => {
     }
     setWechatCodeSubmitLoading(true);
     try {
-      const res = await API.get(
-        `/api/oauth/wechat?code=${inputs.wechat_verification_code}`,
-      );
+      const res = await API.post('/api/oauth/wechat', {
+        code: inputs.wechat_verification_code,
+      });
       const { success, message, data } = res.data;
       if (success) {
         userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
         setUserData(data);
         updateAPI();
         navigate('/');
@@ -285,18 +284,17 @@ const LoginForm = () => {
       'hash',
       'lang',
     ];
-    const params = {};
+    const payload = {};
     fields.forEach((field) => {
-      if (response[field]) {
-        params[field] = response[field];
+      if (response[field] !== undefined && response[field] !== null) {
+        payload[field] = response[field];
       }
     });
     try {
-      const res = await API.get(`/api/oauth/telegram/login`, { params });
+      const res = await API.post('/api/oauth/telegram/login', payload);
       const { success, message, data } = res.data;
       if (success) {
         userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
         showSuccess('登录成功！');
         setUserData(data);
         updateAPI();
@@ -625,6 +623,17 @@ const LoginForm = () => {
                     <TelegramLoginButton
                       dataOnauth={onTelegramLoginClicked}
                       botName={status.telegram_bot_name}
+                      disabled={
+                        (status.user_agreement_enabled ||
+                          status.privacy_policy_enabled) &&
+                        !agreedToTerms
+                      }
+                      disabledLabel={t('使用 {{name}} 继续', {
+                        name: 'Telegram',
+                      })}
+                      onDisabledClick={() =>
+                        showInfo(t('请先阅读并同意用户协议和隐私政策'))
+                      }
                     />
                   </div>
                 )}
@@ -958,8 +967,7 @@ const LoginForm = () => {
         style={{ top: '50%', left: '-120px' }}
       />
       <div className='w-full max-w-sm mt-[60px]'>
-        {showEmailLogin ||
-        !hasOAuthLoginOptions
+        {showEmailLogin || !hasOAuthLoginOptions
           ? renderEmailLoginForm()
           : renderOAuthOptions()}
         {renderWeChatLoginModal()}

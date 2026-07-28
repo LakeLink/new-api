@@ -26,6 +26,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { openExternalHttpUrl } from '@/lib/safe-navigation'
 
 export interface AudioClip {
   clip_id?: string
@@ -111,7 +112,7 @@ function AudioClipCard({ clip }: { clip: AudioClip }) {
               variant='outline'
               size='sm'
               className='h-7 gap-1 text-xs'
-              onClick={() => window.open(audioUrl, '_blank')}
+              onClick={() => openExternalHttpUrl(audioUrl)}
             >
               <ExternalLink className='h-3 w-3' />
               {t('Open in new tab')}

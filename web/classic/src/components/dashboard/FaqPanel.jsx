@@ -21,12 +21,12 @@ import React from 'react';
 import { Card, Collapse, Empty } from '@douyinfe/semi-ui';
 import { HelpCircle } from 'lucide-react';
 import { IconPlus, IconMinus } from '@douyinfe/semi-icons';
-import { marked } from 'marked';
 import {
   IllustrationConstruction,
   IllustrationConstructionDark,
 } from '@douyinfe/semi-illustrations';
 import ScrollableContainer from '../common/ui/ScrollableContainer';
+import SafeHtml from '../common/SafeHtml';
 
 const FaqPanel = ({
   faqData,
@@ -60,11 +60,7 @@ const FaqPanel = ({
                 header={item.question}
                 itemKey={index.toString()}
               >
-                <div
-                  dangerouslySetInnerHTML={{
-                    __html: marked.parse(item.answer || ''),
-                  }}
-                />
+                <SafeHtml content={item.answer || ''} markdown />
               </Collapse.Panel>
             ))}
           </Collapse>

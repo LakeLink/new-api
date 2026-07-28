@@ -26,6 +26,7 @@ import {
 import axios from 'axios';
 import { MESSAGE_ROLES } from '../constants/playground.constants';
 import { clearPlaygroundData } from '../components/playground/configStorage';
+import { normalizeHttpUrl } from './safeNavigation';
 
 export let API = axios.create({
   baseURL: import.meta.env.VITE_REACT_APP_SERVER_URL
@@ -39,10 +40,15 @@ export let API = axios.create({
 
 function redirectToOAuthUrl(url, options = {}) {
   const { openInNewTab = false } = options;
-  const targetUrl = typeof url === 'string' ? url : url.toString();
+  const targetUrl = normalizeHttpUrl(
+    typeof url === 'string' ? url : url.toString(),
+  );
+  if (!targetUrl) {
+    throw new Error('OAuth authorization endpoint must use HTTP or HTTPS');
+  }
 
   if (openInNewTab) {
-    window.open(targetUrl, '_blank');
+    window.open(targetUrl, '_blank', 'noopener,noreferrer');
     return;
   }
 
@@ -240,12 +246,8 @@ export const processGroupsData = (data, userGroup) => {
 // 原来components中的utils.js
 
 export async function getOAuthState() {
-  let path = '/api/oauth/state';
-  let affCode = localStorage.getItem('aff');
-  if (affCode && affCode.length > 0) {
-    path += `?aff=${affCode}`;
-  }
-  const res = await API.get(path);
+  const affCode = localStorage.getItem('aff');
+  const res = await API.post('/api/oauth/state', { aff: affCode || '' });
   const { success, message, data } = res.data;
   if (success) {
     return data;
@@ -259,7 +261,9 @@ async function prepareOAuthState(options = {}) {
   const { shouldLogout = false } = options;
   if (shouldLogout) {
     try {
-      await API.get('/api/user/logout', { skipErrorHandler: true });
+      await API.post('/api/user/logout', undefined, {
+        skipErrorHandler: true,
+      });
     } catch (err) {}
     clearPlaygroundData();
     localStorage.removeItem('user');
@@ -272,11 +276,13 @@ export async function onDiscordOAuthClicked(client_id, options = {}) {
   const state = await prepareOAuthState(options);
   if (!state) return;
   const redirect_uri = `${window.location.origin}/oauth/discord`;
-  const response_type = 'code';
-  const scope = 'identify+openid';
-  redirectToOAuthUrl(
-    `https://discord.com/oauth2/authorize?client_id=${client_id}&redirect_uri=${redirect_uri}&response_type=${response_type}&scope=${scope}&state=${state}`,
-  );
+  const url = new URL('https://discord.com/oauth2/authorize');
+  url.searchParams.set('client_id', client_id);
+  url.searchParams.set('redirect_uri', redirect_uri);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('scope', 'identify openid');
+  url.searchParams.set('state', state);
+  redirectToOAuthUrl(url);
 }
 
 export async function onOIDCClicked(
@@ -287,7 +293,11 @@ export async function onOIDCClicked(
 ) {
   const state = await prepareOAuthState(options);
   if (!state) return;
-  const url = new URL(auth_url);
+  const safeAuthUrl = normalizeHttpUrl(auth_url);
+  if (!safeAuthUrl) {
+    throw new Error('OAuth authorization endpoint must use HTTP or HTTPS');
+  }
+  const url = new URL(safeAuthUrl);
   url.searchParams.set('client_id', client_id);
   url.searchParams.set('redirect_uri', `${window.location.origin}/oauth/oidc`);
   url.searchParams.set('response_type', 'code');
@@ -299,9 +309,11 @@ export async function onOIDCClicked(
 export async function onGitHubOAuthClicked(github_client_id, options = {}) {
   const state = await prepareOAuthState(options);
   if (!state) return;
-  redirectToOAuthUrl(
-    `https://github.com/login/oauth/authorize?client_id=${github_client_id}&state=${state}&scope=user:email`,
-  );
+  const url = new URL('https://github.com/login/oauth/authorize');
+  url.searchParams.set('client_id', github_client_id);
+  url.searchParams.set('state', state);
+  url.searchParams.set('scope', 'user:email');
+  redirectToOAuthUrl(url);
 }
 
 export async function onLinuxDOOAuthClicked(
@@ -310,9 +322,11 @@ export async function onLinuxDOOAuthClicked(
 ) {
   const state = await prepareOAuthState(options);
   if (!state) return;
-  redirectToOAuthUrl(
-    `https://connect.linux.do/oauth2/authorize?response_type=code&client_id=${linuxdo_client_id}&state=${state}`,
-  );
+  const url = new URL('https://connect.linux.do/oauth2/authorize');
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('client_id', linuxdo_client_id);
+  url.searchParams.set('state', state);
+  redirectToOAuthUrl(url);
 }
 
 /**
@@ -334,17 +348,12 @@ export async function onCustomOAuthClicked(provider, options = {}) {
 
     // Check if authorization_endpoint is a full URL or relative path
     let authUrl;
-    if (
-      provider.authorization_endpoint.startsWith('http://') ||
-      provider.authorization_endpoint.startsWith('https://')
-    ) {
-      authUrl = new URL(provider.authorization_endpoint);
+    const safeAuthorizationEndpoint = normalizeHttpUrl(
+      provider.authorization_endpoint,
+    );
+    if (safeAuthorizationEndpoint) {
+      authUrl = new URL(safeAuthorizationEndpoint);
     } else {
-      // Relative path - this is a configuration error, show error message
-      console.error(
-        'Custom OAuth authorization_endpoint must be a full URL:',
-        provider.authorization_endpoint,
-      );
       showError(
         'OAuth 配置错误：授权端点必须是完整的 URL（以 http:// 或 https:// 开头）',
       );
@@ -362,7 +371,6 @@ export async function onCustomOAuthClicked(provider, options = {}) {
 
     redirectToOAuthUrl(authUrl);
   } catch (error) {
-    console.error('Failed to initiate custom OAuth:', error);
     showError('OAuth 登录失败：' + (error.message || '未知错误'));
   }
 }

@@ -426,7 +426,7 @@ const SystemSetting = () => {
 
       // 验证域名格式
       const domainRegex =
-        /^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
+        /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
       if (!domainRegex.test(domain)) {
         showError(t('邮箱域名格式不正确，请输入有效的域名，如 gmail.com'));
         return;

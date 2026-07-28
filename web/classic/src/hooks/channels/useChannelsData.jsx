@@ -721,7 +721,7 @@ export const useChannelsData = () => {
 
   // Channel operations
   const testAllChannels = async () => {
-    const res = await API.get(`/api/channel/test`);
+    const res = await API.post(`/api/channel/test`);
     const { success, message } = res.data;
     if (success) {
       showInfo(t('已成功开始测试所有已启用通道，请刷新页面查看结果。'));
@@ -744,7 +744,7 @@ export const useChannelsData = () => {
   };
 
   const updateAllChannelsBalance = async () => {
-    const res = await API.get(`/api/channel/update_balance`);
+    const res = await API.post(`/api/channel/update_balance`);
     const { success, message } = res.data;
     if (success) {
       showInfo(t('已更新完毕所有已启用通道余额！'));
@@ -767,7 +767,7 @@ export const useChannelsData = () => {
       return;
     }
 
-    const res = await API.get(`/api/channel/update_balance/${record.id}/`);
+    const res = await API.post(`/api/channel/update_balance/${record.id}`);
     const { success, message, balance } = res.data;
     if (success) {
       updateChannelProperty(record.id, (channel) => {
@@ -883,7 +883,7 @@ export const useChannelsData = () => {
       if (stream) {
         url += `&stream=true`;
       }
-      const res = await API.get(url);
+      const res = await API.post(url);
 
       // 检查是否在请求期间被停止
       if (shouldStopBatchTestingRef.current && isBatchTesting) {

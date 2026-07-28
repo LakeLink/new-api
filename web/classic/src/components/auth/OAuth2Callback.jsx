@@ -35,7 +35,7 @@ const OAuth2Callback = (props) => {
   const [searchParams] = useSearchParams();
   const [, userDispatch] = useContext(UserContext);
   const navigate = useNavigate();
-  
+
   // 防止 React 18 Strict Mode 下重复执行
   const hasExecuted = useRef(false);
 
@@ -44,9 +44,9 @@ const OAuth2Callback = (props) => {
 
   const sendCode = async (code, state, retry = 0) => {
     try {
-      const { data: resData } = await API.get(
-        `/api/oauth/${props.type}?code=${code}&state=${state}`,
-      );
+      const { data: resData } = await API.get(`/api/oauth/${props.type}`, {
+        params: { code, state },
+      });
 
       const { success, message, data } = resData;
 
@@ -61,7 +61,6 @@ const OAuth2Callback = (props) => {
         navigate('/console/personal');
       } else {
         userDispatch({ type: 'login', payload: data });
-        localStorage.setItem('user', JSON.stringify(data));
         setUserData(data);
         updateAPI();
         showSuccess(t('登录成功！'));

@@ -145,7 +145,7 @@ export default function SettingsGeneralPayment(props) {
       if (errorResults.length === 0) {
         showSuccess(t('更新成功'));
         setOriginInputs({ ...inputs });
-        props.refresh && props.refresh();
+        props.refresh?.();
       } else {
         errorResults.forEach((res) => {
           showError(res.data.message);

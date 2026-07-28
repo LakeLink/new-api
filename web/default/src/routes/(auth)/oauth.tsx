@@ -23,6 +23,7 @@ import { toast } from 'sonner'
 
 import { wechatLoginByCode } from '@/features/auth/api'
 import { getSelf } from '@/lib/api'
+import { normalizeInternalNavigationUrl } from '@/lib/safe-navigation'
 import { useAuthStore, type AuthUser } from '@/stores/auth-store'
 
 function OAuthComponent() {
@@ -43,7 +44,7 @@ function OAuthComponent() {
         const res = await getSelf()
         if (res?.success) {
           useAuthStore.getState().auth.setUser(res.data as AuthUser)
-          const target = search?.redirect || '/dashboard'
+          const target = normalizeInternalNavigationUrl(search?.redirect)
           navigate({ to: target, replace: true })
           return
         }

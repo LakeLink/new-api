@@ -1,5 +1,3 @@
-import '@douyinfe/semi-ui/react19-adapter';
-
 /*
 Copyright (C) 2025 QuantumNous
 
@@ -19,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
+import '@douyinfe/semi-ui/react19-adapter';
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
@@ -34,10 +34,12 @@ import { LocaleProvider } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import zh_CN from '@douyinfe/semi-ui/lib/es/locale/source/zh_CN';
 import en_GB from '@douyinfe/semi-ui/lib/es/locale/source/en_GB';
+import { sanitizeStoredUserData } from './helpers/data';
 
 // 欢迎信息（二次开发者未经允许不准将此移除）
 // Welcome message (Do not remove this without permission from the original developer)
 if (typeof window !== 'undefined') {
+  sanitizeStoredUserData();
   console.log(
     '%cWE ❤ NEWAPI%c Github: https://github.com/QuantumNous/new-api',
     'color: #10b981; font-weight: bold; font-size: 24px;',

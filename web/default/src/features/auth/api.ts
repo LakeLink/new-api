@@ -24,6 +24,7 @@ import type {
   Login2FAResponse,
   TwoFAPayload,
   RegisterPayload,
+  TelegramAuthPayload,
   ApiResponse,
 } from './types'
 
@@ -56,7 +57,21 @@ export async function login2fa(payload: TwoFAPayload) {
 
 // User logout
 export async function logout(): Promise<ApiResponse> {
-  const res = await api.get('/api/user/logout')
+  const res = await api.post('/api/user/logout')
+  return res.data
+}
+
+export async function telegramLogin(
+  payload: TelegramAuthPayload
+): Promise<LoginResponse> {
+  const res = await api.post<LoginResponse>(
+    '/api/oauth/telegram/login',
+    payload,
+    {
+      skipBusinessError: true,
+      skipErrorHandler: true,
+    }
+  )
   return res.data
 }
 
@@ -69,9 +84,13 @@ export async function sendPasswordResetEmail(
   email: string,
   turnstile?: string
 ): Promise<ApiResponse> {
-  const res = await api.get('/api/reset_password', {
-    params: { email, turnstile },
-  })
+  const res = await api.post(
+    '/api/reset_password',
+    { email },
+    {
+      params: { turnstile },
+    }
+  )
   return res.data
 }
 
@@ -81,22 +100,25 @@ export async function sendPasswordResetEmail(
 
 // Start GitHub OAuth flow
 export async function githubOAuthStart(clientId: string, state: string) {
-  const url = `https://github.com/login/oauth/authorize?client_id=${clientId}&state=${state}&scope=user:email`
-  window.open(url)
+  const url = new URL('https://github.com/login/oauth/authorize')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set('state', state)
+  url.searchParams.set('scope', 'user:email')
+  window.open(url.toString(), '_blank', 'noopener,noreferrer')
 }
 
 // Get OAuth state for CSRF protection
 export async function getOAuthState(): Promise<string> {
   const aff =
     typeof window !== 'undefined' ? (localStorage.getItem('aff') ?? '') : ''
-  const res = await api.get('/api/oauth/state', { params: { aff } })
+  const res = await api.post('/api/oauth/state', { aff })
   if (res.data?.success) return res.data.data
   return ''
 }
 
 // WeChat login by authorization code
 export async function wechatLoginByCode(code: string): Promise<ApiResponse> {
-  const res = await api.get('/api/oauth/wechat', { params: { code } })
+  const res = await api.post('/api/oauth/wechat', { code })
   return res.data
 }
 
@@ -117,9 +139,11 @@ export async function sendEmailVerification(
   email: string,
   turnstile?: string
 ): Promise<ApiResponse> {
-  const res = await api.get('/api/verification', {
-    params: { email, turnstile },
-  })
+  const res = await api.post(
+    '/api/verification',
+    { email },
+    { params: { turnstile } }
+  )
   return res.data
 }
 

@@ -229,7 +229,8 @@ const DeploymentAccessGuard = ({
 
             {/* 操作链接区域 */}
             <div style={{ marginBottom: '20px' }}>
-              <div
+              <button
+                type='button'
                 onClick={handleGoToSettings}
                 style={{
                   display: 'inline-flex',
@@ -260,7 +261,7 @@ const DeploymentAccessGuard = ({
               >
                 <Settings size={18} />
                 {t('前往设置页面')}
-              </div>
+              </button>
             </div>
 
             {/* 底部提示 */}

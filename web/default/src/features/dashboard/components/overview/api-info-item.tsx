@@ -28,6 +28,7 @@ import {
 } from '@/features/dashboard/lib/api-info'
 import type { ApiInfoItem, PingStatus } from '@/features/dashboard/types'
 import { getBgColorClass } from '@/lib/colors'
+import { normalizeHttpUrl, openExternalHttpUrl } from '@/lib/safe-navigation'
 import { cn } from '@/lib/utils'
 
 interface ApiInfoItemProps {
@@ -40,6 +41,7 @@ export function ApiInfoItemComponent(props: ApiInfoItemProps) {
   const { t } = useTranslation()
   const item = props.item
   const status = props.status
+  const safeItemUrl = normalizeHttpUrl(item.url)
 
   return (
     <div className='group hover:bg-muted/40 flex items-center justify-between gap-2 px-3 py-2.5 transition-colors sm:gap-3 sm:px-5 sm:py-3'>
@@ -129,9 +131,10 @@ export function ApiInfoItemComponent(props: ApiInfoItemProps) {
           <Button
             variant='ghost'
             size='sm'
+            disabled={!safeItemUrl}
             className='hidden size-7 p-0 sm:inline-flex'
             title={t('Open in New Tab')}
-            render={<a href={item.url} target='_blank' rel='noreferrer' />}
+            onClick={() => openExternalHttpUrl(item.url)}
           >
             <ExternalLink className='size-3.5' />
           </Button>

@@ -62,13 +62,48 @@ interface AuthState {
   }
 }
 
+const SENSITIVE_SETTING_KEYS = new Set(['gotify_token', 'webhook_secret'])
+
+function sanitizeSettingForStorage(
+  setting: AuthUser['setting']
+): AuthUser['setting'] {
+  if (!setting) {
+    return setting
+  }
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed =
+      typeof setting === 'string'
+        ? (JSON.parse(setting) as Record<string, unknown>)
+        : { ...setting }
+  } catch {
+    return undefined
+  }
+
+  SENSITIVE_SETTING_KEYS.forEach((key) => delete parsed[key])
+  return typeof setting === 'string' ? JSON.stringify(parsed) : parsed
+}
+
+function sanitizeUserForStorage(user: AuthUser): AuthUser {
+  return {
+    ...user,
+    setting: sanitizeSettingForStorage(user.setting),
+  }
+}
+
 export const useAuthStore = create<AuthState>()((set) => {
   // Restore user info from localStorage
   const initUser = (() => {
     try {
       if (typeof window !== 'undefined') {
         const saved = window.localStorage.getItem('user')
-        return saved ? JSON.parse(saved) : null
+        if (!saved) {
+          return null
+        }
+        const user = sanitizeUserForStorage(JSON.parse(saved) as AuthUser)
+        window.localStorage.setItem('user', JSON.stringify(user))
+        return user
       }
     } catch {
       // Clear dirty data when parsing fails
@@ -92,7 +127,10 @@ export const useAuthStore = create<AuthState>()((set) => {
           if (typeof window !== 'undefined') {
             try {
               if (user) {
-                window.localStorage.setItem('user', JSON.stringify(user))
+                window.localStorage.setItem(
+                  'user',
+                  JSON.stringify(sanitizeUserForStorage(user))
+                )
               } else {
                 window.localStorage.removeItem('user')
               }

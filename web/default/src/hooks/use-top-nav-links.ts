@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import { useStatus } from '@/hooks/use-status'
 import { parseHeaderNavModulesFromStatus } from '@/lib/nav-modules'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { useAuthStore } from '@/stores/auth-store'
 
 export type TopNavLink = {
@@ -56,7 +57,7 @@ export function useTopNavLinks(): TopNavLink[] {
   }, [status])
 
   // Documentation link (may be external)
-  const docsLink: string | undefined = status?.docs_link as string | undefined
+  const docsLink = normalizeHttpUrl(status?.docs_link)
 
   const isAuthed = !!auth?.user
 

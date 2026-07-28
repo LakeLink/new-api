@@ -27,6 +27,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { cn } from '@/lib/utils'
 
 export type SourcesProps = ComponentProps<'div'>
@@ -84,19 +85,28 @@ export const SourcesContent = ({
 
 export type SourceProps = ComponentProps<'a'>
 
-export const Source = ({ href, title, children, ...props }: SourceProps) => (
-  <a
-    className='flex items-center gap-2'
-    href={href}
-    rel='noreferrer'
-    target='_blank'
-    {...props}
-  >
-    {children ?? (
-      <>
-        <BookIcon className='h-4 w-4' />
-        <span className='block font-medium'>{title}</span>
-      </>
-    )}
-  </a>
-)
+export const Source = ({ href, title, children, ...props }: SourceProps) => {
+  const safeHref = normalizeHttpUrl(href)
+  const content = children ?? (
+    <>
+      <BookIcon className='h-4 w-4' />
+      <span className='block font-medium'>{title}</span>
+    </>
+  )
+
+  if (!safeHref) {
+    return <span className='flex items-center gap-2'>{content}</span>
+  }
+
+  return (
+    <a
+      {...props}
+      className='flex items-center gap-2'
+      href={safeHref}
+      rel='noopener noreferrer'
+      target='_blank'
+    >
+      {content}
+    </a>
+  )
+}

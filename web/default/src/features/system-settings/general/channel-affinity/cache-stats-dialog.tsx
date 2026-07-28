@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -47,35 +47,41 @@ export function CacheStatsDialog(props: Props) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [stats, setStats] = useState<Record<string, unknown> | null>(null)
-  const seqRef = useRef(0)
 
   useEffect(() => {
-    if (!props.open || !props.target?.rule_name || !props.target?.key_fp) {
+    const target = props.target
+    if (!props.open || !target?.rule_name || !target.key_fp) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStats(null)
+      setLoading(false)
       return
     }
 
-    const seq = ++seqRef.current
+    let cancelled = false
 
     setLoading(true)
 
     setStats(null)
 
-    getAffinityUsageCache(props.target)
-      .then((res) => {
-        if (seq !== seqRef.current) return
+    void (async () => {
+      try {
+        const res = await getAffinityUsageCache(target)
+        if (cancelled) return
         if (res.success) setStats((res.data as Record<string, unknown>) || {})
         else toast.error(res.message || t('Request failed'))
-      })
-      .catch(() => {
-        if (seq !== seqRef.current) return
+      } catch {
+        if (cancelled) return
         toast.error(t('Request failed'))
-      })
-      .finally(() => {
-        if (seq !== seqRef.current) return
-        setLoading(false)
-      })
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
   }, [props.open, props.target, t])
 
   const rows = useMemo(() => {

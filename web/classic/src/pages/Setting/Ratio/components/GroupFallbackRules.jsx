@@ -197,11 +197,14 @@ function FallbackGroupSection({
       }}
     >
       <div
-        className='flex items-center justify-between cursor-pointer'
+        className='flex items-center justify-between'
         style={{ padding: '8px 12px', background: 'var(--semi-color-fill-0)' }}
-        onClick={() => setOpen(!open)}
       >
-        <div className='flex items-center gap-2'>
+        <button
+          type='button'
+          className='flex flex-1 items-center gap-2 border-0 bg-transparent p-0 text-left cursor-pointer'
+          onClick={() => setOpen(!open)}
+        >
           {open ? (
             <IconChevronUp size='small' />
           ) : (
@@ -217,11 +220,8 @@ function FallbackGroupSection({
           <Text type='tertiary' size='small'>
             {ratioModeLabel}
           </Text>
-        </div>
-        <div
-          className='flex items-center gap-1'
-          onClick={(e) => e.stopPropagation()}
-        >
+        </button>
+        <div className='flex items-center gap-1'>
           <Popconfirm
             title={t('确认删除该分组回退？')}
             onConfirm={() => onRemoveRule('_all')}

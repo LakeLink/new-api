@@ -1,5 +1,6 @@
 module.exports = {
   root: true,
+  ignorePatterns: ['dist/', 'node_modules/'],
   env: { browser: true, es2021: true, node: true },
   parserOptions: {
     ecmaVersion: 2020,
@@ -7,6 +8,9 @@ module.exports = {
     ecmaFeatures: { jsx: true },
   },
   plugins: ['header', 'react-hooks'],
+  rules: {
+    'react-hooks/rules-of-hooks': 'error',
+  },
   overrides: [
     {
       files: ['**/*.{js,jsx}'],

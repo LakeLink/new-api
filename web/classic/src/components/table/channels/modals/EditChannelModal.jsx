@@ -411,8 +411,10 @@ const EditChannelModal = (props) => {
     if (!ionetMetadata?.deployment_id) {
       return;
     }
-    const targetUrl = `/console/deployment?deployment_id=${ionetMetadata.deployment_id}`;
-    window.open(targetUrl, '_blank', 'noopener');
+    const targetUrl = `/console/deployment?deployment_id=${encodeURIComponent(
+      String(ionetMetadata.deployment_id),
+    )}`;
+    window.open(targetUrl, '_blank', 'noopener,noreferrer');
   };
   const [verifyLoading, setVerifyLoading] = useState(false);
   const statusCodeRiskConfirmResolverRef = useRef(null);
@@ -466,7 +468,6 @@ const EditChannelModal = (props) => {
   } = useSecureVerification({
     onSuccess: (result) => {
       // 验证成功后显示密钥
-      console.log('Verification success, result:', result);
       if (result && result.success && result.data?.key) {
         showSuccess(t('密钥获取成功'));
         setKeyDisplayState({
@@ -1240,7 +1241,6 @@ const EditChannelModal = (props) => {
         });
       }
     } catch (error) {
-      console.error('Failed to view channel key:', error);
       showError(error.message || t('获取密钥失败'));
     }
   };
@@ -2152,9 +2152,19 @@ const EditChannelModal = (props) => {
 
     return (
       <div
+        role='option'
+        aria-selected={Boolean(selected)}
+        aria-disabled={Boolean(disabled)}
+        tabIndex={disabled ? -1 : 0}
         style={style}
         className={optionClassName}
         onClick={() => !disabled && onClick()}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (!disabled) onClick();
+          }
+        }}
         onMouseEnter={(e) => onMouseEnter()}
       >
         <div className='flex items-center gap-3 w-full'>
@@ -3574,6 +3584,8 @@ const EditChannelModal = (props) => {
                                     onClick={() =>
                                       window.open(
                                         'https://cloud.siliconflow.cn/i/hij0YNTZ',
+                                        '_blank',
+                                        'noopener,noreferrer',
                                       )
                                     }
                                   >
@@ -3815,6 +3827,15 @@ const EditChannelModal = (props) => {
                                     );
                                   } else {
                                     showError(t('复制失败'));
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (
+                                    event.key === 'Enter' ||
+                                    event.key === ' '
+                                  ) {
+                                    event.preventDefault();
+                                    event.currentTarget.click();
                                   }
                                 }}
                               >
@@ -4067,8 +4088,9 @@ const EditChannelModal = (props) => {
                       </Collapse>
                     ) : (
                       /* Desktop: toggle button to open side panel */
-                      <div
-                        className='flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors hover:bg-gray-50'
+                      <button
+                        type='button'
+                        className='flex w-full items-center justify-between rounded-xl p-3 text-left cursor-pointer transition-colors hover:bg-gray-50'
                         style={{
                           backgroundColor: advancedSettingsOpen
                             ? 'var(--semi-color-primary-light-default)'
@@ -4109,7 +4131,7 @@ const EditChannelModal = (props) => {
                             }}
                           />
                         </div>
-                      </div>
+                      </button>
                     )}
                   </div>
                 </Spin>

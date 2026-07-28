@@ -21,6 +21,7 @@ import i18n from 'i18next'
 
 import type { User } from '@/features/users/types'
 import { getSelf } from '@/lib/api'
+import { normalizeInternalNavigationUrl } from '@/lib/safe-navigation'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { saveUserId } from '../lib/storage'
@@ -82,13 +83,10 @@ export function useAuthRedirect() {
           i18n.changeLanguage(savedLang)
         }
       }
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('Failed to fetch user data:', error)
-    }
+    } catch {}
 
     // Navigate to target page
-    const targetPath = redirectTo || '/dashboard'
+    const targetPath = normalizeInternalNavigationUrl(redirectTo)
     navigate({ to: targetPath, replace: true })
   }
 

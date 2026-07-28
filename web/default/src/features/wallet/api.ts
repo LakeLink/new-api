@@ -173,7 +173,7 @@ export async function requestWaffoPancakePayment(
  * Get affiliate code
  */
 export async function getAffiliateCode(): Promise<AffiliateCodeResponse> {
-  const res = await api.get('/api/user/aff')
+  const res = await api.post('/api/user/aff')
   return res.data
 }
 

@@ -25,6 +25,7 @@ import {
   IllustrationConstructionDark,
 } from '@douyinfe/semi-illustrations';
 import ScrollableContainer from '../common/ui/ScrollableContainer';
+import { openExternalHttpUrl } from '../../helpers/safeNavigation';
 
 const ApiInfoPanel = ({
   apiInfoData,
@@ -63,42 +64,54 @@ const ApiInfoPanel = ({
                       {api.route}
                     </span>
                     <div className='flex items-center gap-1 mt-1 lg:mt-0'>
-                      <Tag
-                        prefixIcon={<Gauge size={12} />}
-                        size='small'
-                        color='white'
-                        shape='circle'
+                      <button
+                        type='button'
+                        className='cursor-pointer border-0 bg-transparent p-0'
                         onClick={() => handleSpeedTest(api.url)}
-                        className='cursor-pointer hover:opacity-80 text-xs'
                       >
-                        {t('测速')}
-                      </Tag>
-                      <Tag
-                        prefixIcon={<ExternalLink size={12} />}
-                        size='small'
-                        color='white'
-                        shape='circle'
-                        onClick={() =>
-                          window.open(api.url, '_blank', 'noopener,noreferrer')
-                        }
-                        className='cursor-pointer hover:opacity-80 text-xs'
+                        <Tag
+                          prefixIcon={<Gauge size={12} />}
+                          size='small'
+                          color='white'
+                          shape='circle'
+                          className='hover:opacity-80 text-xs'
+                        >
+                          {t('测速')}
+                        </Tag>
+                      </button>
+                      <button
+                        type='button'
+                        className='cursor-pointer border-0 bg-transparent p-0'
+                        onClick={() => openExternalHttpUrl(api.url)}
                       >
-                        {t('跳转')}
-                      </Tag>
+                        <Tag
+                          prefixIcon={<ExternalLink size={12} />}
+                          size='small'
+                          color='white'
+                          shape='circle'
+                          className='hover:opacity-80 text-xs'
+                        >
+                          {t('跳转')}
+                        </Tag>
+                      </button>
                     </div>
                   </div>
                   <div className='flex items-center gap-1 mb-1'>
-                    <span
-                      className='!text-semi-color-primary break-all cursor-pointer hover:underline'
+                    <button
+                      type='button'
+                      className='!text-semi-color-primary cursor-pointer break-all bg-transparent p-0 text-left hover:underline'
                       onClick={() => handleCopyUrl(api.url)}
                     >
                       {api.url}
-                    </span>
-                    <Copy
-                      size={14}
-                      className='flex-shrink-0 text-gray-400 hover:text-semi-color-primary cursor-pointer transition-colors'
+                    </button>
+                    <button
+                      type='button'
+                      aria-label={t('复制链接')}
+                      className='flex-shrink-0 cursor-pointer border-0 bg-transparent p-0 text-gray-400 transition-colors hover:text-semi-color-primary'
                       onClick={() => handleCopyUrl(api.url)}
-                    />
+                    >
+                      <Copy size={14} aria-hidden='true' />
+                    </button>
                   </div>
                   <div className='text-gray-500'>{api.description}</div>
                 </div>

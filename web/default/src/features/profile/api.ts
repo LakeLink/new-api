@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { TelegramAuthPayload } from '@/features/auth/types'
 import { api } from '@/lib/api'
 
 import type {
@@ -84,7 +85,7 @@ export async function deleteUserAccount(
  * Generate/regenerate system access token
  */
 export async function generateAccessToken(): Promise<ApiResponse<string>> {
-  const res = await api.get('/api/user/token')
+  const res = await api.post('/api/user/token')
   return res.data
 }
 
@@ -99,11 +100,11 @@ export async function sendEmailVerification(
   email: string,
   turnstileToken?: string
 ): Promise<ApiResponse> {
-  const params = new URLSearchParams({ email })
-  if (turnstileToken) {
-    params.append('turnstile', turnstileToken)
-  }
-  const res = await api.get(`/api/verification?${params}`)
+  const res = await api.post(
+    '/api/verification',
+    { email },
+    { params: { turnstile: turnstileToken } }
+  )
   return res.data
 }
 
@@ -125,7 +126,27 @@ export async function bindEmail(
  * Bind WeChat account
  */
 export async function bindWeChat(code: string): Promise<ApiResponse> {
-  const res = await api.get(`/api/oauth/wechat/bind?code=${code}`)
+  const res = await api.post(
+    '/api/oauth/wechat/bind',
+    { code },
+    {
+      skipBusinessError: true,
+      skipErrorHandler: true,
+    }
+  )
+  return res.data
+}
+
+/**
+ * Bind a Telegram identity returned by the official login widget.
+ */
+export async function bindTelegram(
+  payload: TelegramAuthPayload
+): Promise<ApiResponse> {
+  const res = await api.post('/api/oauth/telegram/bind', payload, {
+    skipBusinessError: true,
+    skipErrorHandler: true,
+  })
   return res.data
 }
 
@@ -134,9 +155,11 @@ export async function bindWeChat(code: string): Promise<ApiResponse> {
 // ============================================================================
 
 export interface CustomOAuthBinding {
-  provider_id: string
+  provider_id: number
   provider_name: string
-  external_id?: string
+  provider_slug: string
+  provider_icon: string
+  provider_user_id: string
 }
 
 /**
@@ -153,9 +176,11 @@ export async function getSelfOAuthBindings(): Promise<
  * Unbind a custom OAuth provider for current user
  */
 export async function unbindCustomOAuth(
-  providerId: string
+  providerId: number
 ): Promise<ApiResponse> {
-  const res = await api.delete(`/api/user/oauth/bindings/${providerId}`)
+  const res = await api.delete(
+    `/api/user/oauth/bindings/${encodeURIComponent(String(providerId))}`
+  )
   return res.data
 }
 

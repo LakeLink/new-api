@@ -214,8 +214,9 @@ export async function testChannel(
   id: number,
   params?: { model?: string; endpoint_type?: string; stream?: boolean }
 ): Promise<ChannelTestResponse> {
-  const res = await api.get(
+  const res = await api.post(
     `/api/channel/test/${id}`,
+    undefined,
     channelActionConfig({ params })
   )
   return res.data
@@ -227,8 +228,9 @@ export async function testChannel(
 export async function updateChannelBalance(
   id: number
 ): Promise<ChannelBalanceResponse> {
-  const res = await api.get(
+  const res = await api.post(
     `/api/channel/update_balance/${id}`,
+    undefined,
     channelActionConfig()
   )
   return res.data
@@ -559,7 +561,11 @@ export async function testAllChannels(): Promise<{
   success: boolean
   message?: string
 }> {
-  const res = await api.get('/api/channel/test', channelActionConfig())
+  const res = await api.post(
+    '/api/channel/test',
+    undefined,
+    channelActionConfig()
+  )
   return res.data
 }
 
@@ -570,8 +576,9 @@ export async function updateAllChannelsBalance(): Promise<{
   success: boolean
   message?: string
 }> {
-  const res = await api.get(
+  const res = await api.post(
     '/api/channel/update_balance',
+    undefined,
     channelActionConfig()
   )
   return res.data

@@ -240,8 +240,9 @@ const CheckinCalendar = ({ t, status, turnstileEnabled, turnstileSiteKey }) => {
 
       {/* 卡片头部 */}
       <div className='flex items-center justify-between'>
-        <div
-          className='flex items-center flex-1 cursor-pointer'
+        <button
+          type='button'
+          className='flex flex-1 items-center border-0 bg-transparent p-0 text-left cursor-pointer'
           onClick={() => setIsCollapsed(!isCollapsed)}
         >
           <Avatar size='small' color='green' className='mr-3 shadow-md'>
@@ -268,7 +269,7 @@ const CheckinCalendar = ({ t, status, turnstileEnabled, turnstileSiteKey }) => {
                   : t('每日签到可获得随机额度奖励')}
             </div>
           </div>
-        </div>
+        </button>
         <Button
           type='primary'
           theme='solid'

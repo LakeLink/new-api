@@ -268,16 +268,11 @@ export const useDeploymentResources = () => {
   }, []);
 
   const createDeployment = useCallback(async (deploymentData) => {
-    try {
-      const response = await API.post('/api/deployments', deploymentData);
-      if (response.data.success) {
-        return response.data.data;
-      } else {
-        throw new Error(response.data.message || '创建部署失败');
-      }
-    } catch (error) {
-      throw error;
+    const response = await API.post('/api/deployments', deploymentData);
+    if (response.data.success) {
+      return response.data.data;
     }
+    throw new Error(response.data.message || '创建部署失败');
   }, []);
 
   return {

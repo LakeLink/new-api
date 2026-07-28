@@ -35,6 +35,7 @@ import {
   getServerAddress,
   encodeChannelConnectionString,
 } from '../../helpers/token';
+import { normalizeExternalProtocolUrl } from '../../helpers/safeNavigation';
 
 export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
   const { t } = useTranslation();
@@ -267,7 +268,12 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
       url = url.replaceAll('{key}', `sk-${fullKey}`);
     }
 
-    window.open(url, '_blank');
+    const safeUrl = normalizeExternalProtocolUrl(url);
+    if (!safeUrl) {
+      showError(t('聊天链接配置错误，请联系管理员'));
+      return;
+    }
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
   };
 
   // Manage token function (delete, enable, disable)
@@ -306,8 +312,7 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
   // Search tokens function
   const searchTokens = async (page = 1, size = pageSize) => {
     const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
-    const normalizedSize =
-      Number.isInteger(size) && size > 0 ? size : pageSize;
+    const normalizedSize = Number.isInteger(size) && size > 0 ? size : pageSize;
 
     const { searchKeyword, searchToken } = getFormValues();
     if (searchKeyword === '' && searchToken === '') {
@@ -316,8 +321,12 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
       return;
     }
     setSearching(true);
-    const res = await API.get(
-      `/api/token/search?keyword=${encodeURIComponent(searchKeyword)}&token=${encodeURIComponent(searchToken)}&p=${normalizedPage}&size=${normalizedSize}`,
+    const res = await API.post(
+      `/api/token/search?p=${normalizedPage}&size=${normalizedSize}`,
+      {
+        keyword: searchKeyword,
+        token: searchToken,
+      },
     );
     const { success, message, data } = res.data;
     if (success) {

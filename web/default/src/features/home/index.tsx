@@ -24,6 +24,7 @@ import { Footer } from '@/components/layout/components/footer'
 import { RichContent } from '@/components/rich-content'
 import { useTheme } from '@/context/theme-provider'
 import { isLikelyHtml } from '@/lib/content-format'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { CTA, Features, Hero, HowItWorks, Stats } from './components'
@@ -38,19 +39,24 @@ export function Home() {
   const { content, isLoaded, isUrl } = useHomePageContent()
 
   const syncIframePreferences = useCallback(() => {
+    const targetUrl = normalizeHttpUrl(content)
+    if (!targetUrl) {
+      return
+    }
+    const targetOrigin = new URL(targetUrl).origin
     try {
       iframeRef.current?.contentWindow?.postMessage(
         { themeMode: resolvedTheme },
-        '*'
+        targetOrigin
       )
       iframeRef.current?.contentWindow?.postMessage(
         { lang: i18n.language },
-        '*'
+        targetOrigin
       )
     } catch {
       // Cross-origin frames may reject access while navigating.
     }
-  }, [i18n.language, resolvedTheme])
+  }, [content, i18n.language, resolvedTheme])
 
   useEffect(() => {
     if (isUrl) {
@@ -85,6 +91,7 @@ export function Home() {
             src={content}
             className='h-screen w-full border-none'
             title={t('Custom Home Page')}
+            referrerPolicy='no-referrer'
             sandbox='allow-forms allow-popups allow-popups-to-escape-sandbox allow-scripts allow-top-navigation-by-user-activation'
             onLoad={syncIframePreferences}
           />

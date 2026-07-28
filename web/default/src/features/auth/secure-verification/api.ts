@@ -57,9 +57,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
       hasPasskey,
       passkeySupported,
     }
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('[Secure Verification] Failed to check methods', error)
+  } catch {
     return {
       hasPassword: false,
       has2FA: false,

@@ -39,6 +39,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 
 import { FormDirtyIndicator } from '../components/form-dirty-indicator'
 import { FormNavigationGuard } from '../components/form-navigation-guard'
@@ -289,20 +290,27 @@ export function OAuthSection(props: OAuthSectionProps) {
     let finalValues = values
 
     if (values.oidc.well_known && values.oidc.well_known.trim() !== '') {
-      const wellKnown = values.oidc.well_known.trim()
-      if (
-        !wellKnown.startsWith('http://') &&
-        !wellKnown.startsWith('https://')
-      ) {
+      const wellKnown = normalizeHttpUrl(values.oidc.well_known)
+      if (!wellKnown) {
         toast.error(t('Well-Known URL must start with http:// or https://'))
         return
       }
 
       try {
         const res = await axios.create().get(wellKnown)
-        const authEndpoint = res.data['authorization_endpoint'] || ''
-        const tokenEndpoint = res.data['token_endpoint'] || ''
-        const userInfoEndpoint = res.data['userinfo_endpoint'] || ''
+        const authEndpoint = normalizeHttpUrl(
+          res.data['authorization_endpoint']
+        )
+        const tokenEndpoint = normalizeHttpUrl(res.data['token_endpoint'])
+        const userInfoEndpoint = normalizeHttpUrl(res.data['userinfo_endpoint'])
+        if (!authEndpoint || !tokenEndpoint || !userInfoEndpoint) {
+          toast.error(
+            t(
+              'Failed to fetch OIDC configuration. Please check the URL and network status'
+            )
+          )
+          return
+        }
 
         finalValues = {
           ...values,
@@ -319,9 +327,7 @@ export function OAuthSection(props: OAuthSectionProps) {
         form.setValue('oidc.user_info_endpoint', userInfoEndpoint)
 
         toast.success(t('OIDC configuration fetched successfully'))
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error(err)
+      } catch {
         toast.error(
           t(
             'Failed to fetch OIDC configuration. Please check the URL and network status'

@@ -158,9 +158,9 @@ export function PrefillGroupFormDrawer({
     }
 
     try {
-      const response = isEdit
+      const response = currentGroup?.id
         ? await updatePrefillGroup({
-            id: currentGroup!.id,
+            id: currentGroup.id,
             ...payload,
           })
         : await createPrefillGroup(payload)

@@ -61,9 +61,7 @@ export function usePasskeyManagement(
         setStatus(null)
         toast.error(res.message || i18next.t('Failed to load Passkey status'))
       }
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('[Passkey] Failed to fetch status', error)
+    } catch {
       toast.error(i18next.t('Failed to load Passkey status'))
       setStatus(null)
     } finally {
@@ -136,8 +134,6 @@ export function usePasskeyManagement(
         toast.info(i18next.t('Passkey registration was cancelled'))
         return false
       }
-      // eslint-disable-next-line no-console
-      console.error('[Passkey] Registration error', error)
       toast.error(
         error instanceof Error
           ? error.message
@@ -161,9 +157,7 @@ export function usePasskeyManagement(
       toast.success(i18next.t('Passkey removed successfully'))
       await fetchStatus()
       return true
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('[Passkey] Removal error', error)
+    } catch {
       toast.error(i18next.t('Failed to remove Passkey'))
       return false
     } finally {

@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   IconDiscord,
@@ -30,6 +31,7 @@ import { cn } from '@/lib/utils'
 
 import { useOAuthLogin } from '../hooks/use-oauth-login'
 import type { SystemStatus } from '../types'
+import { TelegramLoginWidget } from './telegram-login-widget'
 
 type OAuthProvidersProps = {
   status: SystemStatus | null
@@ -37,6 +39,8 @@ type OAuthProvidersProps = {
   className?: string
   onWeChatLogin?: () => void
   isWeChatLoading?: boolean
+  redirectTo?: string
+  showTelegram?: boolean
 }
 
 type ProviderButton = {
@@ -53,10 +57,13 @@ export function OAuthProviders({
   className,
   onWeChatLogin,
   isWeChatLoading = false,
+  redirectTo,
+  showTelegram = true,
 }: OAuthProvidersProps) {
   const { t } = useTranslation()
   const {
     isLoading,
+    isTelegramLoading,
     githubButtonText,
     githubButtonDisabled,
     handleGitHubLogin,
@@ -65,9 +72,14 @@ export function OAuthProviders({
     handleLinuxDOLogin,
     handleTelegramLogin,
     handleCustomOAuthLogin,
-  } = useOAuthLogin(status)
+  } = useOAuthLogin(status, { redirectTo })
 
   const providerButtons: ProviderButton[] = []
+  const telegramBotName =
+    status?.telegram_bot_name ?? status?.data?.telegram_bot_name
+  const hasTelegramLogin = Boolean(
+    showTelegram && status?.telegram_oauth && telegramBotName?.trim()
+  )
 
   if (status?.wechat_login && onWeChatLogin) {
     providerButtons.push({
@@ -115,14 +127,6 @@ export function OAuthProviders({
     })
   }
 
-  if (status?.telegram_oauth) {
-    providerButtons.push({
-      key: 'telegram',
-      label: t('Continue with Telegram'),
-      onClick: handleTelegramLogin,
-    })
-  }
-
   // Custom OAuth providers
   const customProviders = status?.custom_oauth_providers
   if (customProviders && customProviders.length > 0) {
@@ -135,7 +139,7 @@ export function OAuthProviders({
     }
   }
 
-  if (providerButtons.length === 0) return null
+  if (providerButtons.length === 0 && !hasTelegramLogin) return null
 
   return (
     <div className={cn('space-y-3', className)}>
@@ -166,6 +170,15 @@ export function OAuthProviders({
             </Button>
           )
         )}
+        {hasTelegramLogin && telegramBotName ? (
+          <TelegramLoginWidget
+            botName={telegramBotName}
+            disabled={disabled || isLoading}
+            loading={isTelegramLoading}
+            onAuth={handleTelegramLogin}
+            onInvalidAuth={() => toast.error(t('Login failed'))}
+          />
+        ) : null}
       </div>
     </div>
   )

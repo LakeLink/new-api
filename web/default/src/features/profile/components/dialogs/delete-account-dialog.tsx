@@ -27,6 +27,11 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+  type VerificationMethod,
+} from '@/features/auth/secure-verification'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -52,13 +57,19 @@ export function DeleteAccountDialog({
   const { reset } = useAuthStore((state) => state.auth)
   const [loading, setLoading] = useState(false)
   const [confirmation, setConfirmation] = useState('')
+  const {
+    open: verificationOpen,
+    setOpen: setVerificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    executeVerification,
+    cancel: cancelVerification,
+    setCode,
+    switchMethod,
+    withVerification,
+  } = useSecureVerification()
 
-  const handleDelete = async () => {
-    if (confirmation !== username) {
-      toast.error(t('Username confirmation does not match'))
-      return
-    }
-
+  const deleteAccount = async () => {
     try {
       setLoading(true)
       const response = await deleteUserAccount()
@@ -68,7 +79,7 @@ export function DeleteAccountDialog({
 
         // Logout and redirect
         try {
-          await api.get('/api/user/logout')
+          await api.post('/api/user/logout')
         } catch {
           // Ignore logout errors
         }
@@ -85,6 +96,30 @@ export function DeleteAccountDialog({
     }
   }
 
+  const handleDelete = async () => {
+    if (confirmation !== username) {
+      toast.error(t('Username confirmation does not match'))
+      return
+    }
+    await withVerification(deleteAccount, {
+      title: t('Security verification'),
+      description: t(
+        'Confirm your identity before accessing this sensitive action.'
+      ),
+    })
+  }
+
+  const handleVerification = async (
+    method: VerificationMethod,
+    code?: string
+  ) => {
+    try {
+      await executeVerification(method, code)
+    } catch {
+      // Errors are already shown by the secure-verification hook.
+    }
+  }
+
   const handleOpenChange = (open: boolean) => {
     if (!loading) {
       onOpenChange(open)
@@ -95,67 +130,82 @@ export function DeleteAccountDialog({
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={handleOpenChange}
-      title={
-        <>
-          <AlertTriangle className='h-5 w-5' />
-          {t('Delete Account')}
-        </>
-      }
-      description={t(
-        'This action cannot be undone. This will permanently delete your account and remove all your data from our servers.'
-      )}
-      contentClassName='sm:max-w-md'
-      titleClassName='text-destructive flex items-center gap-2'
-      contentHeight='auto'
-      bodyClassName='space-y-4'
-      footer={
-        <>
-          <Button
-            type='button'
-            variant='outline'
-            onClick={() => handleOpenChange(false)}
-            disabled={loading}
-          >
-            {t('Cancel')}
-          </Button>
-          <Button
-            type='button'
-            variant='destructive'
-            onClick={handleDelete}
-            disabled={loading || confirmation !== username}
-          >
-            {loading && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
-            {loading ? t('Deleting...') : t('Delete Account')}
-          </Button>
-        </>
-      }
-    >
-      <div className='my-6 space-y-4'>
-        <Alert variant='destructive'>
-          <AlertTriangle className='h-4 w-4' />
-          <AlertDescription>
-            {t('Warning: This action is permanent and irreversible!')}
-          </AlertDescription>
-        </Alert>
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={handleOpenChange}
+        title={
+          <>
+            <AlertTriangle className='h-5 w-5' />
+            {t('Delete Account')}
+          </>
+        }
+        description={t(
+          'This action cannot be undone. This will permanently delete your account and remove all your data from our servers.'
+        )}
+        contentClassName='sm:max-w-md'
+        titleClassName='text-destructive flex items-center gap-2'
+        contentHeight='auto'
+        bodyClassName='space-y-4'
+        footer={
+          <>
+            <Button
+              type='button'
+              variant='outline'
+              onClick={() => handleOpenChange(false)}
+              disabled={loading}
+            >
+              {t('Cancel')}
+            </Button>
+            <Button
+              type='button'
+              variant='destructive'
+              onClick={handleDelete}
+              disabled={loading || confirmation !== username}
+            >
+              {loading && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
+              {loading ? t('Deleting...') : t('Delete Account')}
+            </Button>
+          </>
+        }
+      >
+        <div className='my-6 space-y-4'>
+          <Alert variant='destructive'>
+            <AlertTriangle className='h-4 w-4' />
+            <AlertDescription>
+              {t('Warning: This action is permanent and irreversible!')}
+            </AlertDescription>
+          </Alert>
 
-        <div className='space-y-2'>
-          <Label htmlFor='confirmation'>
-            {t('Type')} <strong>{username}</strong> {t('to confirm')}
-          </Label>
-          <Input
-            id='confirmation'
-            type='text'
-            value={confirmation}
-            onChange={(e) => setConfirmation(e.target.value)}
-            disabled={loading}
-            placeholder={username}
-            autoComplete='off'
-          />
+          <div className='space-y-2'>
+            <Label htmlFor='confirmation'>
+              {t('Type')} <strong>{username}</strong> {t('to confirm')}
+            </Label>
+            <Input
+              id='confirmation'
+              type='text'
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              disabled={loading}
+              placeholder={username}
+              autoComplete='off'
+            />
+          </div>
         </div>
-      </div>
-    </Dialog>
+      </Dialog>
+
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(next) =>
+          next ? setVerificationOpen(true) : cancelVerification()
+        }
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={handleVerification}
+        onCancel={cancelVerification}
+        onCodeChange={setCode}
+        onMethodChange={switchMethod}
+      />
+    </>
   )
 }

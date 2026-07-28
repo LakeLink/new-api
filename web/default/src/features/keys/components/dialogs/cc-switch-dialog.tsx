@@ -27,6 +27,7 @@ import { ComboboxInput } from '@/components/ui/combobox-input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { getUserModels } from '@/lib/api'
+import { normalizeExternalProtocolUrl } from '@/lib/safe-navigation'
 
 const APP_CONFIGS = {
   claude: {
@@ -73,7 +74,7 @@ function buildCCSwitchURL(
   apiKey: string
 ): string {
   const serverAddress = getServerAddress()
-  const endpoint = app === 'codex' ? serverAddress + '/v1' : serverAddress
+  const endpoint = app === 'codex' ? `${serverAddress}/v1` : serverAddress
   const params = new URLSearchParams()
   params.set('resource', 'provider')
   params.set('app', app)
@@ -140,8 +141,14 @@ export function CCSwitchDialog(props: Props) {
     const key = props.tokenKey.startsWith('sk-')
       ? props.tokenKey
       : `sk-${props.tokenKey}`
-    const url = buildCCSwitchURL(app, name, models, key)
-    window.open(url, '_blank')
+    const url = normalizeExternalProtocolUrl(
+      buildCCSwitchURL(app, name, models, key)
+    )
+    if (!url) {
+      toast.error(t('Invalid chat link. Please contact your administrator.'))
+      return
+    }
+    window.open(url, '_blank', 'noopener,noreferrer')
     props.onOpenChange(false)
   }
 
@@ -196,7 +203,7 @@ export function CCSwitchDialog(props: Props) {
             onValueChange={setName}
             placeholder={currentConfig.defaultName}
             emptyText=''
-            allowCustomValue={true}
+            allowCustomValue
           />
         </div>
 

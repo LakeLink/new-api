@@ -200,12 +200,7 @@ const Playground = () => {
       let messages = [...message];
 
       // 如果存在用户消息
-      if (
-        !(
-          messages.length === 0 ||
-          messages.every((msg) => msg.role !== MESSAGE_ROLES.USER)
-        )
-      ) {
+      if (messages.some((msg) => msg.role === MESSAGE_ROLES.USER)) {
         // 处理最后一个用户消息的图片
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].role === MESSAGE_ROLES.USER) {
@@ -237,8 +232,6 @@ const Playground = () => {
 
   // 发送消息
   function onMessageSend(content, attachment) {
-    console.log('attachment: ', attachment);
-
     // 创建用户消息和加载消息
     const userMessage = createMessage(MESSAGE_ROLES.USER, content);
     const loadingMessage = createLoadingAssistantMessage();

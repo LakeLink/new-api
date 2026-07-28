@@ -27,6 +27,7 @@ import {
   Typography,
 } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
+import { normalizeExternalProtocolUrl } from '../../../../helpers/safeNavigation';
 import { selectFilter } from '../../../../helpers';
 
 const APP_CONFIGS = {
@@ -116,8 +117,14 @@ export default function CCSwitchModal({
       Toast.warning(t('请选择主模型'));
       return;
     }
-    const url = buildCCSwitchURL(app, name, models, 'sk-' + tokenKey);
-    window.open(url, '_blank');
+    const url = normalizeExternalProtocolUrl(
+      buildCCSwitchURL(app, name, models, 'sk-' + tokenKey),
+    );
+    if (!url) {
+      Toast.error(t('聊天链接配置错误，请联系管理员'));
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
     onClose();
   };
 

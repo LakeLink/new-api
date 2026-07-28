@@ -46,11 +46,12 @@ export async function searchApiKeys(
 ): Promise<GetApiKeysResponse> {
   const { keyword = '', token = '', p, size } = params
   const queryParams = new URLSearchParams()
-  if (keyword) queryParams.set('keyword', keyword)
-  if (token) queryParams.set('token', token)
   if (p != null) queryParams.set('p', String(p))
   if (size != null) queryParams.set('size', String(size))
-  const res = await api.get(`/api/token/search?${queryParams.toString()}`)
+  const res = await api.post(`/api/token/search?${queryParams.toString()}`, {
+    keyword,
+    token,
+  })
   return res.data
 }
 

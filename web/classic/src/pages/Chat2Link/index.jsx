@@ -17,29 +17,37 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React from 'react';
+import React, { useEffect, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useTokenKeys } from '../../hooks/chat/useTokenKeys';
+import {
+  parseWebChatPresets,
+  resolveWebChatUrl,
+} from '../../helpers/chatLinks';
 
-const chat2page = () => {
-  const { keys, chatLink, serverAddress, isLoading } = useTokenKeys();
+const Chat2Page = () => {
+  const { t } = useTranslation();
+  const { keys, serverAddress, isLoading } = useTokenKeys();
+  const firstWebPreset = useMemo(
+    () => parseWebChatPresets(localStorage.getItem('chats'))[0],
+    [],
+  );
+  const redirectLink =
+    keys.length > 0 && firstWebPreset
+      ? resolveWebChatUrl(firstWebPreset.template, keys[0], serverAddress)
+      : '';
 
-  const comLink = (key) => {
-    if (!chatLink || !serverAddress || !key) return '';
-    return `${chatLink}/#/?settings={"key":"sk-${key}","url":"${encodeURIComponent(serverAddress)}"}`;
-  };
-
-  if (keys.length > 0) {
-    const redirectLink = comLink(keys[0]);
+  useEffect(() => {
     if (redirectLink) {
-      window.location.href = redirectLink;
+      window.location.assign(redirectLink);
     }
-  }
+  }, [redirectLink]);
 
   return (
     <div className='mt-[60px] px-2'>
-      <h3>正在加载，请稍候...</h3>
+      <h3>{isLoading || redirectLink ? t('正在跳转...') : t('加载失败')}</h3>
     </div>
   );
 };
 
-export default chat2page;
+export default Chat2Page;

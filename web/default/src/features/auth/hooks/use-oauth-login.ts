@@ -16,37 +16,53 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { AxiosRequestConfig } from 'axios'
+import { isAxiosError, type AxiosRequestConfig } from 'axios'
 import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
+import { normalizeHttpUrl } from '@/lib/safe-navigation'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { getOAuthState } from '../api'
+import { getOAuthState, telegramLogin } from '../api'
 import {
   buildGitHubOAuthUrl,
   buildDiscordOAuthUrl,
   buildOIDCOAuthUrl,
   buildLinuxDOOAuthUrl,
 } from '../lib/oauth'
-import type { SystemStatus, CustomOAuthProviderInfo } from '../types'
+import type {
+  SystemStatus,
+  CustomOAuthProviderInfo,
+  TelegramAuthPayload,
+} from '../types'
+import { useAuthRedirect } from './use-auth-redirect'
 
 type LogoutRequestConfig = AxiosRequestConfig & {
   skipErrorHandler?: boolean
 }
 
+interface OAuthLoginOptions {
+  redirectTo?: string
+}
+
 /**
  * Hook for managing OAuth login
  */
-export function useOAuthLogin(status: SystemStatus | null) {
+export function useOAuthLogin(
+  status: SystemStatus | null,
+  options?: OAuthLoginOptions
+) {
   const { t } = useTranslation()
   const [isLoading, setIsLoading] = useState(false)
+  const [isTelegramLoading, setIsTelegramLoading] = useState(false)
   const [githubButtonText, setGithubButtonText] = useState('')
   const [githubButtonDisabled, setGithubButtonDisabled] = useState(false)
   const githubTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const telegramLoginPendingRef = useRef(false)
   const { auth } = useAuthStore()
+  const { handleLoginSuccess } = useAuthRedirect()
 
   useEffect(() => {
     setGithubButtonText(t('Continue with GitHub'))
@@ -61,14 +77,14 @@ export function useOAuthLogin(status: SystemStatus | null) {
   const resetSession = async () => {
     try {
       auth.reset()
-    } catch (_error) {
+    } catch {
       // ignore store reset errors
     }
     try {
-      await api.get('/api/user/logout', {
+      await api.post('/api/user/logout', undefined, {
         skipErrorHandler: true,
       } as LogoutRequestConfig)
-    } catch (_error) {
+    } catch {
       // ignore logout errors
     }
   }
@@ -109,7 +125,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
 
       const url = buildGitHubOAuthUrl(status.github_client_id, state)
       window.open(url, '_self')
-    } catch (_error) {
+    } catch {
       toast.error(t('Failed to start GitHub login'))
       if (githubTimeoutRef.current) {
         clearTimeout(githubTimeoutRef.current)
@@ -134,7 +150,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
 
       const url = buildDiscordOAuthUrl(status.discord_client_id, state)
       window.open(url, '_self')
-    } catch (_error) {
+    } catch {
       toast.error(t('Failed to start Discord login'))
     } finally {
       setIsLoading(false)
@@ -159,7 +175,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
         state
       )
       window.open(url, '_self')
-    } catch (_error) {
+    } catch {
       toast.error(t('Failed to start OIDC login'))
     } finally {
       setIsLoading(false)
@@ -180,15 +196,41 @@ export function useOAuthLogin(status: SystemStatus | null) {
 
       const url = buildLinuxDOOAuthUrl(status.linuxdo_client_id, state)
       window.open(url, '_self')
-    } catch (_error) {
+    } catch {
       toast.error(t('Failed to start LinuxDO login'))
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handleTelegramLogin = () => {
-    toast.info(t('Telegram login requires widget integration; coming soon'))
+  const handleTelegramLogin = async (payload: TelegramAuthPayload) => {
+    if (telegramLoginPendingRef.current) return
+
+    telegramLoginPendingRef.current = true
+    setIsLoading(true)
+    setIsTelegramLoading(true)
+    try {
+      await resetSession()
+      const response = await telegramLogin(payload)
+      if (!response.success) {
+        toast.error(response.message || t('Login failed'))
+        return
+      }
+
+      await handleLoginSuccess(response.data, options?.redirectTo)
+      toast.success(t('Welcome back!'))
+    } catch (error: unknown) {
+      const message = isAxiosError<{ message?: unknown }>(error)
+        ? error.response?.data?.message
+        : undefined
+      toast.error(
+        typeof message === 'string' && message ? message : t('Login failed')
+      )
+    } finally {
+      telegramLoginPendingRef.current = false
+      setIsTelegramLoading(false)
+      setIsLoading(false)
+    }
   }
 
   const handleCustomOAuthLogin = async (provider: CustomOAuthProviderInfo) => {
@@ -203,8 +245,14 @@ export function useOAuthLogin(status: SystemStatus | null) {
         return
       }
 
+      const safeAuthorizationEndpoint = normalizeHttpUrl(
+        provider.authorization_endpoint
+      )
+      if (!safeAuthorizationEndpoint) {
+        throw new Error('Invalid OAuth authorization endpoint')
+      }
       const redirectUri = `${window.location.origin}/oauth/${provider.slug}`
-      const url = new URL(provider.authorization_endpoint)
+      const url = new URL(safeAuthorizationEndpoint)
       url.searchParams.set('client_id', provider.client_id)
       url.searchParams.set('redirect_uri', redirectUri)
       url.searchParams.set('response_type', 'code')
@@ -214,7 +262,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
       }
 
       window.open(url.toString(), '_self')
-    } catch (_error) {
+    } catch {
       toast.error(
         t('Failed to start {{provider}} login', { provider: provider.name })
       )
@@ -225,6 +273,7 @@ export function useOAuthLogin(status: SystemStatus | null) {
 
   return {
     isLoading,
+    isTelegramLoading,
     githubButtonText,
     githubButtonDisabled,
     handleGitHubLogin,

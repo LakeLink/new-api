@@ -33,29 +33,16 @@ import { Modal, Toast } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
+import {
+  normalizeHttpUrl,
+  openExternalHttpUrl,
+} from '../../helpers/safeNavigation';
 
 import RechargeCard from './RechargeCard';
 import InvitationCard from './InvitationCard';
 import TransferModal from './modals/TransferModal';
 import PaymentConfirmModal from './modals/PaymentConfirmModal';
 import TopupHistoryModal from './modals/TopupHistoryModal';
-
-// Reject non-navigable schemes (e.g. javascript:, data:) and relative URLs.
-// Only http / https are allowed for backend-provided redirect targets.
-// Mirrors isSafeHttpCheckoutUrl in the default frontend's
-// features/wallet/hooks/use-waffo-pancake-payment.ts.
-function isSafeHttpCheckoutUrl(value) {
-  const trimmed = (value || '').trim();
-  if (!trimmed) {
-    return false;
-  }
-  try {
-    const u = new URL(trimmed);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
 
 const TopUp = () => {
   const { t } = useTranslation();
@@ -203,7 +190,9 @@ const TopUp = () => {
       showError(t('超级管理员未设置充值链接！'));
       return;
     }
-    window.open(topUpLink, '_blank');
+    if (!openExternalHttpUrl(topUpLink)) {
+      showError(t('支付跳转地址不安全'));
+    }
   };
 
   const preTopUp = async (payment) => {
@@ -309,14 +298,22 @@ const TopUp = () => {
         if (message === 'success') {
           if (payWay === 'stripe') {
             // Stripe 支付回调处理
-            window.open(data.pay_link, '_blank');
+            if (!openExternalHttpUrl(data.pay_link)) {
+              showError(t('支付跳转地址不安全'));
+              return;
+            }
           } else {
             // 普通支付表单提交
             let params = data;
-            let url = res.data.url;
+            let url = normalizeHttpUrl(res.data.url);
+            if (!url) {
+              showError(t('支付跳转地址不安全'));
+              return;
+            }
             let form = document.createElement('form');
             form.action = url;
             form.method = 'POST';
+            form.setAttribute('rel', 'noopener noreferrer');
             let isSafari =
               navigator.userAgent.indexOf('Safari') > -1 &&
               navigator.userAgent.indexOf('Chrome') < 1;
@@ -412,7 +409,9 @@ const TopUp = () => {
       if (res !== undefined) {
         const { message, data } = res.data;
         if (message === 'success' && data?.payment_url) {
-          window.open(data.payment_url, '_blank');
+          if (!openExternalHttpUrl(data.payment_url)) {
+            showError(t('支付跳转地址不安全'));
+          }
         } else {
           showError(data || t('支付请求失败'));
         }
@@ -469,10 +468,11 @@ const TopUp = () => {
         const { message, data } = res.data;
         if (message === 'success') {
           const checkoutUrl = data?.checkout_url || '';
-          if (checkoutUrl && isSafeHttpCheckoutUrl(checkoutUrl)) {
+          const safeCheckoutUrl = normalizeHttpUrl(checkoutUrl);
+          if (safeCheckoutUrl) {
             // In-tab redirect (not window.open) — popup blocker fires after
             // the await loses user-gesture context.
-            window.location.href = checkoutUrl;
+            window.location.href = safeCheckoutUrl;
           } else if (checkoutUrl) {
             showError(t('支付跳转地址不安全'));
           } else {
@@ -522,7 +522,9 @@ const TopUp = () => {
 
   const processCreemCallback = (data) => {
     // 与 Stripe 保持一致的实现方式
-    window.open(data.checkout_url, '_blank');
+    if (!openExternalHttpUrl(data?.checkout_url)) {
+      showError(t('支付跳转地址不安全'));
+    }
   };
 
   const getUserQuota = async () => {
@@ -716,7 +718,7 @@ const TopUp = () => {
 
   // 获取邀请链接
   const getAffLink = async () => {
-    const res = await API.get('/api/user/aff');
+    const res = await API.post('/api/user/aff');
     const { success, message, data } = res.data;
     if (success) {
       let link = `${window.location.origin}/register?aff=${data}`;
