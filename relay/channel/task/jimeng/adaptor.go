@@ -2,6 +2,7 @@ package jimeng
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -101,6 +102,32 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
 }
 
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
+}
+
+// EstimateBilling normalizes the provider-native frame count to the default
+// five-second payload. Jimeng defines frames as 24*n+1 and accepts 121 (5s) or
+// 241 (10s): https://www.volcengine.com/docs/85621/1791184
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil
+	}
+	payload, err := a.convertToRequestPayload(&req, info)
+	if err != nil || payload.Frames != 241 {
+		return nil
+	}
+	return map[string]float64{"duration": 2}
+}
+
 // BuildRequestURL constructs the upstream URL.
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if isNewAPIRelay(info.ApiKey) {
@@ -183,17 +210,22 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
 	}
-	_ = resp.Body.Close()
 
 	// Parse Jimeng response
 	var jResp responsePayload
 	if err := common.Unmarshal(responseBody, &jResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(
+			errors.Wrapf(err, "unmarshal %d-byte response body", len(responseBody)),
+			"unmarshal_response_body_failed",
+			http.StatusInternalServerError,
+		)
 		return
 	}
 
@@ -212,7 +244,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 }
 
 // FetchTask fetch task status
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+func (a *TaskAdaptor) FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -231,9 +263,9 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		return nil, errors.Wrap(err, "marshal fetch task payload failed")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, uri, bytes.NewBuffer(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -257,7 +289,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	return service.DoUpstreamRequest(client, req)
 }
 
 func (a *TaskAdaptor) GetModelList() []string {
@@ -383,12 +415,15 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 		ReqKey: info.UpstreamModelName,
 		Prompt: req.Prompt,
 	}
+	authoritativeReqKey := r.ReqKey
 
 	switch req.Duration {
+	case 0, 5:
+		r.Frames = 121 // 24*5+1 = 121
 	case 10:
 		r.Frames = 241 // 24*10+1 = 241
 	default:
-		r.Frames = 121 // 24*5+1 = 121
+		return nil, fmt.Errorf("duration must be either 5 or 10 seconds")
 	}
 
 	// Handle one-of image_urls or binary_data_base64
@@ -401,6 +436,12 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 	}
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
+	}
+	// req_key selects both the upstream model and its configured price. Native
+	// metadata must not be able to switch it after routing and pre-consume.
+	r.ReqKey = authoritativeReqKey
+	if r.Frames != 121 && r.Frames != 241 {
+		return nil, fmt.Errorf("frames must be either 121 (5 seconds) or 241 (10 seconds)")
 	}
 
 	// 即梦视频3.0 ReqKey转换

@@ -33,7 +33,13 @@ func GetDiskCacheDir() string {
 // EnsureDiskCacheDir 确保缓存目录存在
 func EnsureDiskCacheDir() error {
 	dir := GetDiskCacheDir()
-	return os.MkdirAll(dir, 0755)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// Request bodies and decoded provider files may contain prompts,
+	// credentials, or other tenant data. MkdirAll does not tighten an existing
+	// directory, so explicitly enforce an owner-only mode on every use.
+	return os.Chmod(dir, 0700)
 }
 
 // CreateDiskCacheFile 创建磁盘缓存文件

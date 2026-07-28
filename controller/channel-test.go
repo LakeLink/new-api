@@ -437,7 +437,16 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 	var httpResp *http.Response
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		var ok bool
+		httpResp, ok = resp.(*http.Response)
+		if !ok || httpResp == nil {
+			err := fmt.Errorf("channel adaptor returned an invalid HTTP response")
+			return testResult{
+				context:     c,
+				localErr:    err,
+				newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
+			}
+		}
 		if httpResp.StatusCode != http.StatusOK {
 			err := service.RelayErrorHandler(c.Request.Context(), httpResp, true)
 			common.SysError(fmt.Sprintf(
@@ -510,7 +519,11 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	common.SysLog(fmt.Sprintf(
+		"testing channel #%d succeeded, response_bytes=%d",
+		channel.Id,
+		len(respBody),
+	))
 	return testResult{
 		context:     c,
 		localErr:    nil,
@@ -559,7 +572,7 @@ func settleTestQuota(info *relaycommon.RelayInfo, priceData types.PriceData, usa
 		return quota, nil
 	}
 
-	quota, clamp := common.QuotaFromFloatChecked(priceData.ModelPrice * common.QuotaPerUnit)
+	quota, clamp := common.QuotaFromFloatChecked(priceData.ModelPrice * common.CurrentQuotaPerUnit())
 	if info != nil && clamp != nil {
 		info.QuotaClamp = clamp
 	}
@@ -611,7 +624,7 @@ func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
 	if isStream {
 		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
 	}
-	return io.ReadAll(body)
+	return service.ReadUpstreamResponseBody(body)
 }
 
 func detectErrorFromTestResponseBody(respBody []byte) error {
@@ -767,7 +780,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				MaxTokens: lo.ToPtr(maxTokens),
 			}
 			if isStream {
-				req.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
+				req.StreamOptions = &dto.StreamOptions{IncludeUsage: common.GetPointer(true)}
 			}
 			return req
 		}
@@ -823,7 +836,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		},
 	}
 	if isStream {
-		testRequest.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
+		testRequest.StreamOptions = &dto.StreamOptions{IncludeUsage: common.GetPointer(true)}
 	}
 
 	if dto.IsOpenAIReasoningOModel(model) {
@@ -922,7 +935,8 @@ type channelTestSummary struct {
 // the system task can surface progress.
 func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, report func(processed, total int)) channelTestSummary {
 	summary := channelTestSummary{}
-	var disableThreshold = int64(common.ChannelDisableThreshold * 1000)
+	disableThresholdSetting := common.GetLegacyOptionFloat64("ChannelDisableThreshold", &common.ChannelDisableThreshold)
+	var disableThreshold = int64(disableThresholdSetting * 1000)
 	if disableThreshold == 0 {
 		disableThreshold = 10000000 // a impossible value
 	}
@@ -957,7 +971,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		// 当错误检查通过，才检查响应时间
-		if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
+		if common.GetLegacyOptionBool("AutomaticDisableChannelEnabled", &common.AutomaticDisableChannelEnabled) && !shouldBanChannel {
 			if milliseconds > disableThreshold {
 				err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
 				newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)

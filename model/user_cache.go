@@ -100,12 +100,31 @@ func GetUserCache(userId int) (userCache *UserBase, err error) {
 	// Try getting from Redis first
 	userCache, err = cacheGetUserBase(userId)
 	if err == nil {
-		// Quota is financial state and must never be restored from an older full
-		// user snapshot. Static identity fields may remain cached, but balance
-		// checks always use the database value.
-		if err := DB.Model(&User{}).Where("id = ?", userId).Select("quota").Find(&userCache.Quota).Error; err != nil {
+		// Account identity, quota, status, group, and settings are authoritative
+		// security/accounting state. A stale cache must not retain an old funding
+		// preference, pricing override, identity, access group, or enabled status
+		// after invalidation failed.
+		var state struct {
+			Quota    int
+			Status   int
+			Group    string
+			Setting  string
+			Email    string
+			Username string
+		}
+		if err := DB.Model(&User{}).
+			Select("quota", "status", "group", "setting", "email", "username").
+			Where("id = ?", userId).
+			Take(&state).Error; err != nil {
 			return nil, err
 		}
+		userCache.Id = userId
+		userCache.Quota = state.Quota
+		userCache.Status = state.Status
+		userCache.Group = state.Group
+		userCache.Setting = state.Setting
+		userCache.Email = state.Email
+		userCache.Username = state.Username
 		return userCache, nil
 	}
 

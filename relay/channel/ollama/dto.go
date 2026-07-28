@@ -32,33 +32,37 @@ type OllamaToolCall struct {
 }
 
 type OllamaChatRequest struct {
-	Model     string              `json:"model"`
-	Messages  []OllamaChatMessage `json:"messages"`
-	Tools     interface{}         `json:"tools,omitempty"`
-	Format    interface{}         `json:"format,omitempty"`
-	Stream    bool                `json:"stream,omitempty"`
-	Options   map[string]any      `json:"options,omitempty"`
-	KeepAlive interface{}         `json:"keep_alive,omitempty"`
-	Think     json.RawMessage     `json:"think,omitempty"`
+	Model       string              `json:"model"`
+	Messages    []OllamaChatMessage `json:"messages"`
+	Tools       interface{}         `json:"tools,omitempty"`
+	Format      interface{}         `json:"format,omitempty"`
+	Stream      bool                `json:"stream"`
+	LogProbs    *bool               `json:"logprobs,omitempty"`
+	TopLogProbs *int                `json:"top_logprobs,omitempty"`
+	Options     map[string]any      `json:"options,omitempty"`
+	KeepAlive   interface{}         `json:"keep_alive,omitempty"`
+	Think       json.RawMessage     `json:"think,omitempty"`
 }
 
 type OllamaGenerateRequest struct {
-	Model     string          `json:"model"`
-	Prompt    string          `json:"prompt,omitempty"`
-	Suffix    string          `json:"suffix,omitempty"`
-	Images    []string        `json:"images,omitempty"`
-	Format    interface{}     `json:"format,omitempty"`
-	Stream    bool            `json:"stream,omitempty"`
-	Options   map[string]any  `json:"options,omitempty"`
-	KeepAlive interface{}     `json:"keep_alive,omitempty"`
-	Think     json.RawMessage `json:"think,omitempty"`
+	Model       string          `json:"model"`
+	Prompt      string          `json:"prompt,omitempty"`
+	Suffix      string          `json:"suffix,omitempty"`
+	Images      []string        `json:"images,omitempty"`
+	Format      interface{}     `json:"format,omitempty"`
+	Stream      bool            `json:"stream"`
+	LogProbs    *bool           `json:"logprobs,omitempty"`
+	TopLogProbs *int            `json:"top_logprobs,omitempty"`
+	Options     map[string]any  `json:"options,omitempty"`
+	KeepAlive   interface{}     `json:"keep_alive,omitempty"`
+	Think       json.RawMessage `json:"think,omitempty"`
 }
 
 type OllamaEmbeddingRequest struct {
 	Model      string         `json:"model"`
 	Input      interface{}    `json:"input"`
 	Options    map[string]any `json:"options,omitempty"`
-	Dimensions int            `json:"dimensions,omitempty"`
+	Dimensions *int           `json:"dimensions,omitempty"`
 }
 
 type OllamaEmbeddingResponse struct {
@@ -91,7 +95,7 @@ type OllamaModelDetail struct {
 
 type OllamaPullRequest struct {
 	Name   string `json:"name"`
-	Stream bool   `json:"stream,omitempty"`
+	Stream bool   `json:"stream"`
 }
 
 type OllamaPullResponse struct {

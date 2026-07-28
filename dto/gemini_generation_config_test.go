@@ -87,3 +87,46 @@ func TestGeminiChatGenerationConfigPreservesExplicitZeroValuesSnakeCase(t *testi
 	assert.Equal(t, float64(0), generationConfig["seed"])
 	assert.Equal(t, false, generationConfig["responseLogprobs"])
 }
+
+func TestGeminiChatGenerationConfigRejectsFractionalTopK(t *testing.T) {
+	for _, field := range []string{"topK", "top_k"} {
+		var request GeminiChatRequest
+		err := common.Unmarshal([]byte(`{
+			"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+			"generationConfig":{"`+field+`":1.5}
+		}`), &request)
+		require.Error(t, err)
+	}
+}
+
+func TestGeminiChatRequestPreservesServiceTierAndExplicitStoreFalse(t *testing.T) {
+	var req GeminiChatRequest
+	require.NoError(t, common.Unmarshal([]byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"serviceTier":"priority",
+		"store":false
+	}`), &req))
+
+	require.NotNil(t, req.ServiceTier)
+	assert.Equal(t, GeminiServiceTierPriority, *req.ServiceTier)
+	require.NotNil(t, req.Store)
+	assert.False(t, *req.Store)
+
+	encoded, err := common.Marshal(req)
+	require.NoError(t, err)
+	var out map[string]any
+	require.NoError(t, common.Unmarshal(encoded, &out))
+	assert.Equal(t, "priority", out["serviceTier"])
+	assert.Equal(t, false, out["store"])
+}
+
+func TestGeminiChatRequestAcceptsSnakeCaseServiceTier(t *testing.T) {
+	var req GeminiChatRequest
+	require.NoError(t, common.Unmarshal([]byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"service_tier":"flex"
+	}`), &req))
+
+	require.NotNil(t, req.ServiceTier)
+	assert.Equal(t, GeminiServiceTierFlex, *req.ServiceTier)
+}

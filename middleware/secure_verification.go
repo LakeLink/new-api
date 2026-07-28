@@ -4,16 +4,20 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
 const (
 	// SecureVerificationSessionKey 安全验证的 session key（与 controller 保持一致）
-	SecureVerificationSessionKey       = "secure_verified_at"
-	secureVerificationMethodSessionKey = "secure_verified_method"
+	SecureVerificationSessionKey        = "secure_verified_at"
+	secureVerificationMethodSessionKey  = "secure_verified_method"
+	secureVerificationUserIDSessionKey  = "secure_verified_user_id"
+	secureVerificationBrowserSessionKey = "secure_verified_browser_session_id"
 	// SecureVerificationTimeout 验证有效期（秒）
-	SecureVerificationTimeout = 300 // 5分钟
+	SecureVerificationTimeout    = 300 // 5分钟
+	secureVerificationFutureSkew = 30
 )
 
 // SecureVerificationRequired 安全验证中间件
@@ -61,6 +65,16 @@ func SecureVerificationRequired() gin.HandlerFunc {
 
 		// 检查验证是否过期
 		elapsed := time.Now().Unix() - verifiedAt
+		if elapsed < -secureVerificationFutureSkew {
+			clearSecureVerificationSession(session)
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "验证状态异常，请重新验证",
+				"code":    "VERIFICATION_INVALID",
+			})
+			c.Abort()
+			return
+		}
 		if elapsed >= SecureVerificationTimeout {
 			// 验证已过期，清除 session
 			clearSecureVerificationSession(session)
@@ -72,14 +86,63 @@ func SecureVerificationRequired() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		method, ok := session.Get(secureVerificationMethodSessionKey).(string)
+		if !ok || !validSecureVerificationMethod(method) {
+			clearSecureVerificationSession(session)
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "验证状态异常，请重新验证",
+				"code":    "VERIFICATION_INVALID",
+			})
+			c.Abort()
+			return
+		}
+		if !secureVerificationMatchesCurrentSession(c, session) {
+			clearSecureVerificationSession(session)
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "验证状态异常，请重新验证",
+				"code":    "VERIFICATION_INVALID",
+			})
+			c.Abort()
+			return
+		}
 
 		c.Next()
 	}
 }
 
+func secureVerificationMatchesCurrentSession(
+	c *gin.Context,
+	session sessions.Session,
+) bool {
+	verifiedUserID, userIDOK := session.Get(
+		secureVerificationUserIDSessionKey,
+	).(int)
+	verifiedBrowserSessionID, verifiedSessionIDOK := session.Get(
+		secureVerificationBrowserSessionKey,
+	).(string)
+	currentBrowserSessionID, currentSessionIDOK := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	return userIDOK &&
+		verifiedUserID > 0 &&
+		verifiedUserID == c.GetInt("id") &&
+		verifiedSessionIDOK &&
+		verifiedBrowserSessionID != "" &&
+		currentSessionIDOK &&
+		verifiedBrowserSessionID == currentBrowserSessionID
+}
+
+func validSecureVerificationMethod(method string) bool {
+	return method == "password" || method == "2fa" || method == "passkey"
+}
+
 func clearSecureVerificationSession(session sessions.Session) {
 	session.Delete(SecureVerificationSessionKey)
 	session.Delete(secureVerificationMethodSessionKey)
+	session.Delete(secureVerificationUserIDSessionKey)
+	session.Delete(secureVerificationBrowserSessionKey)
 	_ = session.Save()
 }
 
@@ -106,13 +169,19 @@ func OptionalSecureVerification() gin.HandlerFunc {
 
 		verifiedAt, ok := verifiedAtRaw.(int64)
 		if !ok {
+			clearSecureVerificationSession(session)
 			c.Set("secure_verified", false)
 			c.Next()
 			return
 		}
 
 		elapsed := time.Now().Unix() - verifiedAt
-		if elapsed >= SecureVerificationTimeout {
+		method, methodOK := session.Get(secureVerificationMethodSessionKey).(string)
+		if elapsed < -secureVerificationFutureSkew ||
+			elapsed >= SecureVerificationTimeout ||
+			!methodOK ||
+			!validSecureVerificationMethod(method) ||
+			!secureVerificationMatchesCurrentSession(c, session) {
 			clearSecureVerificationSession(session)
 			c.Set("secure_verified", false)
 			c.Next()

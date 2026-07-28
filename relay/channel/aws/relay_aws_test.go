@@ -52,3 +52,31 @@ func TestDoAwsClientRequest_AppliesRuntimeHeaderOverrideToAnthropicBeta(t *testi
 	require.True(t, ok)
 	require.Equal(t, []any{"computer-use-2025-01-24"}, values)
 }
+
+func TestDoAwsClientRequestUsesStreamingInvokeForNova(t *testing.T) {
+	t.Parallel()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	info := &relaycommon.RelayInfo{
+		IsStream: true,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ApiKey:            "access-key|secret-key|us-east-1",
+			UpstreamModelName: "nova-pro-v1:0",
+		},
+	}
+	adaptor := &Adaptor{IsNova: true}
+
+	_, err := doAwsClientRequest(
+		ctx,
+		info,
+		adaptor,
+		bytes.NewBufferString(`{"schemaVersion":"messages-v1","messages":[{"role":"user","content":[{"text":"hello"}]}]}`),
+	)
+
+	require.NoError(t, err)
+	_, ok := adaptor.AwsReq.(*bedrockruntime.InvokeModelWithResponseStreamInput)
+	require.True(t, ok)
+}

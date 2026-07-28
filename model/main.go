@@ -17,12 +17,21 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var commonGroupCol = "`group`"
 var commonKeyCol = "`key`"
 var commonTrueVal = "1"
 var commonFalseVal = "0"
+
+func configuredSQLMaxLifetime() time.Duration {
+	seconds := common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)
+	if seconds == 0 {
+		return 0
+	}
+	return common.SafeIntervalDuration(seconds, time.Second, 60*time.Second, "SQL_MAX_LIFETIME")
+}
 
 var logKeyCol string
 var logGroupCol string
@@ -54,54 +63,42 @@ var DB *gorm.DB
 
 var LOG_DB *gorm.DB
 
-func createRootAccountIfNeed() error {
-	var user User
-	//if user.Status != common.UserStatusEnabled {
-	if err := DB.First(&user).Error; err != nil {
-		common.SysLog("no user exists, create a root user for you: username is root, password is 123456")
-		hashedPassword, err := common.Password2Hash("123456")
-		if err != nil {
-			return err
-		}
-		rootUser := User{
-			Username:    "root",
-			Password:    hashedPassword,
-			Role:        common.RoleRootUser,
-			Status:      common.UserStatusEnabled,
-			DisplayName: "Root User",
-			AccessToken: nil,
-			Quota:       100000000,
-		}
-		DB.Create(&rootUser)
+func CheckSetup() error {
+	// Fail closed until both setup and root probes conclusively show that this is
+	// a fresh database. A transient read error must never reopen /api/setup on an
+	// already configured deployment.
+	constant.Setup.Store(true)
+	setup, err := GetSetup()
+	if err != nil {
+		return fmt.Errorf("read setup marker: %w", err)
 	}
-	return nil
-}
-
-func CheckSetup() {
-	setup := GetSetup()
 	if setup == nil {
 		// No setup record exists, check if we have a root user
-		if RootUserExists() {
+		rootExists, err := RootUserExists()
+		if err != nil {
+			return fmt.Errorf("check root user: %w", err)
+		}
+		if rootExists {
 			common.SysLog("system is not initialized, but root user exists")
-			// Create setup record
+			// Backfill the singleton marker for deployments created before setup
+			// tracking was introduced. Concurrent nodes safely converge on ID 1.
 			newSetup := Setup{
+				ID:            setupSingletonID,
 				Version:       common.Version,
 				InitializedAt: time.Now().Unix(),
 			}
-			err := DB.Create(&newSetup).Error
-			if err != nil {
-				common.SysLog("failed to create setup record: " + err.Error())
+			if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&newSetup).Error; err != nil {
+				return fmt.Errorf("create setup marker: %w", err)
 			}
-			constant.Setup = true
 		} else {
 			common.SysLog("system is not initialized and no root user exists")
-			constant.Setup = false
+			constant.Setup.Store(false)
 		}
 	} else {
 		// Setup record exists, system is initialized
 		common.SysLog("system is already initialized at: " + time.Unix(setup.InitializedAt, 0).String())
-		constant.Setup = true
 	}
+	return nil
 }
 
 func isClickHouseDSN(dsn string) bool {
@@ -202,7 +199,7 @@ func InitDB() (err error) {
 		}
 		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		sqlDB.SetConnMaxLifetime(configuredSQLMaxLifetime())
 
 		if !common.IsMasterNode {
 			return nil
@@ -246,7 +243,7 @@ func InitLogDB() (err error) {
 		}
 		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		sqlDB.SetConnMaxLifetime(configuredSQLMaxLifetime())
 
 		if !common.IsMasterNode {
 			return nil
@@ -262,9 +259,17 @@ func InitLogDB() (err error) {
 
 func migrateDB() error {
 	// Migrate price_amount column from float/double to decimal for existing tables
-	migrateSubscriptionPlanPriceAmount()
+	if err := migrateSubscriptionPlanPriceAmount(); err != nil {
+		return err
+	}
 	// Migrate model_limits column from varchar to text for existing tables
 	if err := migrateTokenModelLimitsToText(); err != nil {
+		return err
+	}
+	if err := migratePortableJSONColumnsToText(); err != nil {
+		return err
+	}
+	if err := prepareCrossDatabaseIdentityColumns(); err != nil {
 		return err
 	}
 
@@ -272,6 +277,7 @@ func migrateDB() error {
 		&Channel{},
 		&Token{},
 		&User{},
+		&AffiliateReward{},
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
@@ -289,10 +295,17 @@ func migrateDB() error {
 		&TwoFABackupCode{},
 		&Checkin{},
 		&SubscriptionOrder{},
+		&SubscriptionProviderPayment{},
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
+		&BillingReservation{},
+		&TaskBillingFinalization{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
+		&BuiltInOAuthIdentity{},
+		&OAuthState{},
+		&AuthenticationToken{},
+		&BrowserSession{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},
@@ -302,6 +315,15 @@ func migrateDB() error {
 	)
 	if err != nil {
 		return err
+	}
+	if err := migrateCrossDatabaseIdentityHashes(); err != nil {
+		return fmt.Errorf("migrate cross-database identity hashes: %w", err)
+	}
+	if err := migrateUserOAuthBindingHashes(); err != nil {
+		return fmt.Errorf("migrate custom OAuth identity hashes: %w", err)
+	}
+	if err := backfillBuiltInOAuthIdentities(); err != nil {
+		return fmt.Errorf("backfill built-in OAuth identities: %w", err)
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
@@ -316,6 +338,12 @@ func migrateDB() error {
 }
 
 func migrateDBFast() error {
+	if err := migratePortableJSONColumnsToText(); err != nil {
+		return err
+	}
+	if err := prepareCrossDatabaseIdentityColumns(); err != nil {
+		return err
+	}
 
 	var wg sync.WaitGroup
 
@@ -326,6 +354,7 @@ func migrateDBFast() error {
 		{&Channel{}, "Channel"},
 		{&Token{}, "Token"},
 		{&User{}, "User"},
+		{&AffiliateReward{}, "AffiliateReward"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},
@@ -343,10 +372,17 @@ func migrateDBFast() error {
 		{&TwoFABackupCode{}, "TwoFABackupCode"},
 		{&Checkin{}, "Checkin"},
 		{&SubscriptionOrder{}, "SubscriptionOrder"},
+		{&SubscriptionProviderPayment{}, "SubscriptionProviderPayment"},
 		{&UserSubscription{}, "UserSubscription"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
+		{&BillingReservation{}, "BillingReservation"},
+		{&TaskBillingFinalization{}, "TaskBillingFinalization"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
+		{&BuiltInOAuthIdentity{}, "BuiltInOAuthIdentity"},
+		{&OAuthState{}, "OAuthState"},
+		{&AuthenticationToken{}, "AuthenticationToken"},
+		{&BrowserSession{}, "BrowserSession"},
 		{&PerfMetric{}, "PerfMetric"},
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
@@ -375,6 +411,15 @@ func migrateDBFast() error {
 			return err
 		}
 	}
+	if err := migrateCrossDatabaseIdentityHashes(); err != nil {
+		return fmt.Errorf("migrate cross-database identity hashes: %w", err)
+	}
+	if err := migrateUserOAuthBindingHashes(); err != nil {
+		return fmt.Errorf("migrate custom OAuth identity hashes: %w", err)
+	}
+	if err := backfillBuiltInOAuthIdentities(); err != nil {
+		return fmt.Errorf("backfill built-in OAuth identities: %w", err)
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err
@@ -398,6 +443,9 @@ func migrateLOGDB() error {
 func migrateClickHouseLogDB() error {
 	ttlDays := clickHouseLogTTLDays()
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	if err := syncClickHouseLogColumns(); err != nil {
 		return err
 	}
 	if err := syncClickHouseLogIndexes(); err != nil {
@@ -450,6 +498,8 @@ CREATE TABLE IF NOT EXISTS logs (
 	`+"`group`"+` String DEFAULT '',
 	ip String DEFAULT '',
 	request_id String DEFAULT '',
+	billing_event_id Nullable(String),
+	billing_event_claim Nullable(String),
 	upstream_request_id String DEFAULT '',
 	other String DEFAULT '',
 	INDEX idx_logs_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 1,
@@ -459,6 +509,22 @@ CREATE TABLE IF NOT EXISTS logs (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+func syncClickHouseLogColumns() error {
+	for _, statement := range clickHouseLogColumnMigrationStatements() {
+		if err := LOG_DB.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clickHouseLogColumnMigrationStatements() []string {
+	return []string{
+		"ALTER TABLE logs ADD COLUMN IF NOT EXISTS billing_event_id Nullable(String) AFTER request_id",
+		"ALTER TABLE logs ADD COLUMN IF NOT EXISTS billing_event_claim Nullable(String) AFTER billing_event_id",
+	}
 }
 
 func syncClickHouseLogIndexes() error {
@@ -560,9 +626,12 @@ PRIMARY KEY (` + "`id`" + `)
 		existing[c.Name] = struct{}{}
 	}
 	required := []sqliteColumnDef{
-		{Name: "title", DDL: "`title` varchar(128) NOT NULL"},
+		// SQLite rejects ADD COLUMN ... NOT NULL on a populated table unless the
+		// new column has a non-NULL default. Legacy plans receive neutral values
+		// and remain editable after the rest of the schema is added.
+		{Name: "title", DDL: "`title` varchar(128) NOT NULL DEFAULT ''"},
 		{Name: "subtitle", DDL: "`subtitle` varchar(255) DEFAULT ''"},
-		{Name: "price_amount", DDL: "`price_amount` decimal(10,6) NOT NULL"},
+		{Name: "price_amount", DDL: "`price_amount` decimal(10,6) NOT NULL DEFAULT 0"},
 		{Name: "currency", DDL: "`currency` varchar(8) NOT NULL DEFAULT 'USD'"},
 		{Name: "duration_unit", DDL: "`duration_unit` varchar(16) NOT NULL DEFAULT 'month'"},
 		{Name: "duration_value", DDL: "`duration_value` integer NOT NULL DEFAULT 1"},
@@ -619,7 +688,7 @@ func migrateTokenModelLimitsToText() error {
 		if err := DB.Raw(`SELECT data_type FROM information_schema.columns
 			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
 			tableName, columnName).Scan(&dataType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			return fmt.Errorf("inspect PostgreSQL column %s.%s: %w", tableName, columnName, err)
 		} else if dataType == "text" {
 			return nil
 		}
@@ -629,7 +698,7 @@ func migrateTokenModelLimitsToText() error {
 		if err := DB.Raw(`SELECT COLUMN_TYPE FROM information_schema.columns
 				WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
 			tableName, columnName).Scan(&columnType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			return fmt.Errorf("inspect MySQL column %s.%s: %w", tableName, columnName, err)
 		} else if strings.ToLower(columnType) == "text" {
 			return nil
 		}
@@ -647,13 +716,14 @@ func migrateTokenModelLimitsToText() error {
 	return nil
 }
 
-// migrateSubscriptionPlanPriceAmount migrates price_amount column from float/double to decimal(10,6)
-// This is safe to run multiple times - it checks the column type first
-func migrateSubscriptionPlanPriceAmount() {
+// migrateSubscriptionPlanPriceAmount migrates price_amount from float/double
+// to decimal(10,6). Migration failures are fatal because continuing with an
+// unknown money column can silently change subscription billing amounts.
+func migrateSubscriptionPlanPriceAmount() error {
 	// SQLite doesn't support ALTER COLUMN, and its type affinity handles this automatically
 	// Skip early to avoid GORM parsing the existing table DDL which may cause issues
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
-		return
+		return nil
 	}
 
 	tableName := "subscription_plans"
@@ -661,12 +731,12 @@ func migrateSubscriptionPlanPriceAmount() {
 
 	// Check if table exists first
 	if !DB.Migrator().HasTable(tableName) {
-		return
+		return nil
 	}
 
 	// Check if column exists
 	if !DB.Migrator().HasColumn(&SubscriptionPlan{}, columnName) {
-		return
+		return nil
 	}
 
 	var alterSQL string
@@ -676,9 +746,9 @@ func migrateSubscriptionPlanPriceAmount() {
 		if err := DB.Raw(`SELECT data_type FROM information_schema.columns
 			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
 			tableName, columnName).Scan(&dataType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			return fmt.Errorf("inspect PostgreSQL column %s.%s: %w", tableName, columnName, err)
 		} else if dataType == "numeric" {
-			return // Already decimal/numeric
+			return nil // Already decimal/numeric
 		}
 		alterSQL = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s TYPE decimal(10,6) USING %s::decimal(10,6)`,
 			tableName, columnName, columnName)
@@ -688,23 +758,23 @@ func migrateSubscriptionPlanPriceAmount() {
 		if err := DB.Raw(`SELECT COLUMN_TYPE FROM information_schema.columns
 				WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
 			tableName, columnName).Scan(&columnType).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to query metadata for %s.%s: %v", tableName, columnName, err))
+			return fmt.Errorf("inspect MySQL column %s.%s: %w", tableName, columnName, err)
 		} else if strings.HasPrefix(strings.ToLower(columnType), "decimal") {
-			return // Already decimal
+			return nil // Already decimal
 		}
 		alterSQL = fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s decimal(10,6) NOT NULL DEFAULT 0",
 			tableName, columnName)
 	} else {
-		return
+		return nil
 	}
 
 	if alterSQL != "" {
 		if err := DB.Exec(alterSQL).Error; err != nil {
-			common.SysLog(fmt.Sprintf("Warning: failed to migrate %s.%s to decimal: %v", tableName, columnName, err))
-		} else {
-			common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to decimal(10,6)", tableName, columnName))
+			return fmt.Errorf("migrate %s.%s to decimal(10,6): %w", tableName, columnName, err)
 		}
+		common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to decimal(10,6)", tableName, columnName))
 	}
+	return nil
 }
 
 func closeDB(db *gorm.DB) error {

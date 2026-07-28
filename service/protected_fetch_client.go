@@ -91,8 +91,9 @@ func newProtectedFetchHTTPClientWithProxy(resolver ssrfResolver, dialContext fun
 		},
 		CheckRedirect: checkProtectedFetchRedirect,
 	}
-	if common.RelayTimeout != 0 {
-		client.Timeout = time.Duration(common.RelayTimeout) * time.Second
+	client.Timeout = relayRequestTimeout()
+	if client.Timeout == 0 {
+		client.Timeout = 60 * time.Second
 	}
 	return client
 }
@@ -105,9 +106,20 @@ func (t *ssrfProtectedRoundTripper) RoundTrip(req *http.Request) (*http.Response
 		return nil, err
 	}
 
-	proxyURL, err := t.proxy(req)
-	if err != nil {
-		return nil, err
+	// A forward proxy resolves the destination independently, after local
+	// validation. That creates a DNS-rebinding gap and makes dial-time IP
+	// enforcement impossible. Protected fetches therefore go direct and pin
+	// the validated address; environment proxies remain available only when
+	// the operator has explicitly disabled SSRF protection.
+	var proxyURL *url.URL
+	if _, enabled, protectionErr := t.getProtection(); protectionErr != nil {
+		return nil, protectionErr
+	} else if !enabled {
+		var proxyErr error
+		proxyURL, proxyErr = t.proxy(req)
+		if proxyErr != nil {
+			return nil, SanitizeNetworkError(proxyErr)
+		}
 	}
 	return t.transportFor(proxyURL).RoundTrip(req)
 }
@@ -126,7 +138,7 @@ func (t *ssrfProtectedRoundTripper) transportFor(proxyURL *url.URL) *http.Transp
 	// 目标 origin 是用户可控输入，不能作为缓存 key。
 	key := "direct"
 	if proxyURL != nil {
-		key = proxyURL.String()
+		key = proxyClientCacheKey(proxyURL)
 	}
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -153,18 +165,7 @@ func (t *ssrfProtectedRoundTripper) newTransport(proxyURL *url.URL) *http.Transp
 		proxyFunc = nil
 	}
 
-	transport := &http.Transport{
-		MaxIdleConns:        common.RelayMaxIdleConns,
-		MaxIdleConnsPerHost: common.RelayMaxIdleConnsPerHost,
-		IdleConnTimeout:     time.Duration(common.RelayIdleConnTimeout) * time.Second,
-		ForceAttemptHTTP2:   true,
-		Proxy:               proxyFunc,
-		DialContext:         dialContext,
-	}
-	if common.TLSInsecureSkipVerify {
-		transport.TLSClientConfig = common.InsecureTLSConfig
-	}
-	return transport
+	return newRelayTransport(proxyFunc, dialContext)
 }
 
 func (d *protectedFetchDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {

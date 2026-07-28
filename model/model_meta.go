@@ -23,7 +23,8 @@ type BoundChannel struct {
 
 type Model struct {
 	Id           int            `json:"id"`
-	ModelName    string         `json:"model_name" gorm:"size:128;not null;uniqueIndex:uk_model_name_delete_at,priority:1"`
+	ModelName    string         `json:"model_name" gorm:"size:128;not null;index"`
+	NameHash     *string        `json:"-" gorm:"type:char(64);uniqueIndex:ux_models_active_name_hash"`
 	Description  string         `json:"description,omitempty" gorm:"type:text"`
 	Icon         string         `json:"icon,omitempty" gorm:"type:varchar(128)"`
 	Tags         string         `json:"tags,omitempty" gorm:"type:varchar(255)"`
@@ -33,7 +34,7 @@ type Model struct {
 	SyncOfficial int            `json:"sync_official" gorm:"default:1"`
 	CreatedTime  int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime  int64          `json:"updated_time" gorm:"bigint"`
-	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index;uniqueIndex:uk_model_name_delete_at,priority:2"`
+	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
 
 	BoundChannels []BoundChannel `json:"bound_channels,omitempty" gorm:"-"`
 	EnableGroups  []string       `json:"enable_groups,omitempty" gorm:"-"`
@@ -44,7 +45,39 @@ type Model struct {
 	MatchedCount  int      `json:"matched_count,omitempty" gorm:"-"`
 }
 
+func (mi *Model) BeforeCreate(_ *gorm.DB) error {
+	name, nameHash, err := normalizeNamedResourceIdentity(mi.ModelName, 128)
+	if err != nil {
+		return err
+	}
+	mi.ModelName = name
+	mi.NameHash = &nameHash
+	return nil
+}
+
+func (mi *Model) BeforeUpdate(tx *gorm.DB) error {
+	if mi.Id <= 0 {
+		return nil
+	}
+	name, nameHash, err := normalizeNamedResourceIdentity(mi.ModelName, 128)
+	if err != nil {
+		return err
+	}
+	mi.ModelName = name
+	mi.NameHash = &nameHash
+	tx.Statement.SetColumn("model_name", name)
+	tx.Statement.SetColumn("name_hash", nameHash)
+	return nil
+}
+
 func (mi *Model) Insert() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(mi.ModelName, 128)
+	if err != nil {
+		return err
+	}
+	mi.ModelName = name
+	mi.NameHash = &nameHash
+
 	now := common.GetTimestamp()
 	mi.CreatedTime = now
 	mi.UpdatedTime = now
@@ -53,37 +86,63 @@ func (mi *Model) Insert() error {
 	originalStatus := mi.Status
 	originalSyncOfficial := mi.SyncOfficial
 
-	// 先创建记录（GORM 会对零值字段应用默认值）
-	if err := DB.Create(mi).Error; err != nil {
-		return err
-	}
-
-	// 使用保存的原始值进行更新，确保零值能正确保存
-	return DB.Model(&Model{}).Where("id = ?", mi.Id).Updates(map[string]interface{}{
-		"status":        originalStatus,
-		"sync_official": originalSyncOfficial,
-	}).Error
+	// GORM applies tag defaults to zero-valued fields during Create. Keep the
+	// corrective update in the same transaction so a write failure cannot
+	// leave a partially initialized model visible to routing and sync jobs.
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(mi).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Model{}).Where("id = ?", mi.Id).Updates(map[string]interface{}{
+			"status":        originalStatus,
+			"sync_official": originalSyncOfficial,
+		}).Error
+	})
 }
 
 func IsModelNameDuplicated(id int, name string) (bool, error) {
-	if name == "" {
-		return false, nil
+	_, nameHash, err := normalizeNamedResourceIdentity(name, 128)
+	if err != nil {
+		return false, err
 	}
 	var cnt int64
-	err := DB.Model(&Model{}).Where("model_name = ? AND id <> ?", name, id).Count(&cnt).Error
+	err = DB.Model(&Model{}).Where("name_hash = ? AND id <> ?", nameHash, id).Count(&cnt).Error
 	return cnt > 0, err
 }
 
 func (mi *Model) Update() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(mi.ModelName, 128)
+	if err != nil {
+		return err
+	}
+	mi.ModelName = name
+	mi.NameHash = &nameHash
 	mi.UpdatedTime = common.GetTimestamp()
 	// 使用 Select 强制更新所有字段，包括零值
 	return DB.Model(&Model{}).Where("id = ?", mi.Id).
-		Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "name_rule", "updated_time").
+		Select("model_name", "name_hash", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "name_rule", "updated_time").
 		Updates(mi).Error
 }
 
 func (mi *Model) Delete() error {
-	return DB.Delete(mi).Error
+	return DeleteModelByID(mi.Id)
+}
+
+func DeleteModelByID(id int) error {
+	if id <= 0 {
+		return gorm.ErrMissingWhereClause
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var model Model
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&model).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model).UpdateColumn("name_hash", nil).Error; err != nil {
+			return err
+		}
+		model.NameHash = nil
+		return tx.Delete(&model).Error
+	})
 }
 
 func GetVendorModelCounts() (map[int64]int64, error) {

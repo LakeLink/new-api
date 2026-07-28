@@ -72,6 +72,26 @@ func TestOpenAIResponsesRequestPreserveExplicitZeroValues(t *testing.T) {
 	require.True(t, gjson.GetBytes(encoded, "top_p").Exists())
 }
 
+func TestGeneralOpenAIRequestMaxTokenPointerPreservesExplicitZeroPrecedence(t *testing.T) {
+	legacy := uint(4096)
+	explicitZero := uint(0)
+	request := GeneralOpenAIRequest{
+		MaxTokens:           &legacy,
+		MaxCompletionTokens: &explicitZero,
+	}
+
+	require.Same(t, &explicitZero, request.GetMaxTokensPointer())
+	require.Zero(t, request.GetMaxTokens())
+}
+
+func TestOpenAISeedRequiresAnInteger(t *testing.T) {
+	var chatRequest GeneralOpenAIRequest
+	require.Error(t, common.Unmarshal([]byte(`{"seed":1.5}`), &chatRequest))
+
+	var embeddingRequest EmbeddingRequest
+	require.Error(t, common.Unmarshal([]byte(`{"seed":1.5}`), &embeddingRequest))
+}
+
 func TestGeneralOpenAIRequestGetSystemRoleName(t *testing.T) {
 	tests := []struct {
 		name  string

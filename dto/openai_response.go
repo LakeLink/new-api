@@ -241,6 +241,18 @@ type Usage struct {
 	// claude cache 1h
 	ClaudeCacheCreation5mTokens int `json:"claude_cache_creation_5_m_tokens"`
 	ClaudeCacheCreation1hTokens int `json:"claude_cache_creation_1_h_tokens"`
+	// ClaudeSpeed is internal billing metadata populated from Anthropic
+	// usage.speed. It must not leak into OpenAI-compatible response payloads.
+	ClaudeSpeed                  string `json:"-"`
+	GeminiCachedAudioInputTokens int    `json:"-"`
+	GeminiCachedImageInputTokens int    `json:"-"`
+	GeminiServiceTier            string `json:"-"`
+	// ActualServiceTier records the tier reported by OpenAI-compatible
+	// providers for settlement and audit logging without changing the public
+	// compatibility payload.
+	ActualServiceTier string `json:"-"`
+	// CostInUSDTicks is xAI's exact per-request charge. One USD is 1e10 ticks.
+	CostInUSDTicks *int64 `json:"cost_in_usd_ticks,omitempty"`
 
 	// OpenRouter Params
 	Cost any `json:"cost,omitempty"`
@@ -403,12 +415,29 @@ type ResponsesReasoningSummaryPart struct {
 }
 
 const (
-	BuildInToolWebSearchPreview = "web_search_preview"
-	BuildInToolFileSearch       = "file_search"
+	BuildInToolWebSearch                = "web_search"
+	BuildInToolWebSearch20250826        = "web_search_2025_08_26"
+	BuildInToolWebSearchPreview         = "web_search_preview"
+	BuildInToolWebSearchPreview20250311 = "web_search_preview_2025_03_11"
+	BuildInToolFileSearch               = "file_search"
 )
 
+// ResponsesWebSearchPricingKey maps versioned Responses web-search tools to
+// the administrator-facing price key for their current or preview family.
+func ResponsesWebSearchPricingKey(toolType string) (string, bool) {
+	switch toolType {
+	case BuildInToolWebSearch, BuildInToolWebSearch20250826:
+		return BuildInToolWebSearch, true
+	case BuildInToolWebSearchPreview, BuildInToolWebSearchPreview20250311:
+		return BuildInToolWebSearchPreview, true
+	default:
+		return "", false
+	}
+}
+
 const (
-	BuildInCallWebSearchCall = "web_search_call"
+	BuildInCallWebSearchCall  = "web_search_call"
+	BuildInCallFileSearchCall = "file_search_call"
 )
 
 const (
@@ -426,11 +455,13 @@ type ResponsesStreamResponse struct {
 	Item      *ResponsesOutput         `json:"item,omitempty"`
 	// - response.function_call_arguments.delta
 	// - response.function_call_arguments.done
-	OutputIndex  *int                           `json:"output_index,omitempty"`
-	ContentIndex *int                           `json:"content_index,omitempty"`
-	SummaryIndex *int                           `json:"summary_index,omitempty"`
-	ItemID       string                         `json:"item_id,omitempty"`
-	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
+	OutputIndex       *int                           `json:"output_index,omitempty"`
+	ContentIndex      *int                           `json:"content_index,omitempty"`
+	SummaryIndex      *int                           `json:"summary_index,omitempty"`
+	SequenceNumber    *int                           `json:"sequence_number,omitempty"`
+	PartialImageIndex *int                           `json:"partial_image_index,omitempty"`
+	ItemID            string                         `json:"item_id,omitempty"`
+	Part              *ResponsesReasoningSummaryPart `json:"part,omitempty"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构

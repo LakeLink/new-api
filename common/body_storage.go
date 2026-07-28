@@ -137,7 +137,7 @@ func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string
 	}
 
 	// 从 reader 读取并写入文件
-	written, err := io.Copy(file, io.LimitReader(reader, maxBytes+1))
+	written, err := io.Copy(file, io.LimitReader(reader, ReadLimitWithOverrunByte(maxBytes)))
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
@@ -281,7 +281,7 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 	}
 
 	// 使用内存读取
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(reader, ReadLimitWithOverrunByte(maxBytes)))
 	if err != nil {
 		return nil, err
 	}
@@ -311,5 +311,7 @@ func ReaderOnly(r io.Reader) io.Reader {
 // CleanupOldCacheFiles 清理旧的缓存文件（用于启动时清理残留）
 func CleanupOldCacheFiles() {
 	// 使用统一的缓存管理
-	CleanupOldDiskCacheFiles(5 * time.Minute)
+	if err := CleanupOldDiskCacheFiles(5 * time.Minute); err != nil {
+		SysError("failed to clean old request body cache files: " + err.Error())
+	}
 }

@@ -9,7 +9,9 @@ import (
 func CORS() gin.HandlerFunc {
 	config := cors.DefaultConfig()
 	config.AllowAllOrigins = true
-	config.AllowCredentials = true
+	// Relay callers authenticate with explicit API keys. Wildcard origins and
+	// credentialed browser requests are incompatible and must not be combined.
+	config.AllowCredentials = false
 	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
 	config.AllowHeaders = []string{"*"}
 	return cors.New(config)

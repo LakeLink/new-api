@@ -46,6 +46,27 @@ func UpdateChatsByJsonString(jsonString string) error {
 	return nil
 }
 
+func GetChats() []map[string]string {
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+
+	if raw, ok := common.OptionMap["Chats"]; ok {
+		var chats []map[string]string
+		if err := common.UnmarshalJsonStr(raw, &chats); err == nil {
+			return chats
+		}
+	}
+
+	chats := make([]map[string]string, len(Chats))
+	for i, chat := range Chats {
+		chats[i] = make(map[string]string, len(chat))
+		for key, value := range chat {
+			chats[i][key] = value
+		}
+	}
+	return chats
+}
+
 func Chats2JsonString() string {
 	jsonBytes, err := common.Marshal(Chats)
 	if err != nil {

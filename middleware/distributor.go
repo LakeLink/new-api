@@ -58,7 +58,12 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		if ok {
-			id, err := strconv.Atoi(channelId.(string))
+			channelIDString, validChannelID := channelId.(string)
+			if !validChannelID {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
+				return
+			}
+			id, err := strconv.Atoi(channelIDString)
 			if err != nil {
 				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
 				return
@@ -86,14 +91,25 @@ func Distribute() func(c *gin.Context) {
 				if usingGroup == "auto" {
 					userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 					for _, candidateGroup := range service.GetUserAutoGroup(userGroup) {
-						if model.IsChannelEnabledForGroupModel(candidateGroup, modelRequest.Model, channel.Id) {
+						allowed, abilityErr := model.IsChannelEnabledForGroupModel(candidateGroup, modelRequest.Model, channel.Id)
+						if abilityErr != nil {
+							common.SysLog(fmt.Sprintf("failed to validate channel %d ability: %v", channel.Id, abilityErr))
+							abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+							return
+						}
+						if allowed {
 							common.SetContextKey(c, constant.ContextKeyAutoGroup, candidateGroup)
 							groupAllowed = true
 							break
 						}
 					}
 				} else {
-					groupAllowed = model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, channel.Id)
+					groupAllowed, err = model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, channel.Id)
+					if err != nil {
+						common.SysLog(fmt.Sprintf("failed to validate channel %d ability: %v", channel.Id, err))
+						abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+						return
+					}
 				}
 				if !groupAllowed {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
@@ -137,7 +153,13 @@ func Distribute() func(c *gin.Context) {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 							autoGroups := service.GetUserAutoGroup(userGroup)
 							for _, g := range autoGroups {
-								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
+								allowed, abilityErr := model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id)
+								if abilityErr != nil {
+									common.SysLog(fmt.Sprintf("failed to validate affinity channel %d ability: %v", preferred.Id, abilityErr))
+									abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+									return
+								}
+								if allowed {
 									selectGroup = g
 									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
 									channel = preferred
@@ -146,11 +168,19 @@ func Distribute() func(c *gin.Context) {
 									break
 								}
 							}
-						} else if model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, preferred.Id) {
-							channel = preferred
-							selectGroup = usingGroup
-							affinityUsable = true
-							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
+						} else {
+							allowed, abilityErr := model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, preferred.Id)
+							if abilityErr != nil {
+								common.SysLog(fmt.Sprintf("failed to validate affinity channel %d ability: %v", preferred.Id, abilityErr))
+								abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+								return
+							}
+							if allowed {
+								channel = preferred
+								selectGroup = usingGroup
+								affinityUsable = true
+								service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
+							}
 						}
 					}
 					if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {

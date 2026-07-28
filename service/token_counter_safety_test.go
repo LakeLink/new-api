@@ -39,3 +39,31 @@ func TestImageTokenCountBoundsDeclaredHugeDimensions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2464, tokens)
 }
+
+func TestImageTokenCountDoesNotCollapseExtremeAspectRatio(t *testing.T) {
+	if uint64(^uint(0)) < math.MaxUint32 {
+		t.Skip("requires a 64-bit target to represent PNG dimensions")
+	}
+	originalGetMediaToken := constant.GetMediaToken
+	originalGetMediaTokenNotStream := constant.GetMediaTokenNotStream
+	constant.GetMediaToken = true
+	constant.GetMediaTokenNotStream = true
+	t.Cleanup(func() {
+		constant.GetMediaToken = originalGetMediaToken
+		constant.GetMediaTokenNotStream = originalGetMediaTokenNotStream
+	})
+
+	source := types.NewBase64FileSource("ignored", "image/png")
+	source.SetCache(&types.CachedFileData{
+		ImageConfig: &image.Config{Width: int(math.MaxUint32), Height: 1},
+		ImageFormat: "png",
+	})
+	file := types.NewImageFileMeta(source, "high")
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	tokens, err := getImageToken(c, file, "gpt-4o", true)
+
+	require.NoError(t, err)
+	require.Equal(t, 1_044_565, tokens)
+}

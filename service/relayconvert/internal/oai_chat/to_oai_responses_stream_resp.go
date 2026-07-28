@@ -15,10 +15,11 @@ type ChatToResponsesStreamEvent struct {
 }
 
 type ChatToResponsesStreamState struct {
-	ID      string
-	Model   string
-	Created int64
-	Usage   *dto.Usage
+	ID          string
+	Model       string
+	ServiceTier string
+	Created     int64
+	Usage       *dto.Usage
 
 	status            string
 	incompleteDetails *dto.IncompleteDetails
@@ -76,6 +77,9 @@ func ChatCompletionsStreamChunkToResponsesEvents(chunk *dto.ChatCompletionsStrea
 	}
 	if state.Created == 0 {
 		state.Created = chunk.Created
+	}
+	if chunk.ServiceTier != "" {
+		state.ServiceTier = chunk.ServiceTier
 	}
 	if chunk.Usage != nil {
 		state.Usage = UsageFromChatUsage(chunk.Usage)
@@ -324,6 +328,7 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 		Status:            []byte(fmt.Sprintf("%q", s.status)),
 		IncompleteDetails: s.incompleteDetails,
 		Model:             s.Model,
+		ServiceTier:       s.ServiceTier,
 		Output:            output,
 		Usage:             s.Usage,
 	}
@@ -331,12 +336,13 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 
 func (s *ChatToResponsesStreamState) createdResponse() *dto.OpenAIResponsesResponse {
 	return &dto.OpenAIResponsesResponse{
-		ID:        s.ID,
-		Object:    "response",
-		CreatedAt: int(s.Created),
-		Status:    []byte(`"in_progress"`),
-		Model:     s.Model,
-		Output:    []dto.ResponsesOutput{},
+		ID:          s.ID,
+		Object:      "response",
+		CreatedAt:   int(s.Created),
+		Status:      []byte(`"in_progress"`),
+		Model:       s.Model,
+		ServiceTier: s.ServiceTier,
+		Output:      []dto.ResponsesOutput{},
 	}
 }
 

@@ -51,7 +51,7 @@ type GeneralOpenAIRequest struct {
 	PresencePenalty     *float64          `json:"presence_penalty,omitempty"`
 	ResponseFormat      *ResponseFormat   `json:"response_format,omitempty"`
 	EncodingFormat      json.RawMessage   `json:"encoding_format,omitempty"`
-	Seed                *float64          `json:"seed,omitempty"`
+	Seed                *int64            `json:"seed,omitempty"`
 	ParallelTooCalls    *bool             `json:"parallel_tool_calls,omitempty"`
 	Tools               []ToolCallRequest `json:"tools,omitempty"`
 	ToolChoice          any               `json:"tool_choice,omitempty"`
@@ -138,15 +138,24 @@ func (r *GeneralOpenAIRequest) GetTokenCountMeta() *types.TokenCountMeta {
 		texts = append(texts, inputs...)
 	}
 
-	maxTokens := lo.FromPtrOr(r.MaxTokens, uint(0))
-	maxCompletionTokens := lo.FromPtrOr(r.MaxCompletionTokens, uint(0))
-	if maxCompletionTokens > maxTokens {
-		tokenCountMeta.MaxTokens = int(maxCompletionTokens)
-	} else {
-		tokenCountMeta.MaxTokens = int(maxTokens)
-	}
-	if n := lo.FromPtrOr(r.N, 1); n > 1 {
-		tokenCountMeta.MaxTokens *= n
+	tokenCountMeta.MaxTokens = r.GetMaxTokenEstimate()
+	// Imagen is exposed through the OpenAI-compatible endpoint by the Gemini
+	// and Vertex adaptors. Its fixed upstream price is per generated image, so
+	// preserve the validated output count as a pre-consume multiplier instead
+	// of charging a multi-image request as a single generation.
+	if strings.HasPrefix(r.Model, "imagen-") {
+		imageN := lo.FromPtrOr(r.N, 1)
+		if len(r.ExtraBody) > 0 {
+			var extra map[string]json.RawMessage
+			if err := common.Unmarshal(r.ExtraBody, &extra); err == nil {
+				var extraN *int
+				if rawN, exists := extra["n"]; exists && common.Unmarshal(rawN, &extraN) == nil &&
+					extraN != nil && *extraN >= 1 && *extraN <= 4 {
+					imageN = *extraN
+				}
+			}
+		}
+		tokenCountMeta.BillingRatios = map[string]float64{"n": float64(imageN)}
 	}
 
 	for _, message := range r.Messages {
@@ -259,18 +268,38 @@ type FunctionRequest struct {
 }
 
 type StreamOptions struct {
-	IncludeUsage bool `json:"include_usage,omitempty"`
+	IncludeUsage *bool `json:"include_usage,omitempty"`
 	// IncludeObfuscation is only for /v1/responses stream payload.
 	// This field is filtered by default and can be enabled via channel setting allow_include_obfuscation.
-	IncludeObfuscation bool `json:"include_obfuscation,omitempty"`
+	IncludeObfuscation *bool `json:"include_obfuscation,omitempty"`
 }
 
 func (r *GeneralOpenAIRequest) GetMaxTokens() uint {
-	maxCompletionTokens := lo.FromPtrOr(r.MaxCompletionTokens, uint(0))
-	if maxCompletionTokens != 0 {
-		return maxCompletionTokens
+	if maxTokens := r.GetMaxTokensPointer(); maxTokens != nil {
+		return *maxTokens
 	}
-	return lo.FromPtrOr(r.MaxTokens, uint(0))
+	return 0
+}
+
+// GetMaxTokensPointer returns the client-selected completion limit without
+// losing the distinction between an omitted field and an explicit zero.
+// max_completion_tokens is the newer field and takes precedence when both
+// spellings are present.
+func (r *GeneralOpenAIRequest) GetMaxTokensPointer() *uint {
+	if r.MaxCompletionTokens != nil {
+		return r.MaxCompletionTokens
+	}
+	return r.MaxTokens
+}
+
+// GetMaxTokenEstimate returns the bounded completion-token reservation,
+// including the number of requested choices.
+func (r *GeneralOpenAIRequest) GetMaxTokenEstimate() int {
+	maxTokens := lo.FromPtrOr(r.MaxTokens, uint(0))
+	if maxCompletionTokens := lo.FromPtrOr(r.MaxCompletionTokens, uint(0)); maxCompletionTokens > maxTokens {
+		maxTokens = maxCompletionTokens
+	}
+	return boundedMaxTokenProduct(maxTokens, lo.FromPtrOr(r.N, 1))
 }
 
 func (r *GeneralOpenAIRequest) ParseInput() []string {
@@ -475,14 +504,14 @@ func (m *Message) ParseToolCalls() []ToolCallRequest {
 		return nil
 	}
 	var toolCalls []ToolCallRequest
-	if err := json.Unmarshal(m.ToolCalls, &toolCalls); err == nil {
+	if err := common.Unmarshal(m.ToolCalls, &toolCalls); err == nil {
 		return toolCalls
 	}
 	return toolCalls
 }
 
 func (m *Message) SetToolCalls(toolCalls any) {
-	toolCallsJson, _ := json.Marshal(toolCalls)
+	toolCallsJson, _ := common.Marshal(toolCalls)
 	m.ToolCalls = toolCallsJson
 }
 
@@ -949,7 +978,7 @@ func (r *OpenAIResponsesRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	return &types.TokenCountMeta{
 		CombineText: strings.Join(texts, "\n"),
 		Files:       fileMeta,
-		MaxTokens:   int(lo.FromPtrOr(r.MaxOutputTokens, uint(0))),
+		MaxTokens:   boundedMaxTokenProduct(lo.FromPtrOr(r.MaxOutputTokens, uint(0)), 1),
 	}
 }
 

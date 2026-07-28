@@ -153,7 +153,7 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 			common.SysLog("failed to count user tokens: " + err.Error())
 			return nil, 0, errors.New("获取令牌数量失败")
 		}
-		if int(count) > maxTokens {
+		if count > int64(maxTokens) {
 			return nil, 0, errors.New("令牌数量超过上限，仅允许精确搜索，请勿使用 % 通配符")
 		}
 	}
@@ -250,8 +250,9 @@ func GetTokenById(id int) (*Token, error) {
 	var err error = nil
 	err = DB.First(&token, "id = ?", id).Error
 	if shouldUpdateRedis(true, err) {
+		tokenSnapshot := snapshotTokenForCache(token)
 		gopool.Go(func() {
-			if err := cacheSetToken(token); err != nil {
+			if err := cacheSetToken(tokenSnapshot); err != nil {
 				common.SysLog("failed to update user status cache: " + err.Error())
 			}
 		})
@@ -277,8 +278,9 @@ func (token *Token) Insert() error {
 func (token *Token) Update() (err error) {
 	defer func() {
 		if shouldUpdateRedis(true, err) {
+			tokenSnapshot := snapshotTokenForCache(*token)
 			gopool.Go(func() {
-				err := cacheSetToken(*token)
+				err := cacheSetToken(tokenSnapshot)
 				if err != nil {
 					common.SysLog("failed to update token cache: " + err.Error())
 				}
@@ -293,8 +295,9 @@ func (token *Token) Update() (err error) {
 func (token *Token) SelectUpdate() (err error) {
 	defer func() {
 		if shouldUpdateRedis(true, err) {
+			tokenSnapshot := snapshotTokenForCache(*token)
 			gopool.Go(func() {
-				err := cacheSetToken(*token)
+				err := cacheSetToken(tokenSnapshot)
 				if err != nil {
 					common.SysLog("failed to update token cache: " + err.Error())
 				}
@@ -308,8 +311,9 @@ func (token *Token) SelectUpdate() (err error) {
 func (token *Token) Delete() (err error) {
 	defer func() {
 		if shouldUpdateRedis(true, err) {
+			tokenKey := token.Key
 			gopool.Go(func() {
-				err := cacheDeleteToken(token.Key)
+				err := cacheDeleteToken(tokenKey)
 				if err != nil {
 					common.SysLog("failed to delete token cache: " + err.Error())
 				}

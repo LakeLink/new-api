@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -13,13 +15,17 @@ import (
 
 const (
 	// SecureVerificationSessionKey means the user has fully passed secure verification.
-	SecureVerificationSessionKey       = "secure_verified_at"
-	secureVerificationMethodSessionKey = "secure_verified_method"
-	secureVerificationMethod2FA        = "2fa"
-	secureVerificationMethodPasskey    = "passkey"
-	secureVerificationMethodPassword   = "password"
+	SecureVerificationSessionKey        = "secure_verified_at"
+	secureVerificationMethodSessionKey  = "secure_verified_method"
+	secureVerificationUserIDSessionKey  = "secure_verified_user_id"
+	secureVerificationBrowserSessionKey = "secure_verified_browser_session_id"
+	secureVerificationMethod2FA         = "2fa"
+	secureVerificationMethodPasskey     = "passkey"
+	secureVerificationMethodPassword    = "password"
 	// PasskeyReadySessionKey means WebAuthn finished and /api/verify can finalize step-up verification.
-	PasskeyReadySessionKey = "secure_passkey_ready_at"
+	PasskeyReadySessionKey        = "secure_passkey_ready_at"
+	passkeyReadyUserIDSessionKey  = "secure_passkey_ready_user_id"
+	passkeyReadyBrowserSessionKey = "secure_passkey_ready_browser_session_id"
 	// SecureVerificationTimeout 验证有效期（秒）
 	SecureVerificationTimeout = 300 // 5分钟
 	// PasskeyReadyTimeout passkey ready 标记有效期（秒）
@@ -68,10 +74,18 @@ func UniversalVerify(c *gin.Context) {
 	}
 
 	// 检查用户的验证方式
-	twoFA, _ := model.GetTwoFAByUserId(userId)
+	twoFA, err := model.GetTwoFAByUserId(userId)
+	if err != nil {
+		common.ApiError(c, fmt.Errorf("获取2FA状态失败: %w", err))
+		return
+	}
 	has2FA := twoFA != nil && twoFA.IsEnabled
 
 	passkey, passkeyErr := model.GetPasskeyByUserID(userId)
+	if passkeyErr != nil && !errors.Is(passkeyErr, model.ErrPasskeyNotFound) {
+		common.ApiError(c, passkeyErr)
+		return
+	}
 	hasPasskey := passkeyErr == nil && passkey != nil
 
 	// 根据验证方式进行验证
@@ -158,10 +172,25 @@ func UniversalVerify(c *gin.Context) {
 
 func setSecureVerificationSession(c *gin.Context, method string) (int64, error) {
 	session := sessions.Default(c)
+	userID := c.GetInt("id")
+	browserSessionID, ok := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	if userID <= 0 || !ok || browserSessionID == "" {
+		return 0, errSessionInvalid
+	}
+	sessionUser, err := getCurrentSessionUser(c)
+	if err != nil || sessionUser.Id != userID {
+		return 0, errSessionInvalid
+	}
 	session.Delete(PasskeyReadySessionKey)
+	session.Delete(passkeyReadyUserIDSessionKey)
+	session.Delete(passkeyReadyBrowserSessionKey)
 	now := time.Now().Unix()
 	session.Set(SecureVerificationSessionKey, now)
 	session.Set(secureVerificationMethodSessionKey, method)
+	session.Set(secureVerificationUserIDSessionKey, userID)
+	session.Set(secureVerificationBrowserSessionKey, browserSessionID)
 	if err := session.Save(); err != nil {
 		return 0, err
 	}
@@ -175,18 +204,33 @@ func consumePasskeyReady(c *gin.Context) (bool, error) {
 		return false, nil
 	}
 
-	readyAt, ok := readyAtRaw.(int64)
-	if !ok {
-		session.Delete(PasskeyReadySessionKey)
+	readyAt, readyAtOK := readyAtRaw.(int64)
+	readyUserID, userIDOK := session.Get(passkeyReadyUserIDSessionKey).(int)
+	readyBrowserSessionID, browserSessionIDOK := session.Get(
+		passkeyReadyBrowserSessionKey,
+	).(string)
+	currentBrowserSessionID, currentBrowserSessionIDOK := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	session.Delete(PasskeyReadySessionKey)
+	session.Delete(passkeyReadyUserIDSessionKey)
+	session.Delete(passkeyReadyBrowserSessionKey)
+	if !readyAtOK ||
+		!userIDOK ||
+		readyUserID != c.GetInt("id") ||
+		!browserSessionIDOK ||
+		readyBrowserSessionID == "" ||
+		!currentBrowserSessionIDOK ||
+		readyBrowserSessionID != currentBrowserSessionID {
 		_ = session.Save()
 		return false, fmt.Errorf("无效的 Passkey 验证状态")
 	}
-	session.Delete(PasskeyReadySessionKey)
 	if err := session.Save(); err != nil {
 		return false, err
 	}
 	// Expired ready markers cannot be reused.
-	if time.Now().Unix()-readyAt >= PasskeyReadyTimeout {
+	elapsed := time.Now().Unix() - readyAt
+	if elapsed < -30 || elapsed >= PasskeyReadyTimeout {
 		return false, nil
 	}
 	return true, nil

@@ -2,7 +2,6 @@ package cloudflare
 
 import (
 	"bufio"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,17 +13,20 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
-	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
 )
 
 func convertCf2CompletionsRequest(textRequest dto.GeneralOpenAIRequest) *CfRequest {
 	p, _ := textRequest.Prompt.(string)
+	maxTokens := textRequest.MaxCompletionTokens
+	if maxTokens == nil {
+		maxTokens = textRequest.MaxTokens
+	}
 	return &CfRequest{
 		Prompt:      p,
-		MaxTokens:   textRequest.GetMaxTokens(),
-		Stream:      lo.FromPtrOr(textRequest.Stream, false),
+		MaxTokens:   maxTokens,
+		Stream:      textRequest.Stream,
 		Temperature: textRequest.Temperature,
 	}
 }
@@ -91,11 +93,12 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 }
 
 func cfHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var response dto.TextResponse
 	err = common.Unmarshal(responseBody, &response)
 	if err != nil {
@@ -120,12 +123,13 @@ func cfHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response)
 }
 
 func cfSTTHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	var cfResp CfAudioResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &cfResp)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil

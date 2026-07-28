@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -58,11 +59,11 @@ type Task struct {
 	StartTime  int64                 `json:"start_time" gorm:"index"`
 	FinishTime int64                 `json:"finish_time" gorm:"index"`
 	Progress   string                `json:"progress" gorm:"type:varchar(20);index"`
-	Properties Properties            `json:"properties" gorm:"type:json"`
+	Properties Properties            `json:"properties" gorm:"type:text"`
 	Username   string                `json:"username,omitempty" gorm:"-"`
 	// 禁止返回给用户，内部可能包含key等隐私信息
-	PrivateData TaskPrivateData `json:"-" gorm:"column:private_data;type:json"`
-	Data        json.RawMessage `json:"data" gorm:"type:json"`
+	PrivateData TaskPrivateData `json:"-" gorm:"column:private_data;type:text"`
+	Data        json.RawMessage `json:"data" gorm:"type:text"`
 }
 
 func (t *Task) SetData(data any) {
@@ -93,15 +94,22 @@ func (m Properties) Value() (driver.Value, error) {
 }
 
 type TaskPrivateData struct {
-	Key            string `json:"key,omitempty"`
-	UpstreamTaskID string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
-	ResultURL      string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
+	Key                    string `json:"key,omitempty"`
+	ChannelType            int    `json:"channel_type,omitempty"`
+	ChannelBaseURL         string `json:"channel_base_url,omitempty"`
+	ChannelProxy           string `json:"channel_proxy,omitempty"`
+	RoutingSnapshotVersion int    `json:"routing_snapshot_version,omitempty"`
+	UpstreamTaskID         string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
+	ResultURL              string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
 	// 计费上下文：用于异步退款/差额结算（轮询阶段读取）
-	BillingSource  string              `json:"billing_source,omitempty"`  // "wallet" 或 "subscription"
-	SubscriptionId int                 `json:"subscription_id,omitempty"` // 订阅 ID，用于订阅退款
-	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
-	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
-	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	BillingSource      string              `json:"billing_source,omitempty"`       // "wallet" 或 "subscription"
+	BillingRequestId   string              `json:"billing_request_id,omitempty"`   // 原始预扣费请求，用于跨订阅重置周期的安全退款
+	SubscriptionId     int                 `json:"subscription_id,omitempty"`      // 订阅 ID，用于订阅退款
+	TokenId            int                 `json:"token_id,omitempty"`             // 令牌 ID，用于令牌额度退款
+	TokenKeyHash       string              `json:"token_key_hash,omitempty"`       // 令牌密钥指纹，用于避免延迟结算命中重建令牌
+	ChannelCreatedTime int64               `json:"channel_created_time,omitempty"` // 渠道创建时间，用于避免延迟聚合命中重建渠道
+	NodeName           string              `json:"node_name,omitempty"`            // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
+	BillingContext     *TaskBillingContext `json:"billing_context,omitempty"`      // 计费参数快照（用于轮询阶段重新计算）
 }
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。
@@ -167,10 +175,18 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 	properties := Properties{}
 	privateData := TaskPrivateData{}
 	if relayInfo != nil && relayInfo.ChannelMeta != nil {
-		if relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeGemini ||
-			relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeVertexAi {
-			privateData.Key = relayInfo.ChannelMeta.ApiKey
+		channelBaseURL := relayInfo.ChannelMeta.ChannelBaseUrl
+		if channelBaseURL == "" {
+			channelBaseURL = constant.ChannelBaseURLs[relayInfo.ChannelMeta.ChannelType]
 		}
+		// Polling must continue against the exact provider account and endpoint
+		// that accepted the task. Channel credentials can rotate while an
+		// accepted upstream response is still being committed locally, and
+		// multi-key channels may select a different key on every request.
+		privateData.Key = relayInfo.ChannelMeta.ApiKey
+		privateData.ChannelType = relayInfo.ChannelMeta.ChannelType
+		privateData.ChannelBaseURL = channelBaseURL
+		privateData.RoutingSnapshotVersion = 1
 		if relayInfo.UpstreamModelName != "" {
 			properties.UpstreamModelName = relayInfo.UpstreamModelName
 		}
@@ -202,9 +218,8 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 	return t
 }
 
-func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQueryParams) []*Task {
+func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQueryParams) ([]*Task, error) {
 	var tasks []*Task
-	var err error
 
 	// 初始化查询构建器
 	query := DB.Where("user_id = ?", userId)
@@ -230,17 +245,15 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
 	}
 
 	// 获取数据
-	err = query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
-	if err != nil {
-		return nil
+	if err := query.Omit("channel_id").Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error; err != nil {
+		return nil, err
 	}
 
-	return tasks
+	return tasks, nil
 }
 
-func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*Task {
+func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) ([]*Task, error) {
 	var tasks []*Task
-	var err error
 
 	// 初始化查询构建器
 	query := DB
@@ -275,15 +288,14 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 	}
 
 	// 获取数据
-	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error
-	if err != nil {
-		return nil
+	if err := query.Order("id desc").Limit(num).Offset(startIdx).Find(&tasks).Error; err != nil {
+		return nil, err
 	}
 
-	return tasks
+	return tasks, nil
 }
 
-func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
+func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) ([]*Task, error) {
 	var tasks []*Task
 	err := DB.Where("progress != ?", "100%").
 		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
@@ -292,27 +304,31 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 		Limit(limit).
 		Find(&tasks).Error
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return tasks
+	return tasks, nil
 }
 
-func GetAllUnFinishSyncTasks(limit int) []*Task {
+func GetAllUnFinishSyncTasks(limit int) ([]*Task, error) {
 	var tasks []*Task
-	var err error
 	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	err := DB.Where("progress != ?", "100%").
+		Where("status != ?", TaskStatusFailure).
+		Where("status != ?", TaskStatusSuccess).
+		Limit(limit).
+		Order("id").
+		Find(&tasks).Error
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return tasks
+	return tasks, nil
 }
 
 // HasUnfinishedSyncTasks reports whether at least one async (Suno/video) task is
 // still in progress. It is a cheap existence check (LIMIT 1) used to decide
 // whether the async_task_poll system task needs to run; when no task is pending
 // the scheduler skips creating a row entirely.
-func HasUnfinishedSyncTasks() bool {
+func HasUnfinishedSyncTasks() (bool, error) {
 	var id int64
 	err := DB.Model(&Task{}).
 		Where("progress != ?", "100%").
@@ -320,7 +336,10 @@ func HasUnfinishedSyncTasks() bool {
 		Where("status != ?", TaskStatusSuccess).
 		Limit(1).
 		Pluck("id", &id).Error
-	return err == nil && id != 0
+	if err != nil {
+		return false, err
+	}
+	return id != 0, nil
 }
 
 func GetByOnlyTaskId(taskId string) (*Task, bool, error) {
@@ -341,15 +360,23 @@ func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
 	if taskId == "" {
 		return nil, false, nil
 	}
-	var task *Task
-	var err error
-	err = DB.Where("user_id = ? and task_id = ?", userId, taskId).
-		First(&task).Error
-	exist, err := RecordExist(err)
-	if err != nil {
+	var tasks []Task
+	if err := DB.Where("user_id = ? AND task_id = ?", userId, taskId).
+		Order("id asc").
+		Limit(2).
+		Find(&tasks).Error; err != nil {
 		return nil, false, err
 	}
-	return task, exist, err
+	if len(tasks) == 0 {
+		return nil, false, nil
+	}
+	if len(tasks) > 1 {
+		// Legacy rows may expose account-scoped provider IDs directly. The same
+		// user can therefore have equal IDs on two channels/accounts; choosing
+		// either row arbitrarily could poll, proxy, remix, or bill the wrong job.
+		return nil, false, errors.New("task id is ambiguous for this user")
+	}
+	return &tasks[0], true, nil
 }
 
 func GetByTaskIds(userId int, taskIds []any) ([]*Task, error) {
@@ -460,7 +487,7 @@ type TaskQuotaUsage struct {
 }
 
 // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
-func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
+func TaskCountAllTasks(queryParams SyncTaskQueryParams) (int64, error) {
 	var total int64
 	query := DB.Model(&Task{})
 	if queryParams.ChannelID != "" {
@@ -490,12 +517,12 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	if queryParams.EndTimestamp != 0 {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
-	return total
+	err := query.Count(&total).Error
+	return total, err
 }
 
 // TaskCountAllUserTask returns total tasks for given user
-func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
+func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) (int64, error) {
 	var total int64
 	query := DB.Model(&Task{}).Where("user_id = ?", userId)
 	if queryParams.TaskID != "" {
@@ -516,8 +543,8 @@ func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 	if queryParams.EndTimestamp != 0 {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
-	return total
+	err := query.Count(&total).Error
+	return total, err
 }
 func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 	openAIVideo := dto.NewOpenAIVideo()

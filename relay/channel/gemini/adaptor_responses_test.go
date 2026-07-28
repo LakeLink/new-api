@@ -43,7 +43,6 @@ func TestConvertOpenAIResponsesRequestToGeminiFunctionToolAndChoice(t *testing.T
 					},
 				},
 			},
-			{"type": "custom", "name": "freeform"},
 		}),
 		ToolChoice: mustGeminiRawMessage(t, map[string]any{
 			"type": "function",
@@ -103,54 +102,50 @@ func TestConvertOpenAIResponsesRequestToGeminiFunctionCallConversation(t *testin
 	assert.Equal(t, map[string]interface{}{"ok": true}, got.Contents[1].Parts[0].FunctionResponse.Response)
 }
 
-func TestConvertOpenAIResponsesRequestToGeminiSkipsCustomToolCalls(t *testing.T) {
-	got := mustConvertResponsesToGemini(t, dto.OpenAIResponsesRequest{
+func TestConvertOpenAIResponsesRequestToGeminiRejectsCustomToolDefinition(t *testing.T) {
+	request := dto.OpenAIResponsesRequest{
+		Model: "gemini-test",
+		Input: mustGeminiRawMessage(t, "hello"),
+		Tools: mustGeminiRawMessage(t, []map[string]any{
+			{"type": "custom", "name": "apply_patch"},
+		}),
+	}
+	info := &relaycommon.RelayInfo{
+		OriginModelName: request.Model,
+		ChannelMeta:     &relaycommon.ChannelMeta{UpstreamModelName: request.Model},
+	}
+
+	got, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, request)
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "Responses tool type")
+	assert.Contains(t, err.Error(), "custom")
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiRejectsCustomToolHistory(t *testing.T) {
+	request := dto.OpenAIResponsesRequest{
 		Model: "gemini-test",
 		Input: mustGeminiRawMessage(t, []map[string]any{
-			{
-				"role": "assistant",
-				"content": []map[string]any{
-					{"type": "output_text", "text": "before custom"},
-				},
-			},
 			{
 				"type":    "custom_tool_call",
 				"call_id": "call_custom",
 				"name":    "apply_patch",
 				"input":   "patch body",
 			},
-			{
-				"type":    "custom_tool_call_output",
-				"call_id": "call_custom",
-				"output":  "ok",
-			},
-			{
-				"type":    "function_call_output",
-				"call_id": "call_custom",
-				"output":  "legacy custom output",
-			},
-			{
-				"role":    "user",
-				"content": "next turn",
-			},
 		}),
-		Tools: mustGeminiRawMessage(t, []map[string]any{
-			{"type": "custom", "name": "apply_patch"},
-			{"type": "unknown", "name": "unknown"},
-		}),
-	})
+	}
+	info := &relaycommon.RelayInfo{
+		OriginModelName: request.Model,
+		ChannelMeta:     &relaycommon.ChannelMeta{UpstreamModelName: request.Model},
+	}
 
-	assert.Empty(t, got.GetTools())
-	require.Len(t, got.Contents, 2)
-	assert.Equal(t, "model", got.Contents[0].Role)
-	require.Len(t, got.Contents[0].Parts, 1)
-	assert.Equal(t, "before custom", got.Contents[0].Parts[0].Text)
-	assert.Nil(t, got.Contents[0].Parts[0].FunctionCall)
+	got, err := (&Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, request)
 
-	assert.Equal(t, "user", got.Contents[1].Role)
-	require.Len(t, got.Contents[1].Parts, 1)
-	assert.Equal(t, "next turn", got.Contents[1].Parts[0].Text)
-	assert.Nil(t, got.Contents[1].Parts[0].FunctionResponse)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "custom_tool_call")
+	assert.Contains(t, err.Error(), "cannot be converted")
 }
 
 func mustConvertResponsesToGemini(t *testing.T, req dto.OpenAIResponsesRequest) *dto.GeminiChatRequest {

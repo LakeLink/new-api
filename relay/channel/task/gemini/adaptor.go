@@ -2,10 +2,12 @@ package gemini
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +43,83 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionTextGenerate)
+	return ValidateVeoTaskRequest(c, info, false, 1)
+}
+
+// ValidateFinalRequest rechecks model-specific capabilities after channel
+// model mapping, before the mapped model is priced or sent upstream.
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	return ValidateVeoTaskRequest(c, info, false, 1)
+}
+
+// ValidateVeoTaskRequest validates the shared Veo request shape before its
+// duration and resolution are used as billing multipliers. Vertex supports
+// generateAudio; the Gemini API always generates audio and has no toggle.
+func ValidateVeoTaskRequest(c *gin.Context, info *relaycommon.RelayInfo, allowGenerateAudio bool, maxSampleCount int) (taskErr *dto.TaskError) {
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionTextGenerate); taskErr != nil {
+		return taskErr
+	}
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+
+	if rawDuration, exists := req.Metadata["durationSeconds"]; exists {
+		if _, valid := parseVeoDurationValue(rawDuration); !valid {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("durationSeconds must be one of 4, 6, or 8"), "invalid_duration", http.StatusBadRequest)
+		}
+	}
+	if rawResolution, exists := req.Metadata["resolution"]; exists {
+		if resolution, ok := rawResolution.(string); !ok || strings.TrimSpace(resolution) == "" {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("resolution must be one of 720p, 1080p, or 4k"), "invalid_resolution", http.StatusBadRequest)
+		}
+	}
+	if rawAspectRatio, exists := req.Metadata["aspectRatio"]; exists {
+		aspectRatio, ok := rawAspectRatio.(string)
+		if !ok || (aspectRatio != "16:9" && aspectRatio != "9:16") {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("aspectRatio must be either 16:9 or 9:16"), "invalid_aspect_ratio", http.StatusBadRequest)
+		}
+	}
+	if rawSeed, exists := req.Metadata["seed"]; exists {
+		seed, valid := parseVeoSeedValue(rawSeed)
+		if !valid || seed > uint64(^uint32(0)) {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("seed must be an integer between 0 and 4294967295"), "invalid_seed", http.StatusBadRequest)
+		}
+	}
+	if rawSampleCount, exists := req.Metadata["sampleCount"]; exists {
+		if sampleCount, valid := parseVeoDurationValue(rawSampleCount); !valid || sampleCount > maxSampleCount {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("sampleCount must be between 1 and %d", maxSampleCount), "invalid_sample_count", http.StatusBadRequest)
+		}
+	}
+	if rawGenerateAudio, exists := req.Metadata["generateAudio"]; exists {
+		if !allowGenerateAudio {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("generateAudio is not supported by the Gemini API; audio is always enabled"), "unsupported_generate_audio", http.StatusBadRequest)
+		}
+		if _, ok := rawGenerateAudio.(bool); !ok {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("generateAudio must be a boolean"), "invalid_generate_audio", http.StatusBadRequest)
+		}
+	}
+	if req.Duration == 0 && req.Seconds != "" {
+		if _, err := strconv.Atoi(req.Seconds); err != nil {
+			return service.TaskErrorWrapperLocal(fmt.Errorf("seconds must be one of 4, 6, or 8"), "invalid_duration", http.StatusBadRequest)
+		}
+	}
+
+	duration := ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
+	if duration != 4 && duration != 6 && duration != 8 {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("durationSeconds must be one of 4, 6, or 8"), "invalid_duration", http.StatusBadRequest)
+	}
+	resolution := ResolveVeoResolution(req.Metadata, req.Size)
+	if resolution != "720p" && resolution != "1080p" && resolution != "4k" {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("resolution must be one of 720p, 1080p, or 4k"), "invalid_resolution", http.StatusBadRequest)
+	}
+	if resolution == "4k" && !VeoSupports4K(info.UpstreamModelName) {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("%s does not support 4k output", info.UpstreamModelName), "invalid_resolution", http.StatusBadRequest)
+	}
+	if resolution != "720p" && duration != 8 {
+		return service.TaskErrorWrapperLocal(fmt.Errorf("1080p and 4k output require an 8-second duration"), "invalid_duration", http.StatusBadRequest)
+	}
+	return nil
 }
 
 // BuildRequestURL constructs the Gemini API predictLongRunning endpoint for Veo.
@@ -90,12 +168,11 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, params); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
-	if params.DurationSeconds == 0 && req.Duration > 0 {
-		params.DurationSeconds = req.Duration
-	}
-	if params.Resolution == "" && req.Size != "" {
-		params.Resolution = SizeToVeoResolution(req.Size)
-	}
+	// Use the same normalized values that EstimateBilling validates and bills.
+	// Metadata is user-controlled and must not bypass duration bounds or create
+	// a mismatch between the upstream request and the pre-consumed multiplier.
+	params.DurationSeconds = ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
+	params.Resolution = ResolveVeoResolution(req.Metadata, req.Size)
 	if params.AspectRatio == "" && req.Size != "" {
 		params.AspectRatio = SizeToVeoAspectRatio(req.Size)
 	}
@@ -121,11 +198,12 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return "", nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
-	_ = resp.Body.Close()
 
 	var s submitResponse
 	if err := common.Unmarshal(responseBody, &s); err != nil {
@@ -146,10 +224,9 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 func (a *TaskAdaptor) GetModelList() []string {
 	return []string{
-		"veo-3.0-generate-001",
-		"veo-3.0-fast-generate-001",
 		"veo-3.1-generate-preview",
 		"veo-3.1-fast-generate-preview",
+		"veo-3.1-lite-generate-preview",
 	}
 }
 
@@ -179,7 +256,7 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 }
 
 // FetchTask polls task status via the Gemini operations GET endpoint.
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+func (a *TaskAdaptor) FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -193,9 +270,9 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	version := model_setting.GetGeminiVersionSetting("default")
 	url := fmt.Sprintf("%s/%s/%s", baseUrl, version, upstreamName)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -205,7 +282,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	return service.DoUpstreamRequest(client, req)
 }
 
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
@@ -251,7 +328,7 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	}
 	modelName := extractModelFromOperationName(upstreamName)
 	if strings.TrimSpace(modelName) == "" {
-		modelName = "veo-3.0-generate-001"
+		modelName = "veo-3.1-generate-preview"
 	}
 
 	video := dto.NewOpenAIVideo()

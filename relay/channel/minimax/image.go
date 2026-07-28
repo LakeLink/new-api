@@ -2,7 +2,6 @@ package minimax
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +25,8 @@ type MiniMaxImageRequest struct {
 	AigcWatermark   *bool  `json:"aigc_watermark,omitempty"`
 }
 
+const MaxMiniMaxImageN uint = 9
+
 type MiniMaxImageResponse struct {
 	ID   string `json:"id"`
 	Data struct {
@@ -39,7 +40,7 @@ type MiniMaxImageResponse struct {
 	} `json:"base_resp"`
 }
 
-func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest {
+func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) (MiniMaxImageRequest, error) {
 	responseFormat := normalizeMiniMaxResponseFormat(request.ResponseFormat)
 	minimaxRequest := MiniMaxImageRequest{
 		Model:          request.Model,
@@ -52,7 +53,10 @@ func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest 
 	if request.Model == "" {
 		minimaxRequest.Model = "image-01"
 	}
-	if request.N != nil && *request.N > 0 {
+	if request.N != nil {
+		if *request.N < 1 || *request.N > MaxMiniMaxImageN {
+			return MiniMaxImageRequest{}, fmt.Errorf("MiniMax image n must be an integer between 1 and %d", MaxMiniMaxImageN)
+		}
 		minimaxRequest.N = int(*request.N)
 	}
 	if aspectRatio := aspectRatioFromImageRequest(request); aspectRatio != "" {
@@ -65,7 +69,7 @@ func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest 
 		}
 	}
 
-	return minimaxRequest
+	return minimaxRequest, nil
 }
 
 func aspectRatioFromImageRequest(request dto.ImageRequest) string {
@@ -176,11 +180,12 @@ func responseMiniMax2OpenAIImage(response *MiniMaxImageResponse, info *relaycomm
 }
 
 func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
 
 	var minimaxResponse MiniMaxImageResponse
 	if err := common.Unmarshal(responseBody, &minimaxResponse); err != nil {

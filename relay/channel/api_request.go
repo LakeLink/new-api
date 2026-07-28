@@ -71,6 +71,7 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 	"keep-alive":          {},
 	"proxy-authenticate":  {},
 	"proxy-authorization": {},
+	"proxy-connection":    {},
 	"te":                  {},
 	"trailer":             {},
 	"transfer-encoding":   {},
@@ -79,9 +80,19 @@ var passthroughSkipHeaderNamesLower = map[string]struct{}{
 	"cookie": {},
 
 	// Additional headers that should not be forwarded by name-matching passthrough rules.
-	"host":            {},
-	"content-length":  {},
-	"accept-encoding": {},
+	"host":                    {},
+	"content-length":          {},
+	"accept-encoding":         {},
+	"forwarded":               {},
+	"x-forwarded-for":         {},
+	"x-forwarded-host":        {},
+	"x-forwarded-proto":       {},
+	"x-forwarded-client-cert": {},
+	"x-real-ip":               {},
+	"cf-connecting-ip":        {},
+	"true-client-ip":          {},
+	"x-original-url":          {},
+	"x-rewrite-url":           {},
 
 	// Do not passthrough credentials by wildcard/regex.
 	"authorization":  {},
@@ -316,12 +327,12 @@ func getRelayCtx(c *gin.Context, info *common.RelayInfo) context.Context {
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return nil, fmt.Errorf("get request url failed: %w", service.SanitizeNetworkError(err))
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
 	req, err := http.NewRequestWithContext(getRelayCtx(c, info), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", service.SanitizeNetworkError(err))
 	}
 	applyUpstreamContentLength(req, info)
 	headers := req.Header
@@ -346,12 +357,12 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return nil, fmt.Errorf("get request url failed: %w", service.SanitizeNetworkError(err))
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
 	req, err := http.NewRequestWithContext(getRelayCtx(c, info), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", service.SanitizeNetworkError(err))
 	}
 	applyUpstreamContentLength(req, info)
 	// set form data
@@ -378,7 +389,7 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
+		return nil, fmt.Errorf("get request url failed: %w", service.SanitizeNetworkError(err))
 	}
 	targetHeader := http.Header{}
 	err = a.SetupRequestHeader(c, &targetHeader, info)
@@ -396,10 +407,18 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	dialer := *websocket.DefaultDialer
-	targetConn, _, err := dialer.DialContext(getRelayCtx(c, info), fullRequestURL, targetHeader)
+	targetConn, handshakeResponse, err := dialer.DialContext(getRelayCtx(c, info), fullRequestURL, targetHeader)
 	if err != nil {
-		return nil, fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err)
+		if handshakeResponse != nil && handshakeResponse.Body != nil {
+			_ = handshakeResponse.Body.Close()
+		}
+		return nil, fmt.Errorf(
+			"dial failed to %s: %w",
+			common.SanitizeURLForLog(fullRequestURL),
+			service.SanitizeNetworkError(err),
+		)
 	}
+	helper.LimitUpstreamWebsocketMessages(targetConn)
 	// send request body
 	//all, err := io.ReadAll(requestBody)
 	//err = service.WssString(c, targetConn, string(all))
@@ -503,7 +522,7 @@ func limitUpstreamResponseBody(resp *http.Response, info *common.RelayInfo) {
 	// This is an upstream response body, not the inbound server request body,
 	// so no downstream ResponseWriter should receive MaxBytesReader's request-
 	// too-large side effects.
-	resp.Body = http.MaxBytesReader(nil, resp.Body, int64(maxMB)<<20)
+	resp.Body = http.MaxBytesReader(nil, resp.Body, common2.BytesFromMegabytes(maxMB))
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
@@ -531,7 +550,12 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		// 处理流式请求的 ping 保活
 		generalSettings := operation_setting.GetGeneralSetting()
 		if generalSettings.PingIntervalEnabled && !info.DisablePing {
-			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
+			pingInterval := common2.SafeIntervalDuration(
+				generalSettings.PingIntervalSeconds,
+				time.Second,
+				helper.DefaultPingInterval,
+				"relay ping interval",
+			)
 			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval, getRelayCtx(c, info))
 			// 使用defer确保在任何情况下都能停止ping goroutine
 			defer func() {
@@ -544,9 +568,12 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
-	resp, err := client.Do(req)
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
-		logger.LogError(c, "do request failed: "+err.Error())
+		if resp != nil {
+			service.CloseResponseBodyGracefully(resp)
+		}
+		logger.LogError(c, "do request failed: "+common2.MaskSensitiveInfo(err.Error()))
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
 	if resp == nil {
@@ -572,26 +599,30 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 }
 
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
-	fullRequestURL, err := a.BuildRequestURL(info)
+	req, err := buildTaskAPIRequest(a, c, info, requestBody)
 	if err != nil {
 		return nil, err
 	}
+	resp, err := doRequest(c, req, info)
+	if err != nil {
+		return resp, fmt.Errorf("do request failed: %w", err)
+	}
+	return resp, nil
+}
+
+func buildTaskAPIRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Request, error) {
+	fullRequestURL, err := a.BuildRequestURL(info)
+	if err != nil {
+		return nil, service.SanitizeNetworkError(err)
+	}
 	req, err := http.NewRequestWithContext(getRelayCtx(c, info), c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", service.SanitizeNetworkError(err))
 	}
 	applyUpstreamContentLength(req, info)
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(requestBody), nil
-	}
-
 	err = a.BuildRequestHeader(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
-	resp, err := doRequest(c, req, info)
-	if err != nil {
-		return nil, fmt.Errorf("do request failed: %w", err)
-	}
-	return resp, nil
+	return req, nil
 }

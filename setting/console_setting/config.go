@@ -28,6 +28,23 @@ var defaultConsoleSetting = ConsoleSetting{
 // 全局实例
 var consoleSetting = defaultConsoleSetting
 
+func (s ConsoleSetting) Validate() error {
+	for _, item := range []struct {
+		value string
+		kind  string
+	}{
+		{value: s.ApiInfo, kind: "ApiInfo"},
+		{value: s.UptimeKumaGroups, kind: "UptimeKumaGroups"},
+		{value: s.Announcements, kind: "Announcements"},
+		{value: s.FAQ, kind: "FAQ"},
+	} {
+		if err := ValidateConsoleSettings(item.value, item.kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func init() {
 	// 注册到全局配置管理器，键名为 console_setting
 	config.GlobalConfig.Register("console_setting", &consoleSetting)
@@ -35,5 +52,5 @@ func init() {
 
 // GetConsoleSetting 获取 ConsoleSetting 配置实例
 func GetConsoleSetting() *ConsoleSetting {
-	return &consoleSetting
+	return config.Snapshot[ConsoleSetting]("console_setting")
 }

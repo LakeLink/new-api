@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -447,6 +448,62 @@ func TestSendEmailSkipsAuthWhenCredentialsAreEmpty(t *testing.T) {
 	select {
 	case message := <-server.messages:
 		require.Contains(t, message, "<p>123456</p>")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SMTP DATA")
+	}
+}
+
+func TestSendEmailDoesNotMutateFallbackSenderConfiguration(t *testing.T) {
+	server := newFakeSMTPServerWithSTARTTLSAdvertisement(t, false)
+	defer server.close()
+	withSMTPSettings(t)
+
+	SMTPServer = server.host
+	SMTPPort = server.port
+	SMTPSSLEnabled = false
+	SMTPStartTLSEnabled = false
+	SMTPAccount = "sender@example.com"
+	SMTPFrom = ""
+	SMTPToken = ""
+	SystemName = "New API"
+
+	require.NoError(t, SendEmail("Verification", "receiver@example.com", "<p>123456</p>"))
+	assert.Empty(t, SMTPFrom)
+}
+
+func TestSendEmailRejectsRecipientHeaderInjection(t *testing.T) {
+	withSMTPSettings(t)
+	SMTPServer = "smtp.example.com"
+	SMTPFrom = "sender@example.com"
+
+	err := SendEmail(
+		"Verification",
+		"receiver@example.com\r\nBcc: attacker@example.com",
+		"<p>123456</p>",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recipient")
+}
+
+func TestSendEmailEncodesDisplayNameHeader(t *testing.T) {
+	server := newFakeSMTPServerWithSTARTTLSAdvertisement(t, false)
+	defer server.close()
+	withSMTPSettings(t)
+
+	SMTPServer = server.host
+	SMTPPort = server.port
+	SMTPSSLEnabled = false
+	SMTPStartTLSEnabled = false
+	SMTPAccount = ""
+	SMTPFrom = "sender@example.com"
+	SMTPToken = ""
+	SystemName = "New API\r\nBcc: attacker@example.com"
+
+	require.NoError(t, SendEmail("Verification", "receiver@example.com", "<p>123456</p>"))
+
+	select {
+	case message := <-server.messages:
+		assert.NotContains(t, message, "\r\nBcc: attacker@example.com")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for SMTP DATA")
 	}

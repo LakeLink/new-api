@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 )
@@ -51,10 +52,10 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
 		return nil, NewOAuthError(i18n.MsgOAuthInvalidCode, nil)
 	}
 
-	logger.LogDebug(ctx, "[OAuth-Discord] ExchangeToken: code=%s...", code[:min(len(code), 10)])
+	logger.LogDebug(ctx, "[OAuth-Discord] ExchangeToken: started")
 
 	settings := system_setting.GetDiscordSettings()
-	redirectUri := fmt.Sprintf("%s/oauth/discord", system_setting.ServerAddress)
+	redirectUri := fmt.Sprintf("%s/oauth/discord", system_setting.GetServerAddress())
 	values := url.Values{}
 	values.Set("client_id", settings.ClientId)
 	values.Set("client_secret", settings.ClientSecret)
@@ -66,25 +67,28 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://discord.com/api/v10/oauth2/token", strings.NewReader(values.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	res, err := client.Do(req)
+	client := protectedOAuthHTTPClient(5 * time.Second)
+	res, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, err.Error())
+		safeError := common.MaskSensitiveInfo(err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken error: %s", safeError))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, safeError)
 	}
 	defer res.Body.Close()
 
 	logger.LogDebug(ctx, "[OAuth-Discord] ExchangeToken response status: %d", res.StatusCode)
+	if err := requireOAuthSuccessStatus(res); err != nil {
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken failed: status=%d", res.StatusCode))
+		return nil, NewOAuthError(i18n.MsgOAuthTokenFailed, map[string]any{"Provider": "Discord"})
+	}
 
 	var discordResponse discordOAuthResponse
-	err = common.DecodeJson(res.Body, &discordResponse)
+	err = decodeOAuthJSONResponse(res, &discordResponse)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken decode error: %s", err.Error()))
 		return nil, err
@@ -112,17 +116,16 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://discord.com/api/v10/users/@me", nil)
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	res, err := client.Do(req)
+	client := protectedOAuthHTTPClient(5 * time.Second)
+	res, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, err.Error())
+		safeError := common.MaskSensitiveInfo(err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo error: %s", safeError))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, safeError)
 	}
 	defer res.Body.Close()
 
@@ -134,7 +137,7 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	}
 
 	var discordUser discordUser
-	err = common.DecodeJson(res.Body, &discordUser)
+	err = decodeOAuthJSONResponse(res, &discordUser)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo decode error: %s", err.Error()))
 		return nil, err
@@ -145,7 +148,7 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 		return nil, NewOAuthError(i18n.MsgOAuthUserInfoEmpty, map[string]any{"Provider": "Discord"})
 	}
 
-	logger.LogDebug(ctx, "[OAuth-Discord] GetUserInfo success: uid=%s, username=%s, name=%s", discordUser.UID, discordUser.ID, discordUser.Name)
+	logger.LogDebug(ctx, "[OAuth-Discord] GetUserInfo success")
 
 	return &OAuthUser{
 		ProviderUserID: discordUser.UID,
@@ -154,7 +157,7 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	}, nil
 }
 
-func (p *DiscordProvider) IsUserIDTaken(providerUserID string) bool {
+func (p *DiscordProvider) IsUserIDTaken(providerUserID string) (bool, error) {
 	return model.IsDiscordIdAlreadyTaken(providerUserID)
 }
 

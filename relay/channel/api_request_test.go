@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,8 +13,44 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type apiRequestURLAdaptor struct {
+	Adaptor
+	requestURL string
+	requestErr error
+}
+
+func (a apiRequestURLAdaptor) GetRequestURL(_ *relaycommon.RelayInfo) (string, error) {
+	return a.requestURL, a.requestErr
+}
+
+type taskRequestBuilder struct {
+	TaskAdaptor
+	requestURL string
+	requestErr error
+}
+
+func (a taskRequestBuilder) BuildRequestURL(_ *relaycommon.RelayInfo) (string, error) {
+	if a.requestErr != nil {
+		return "", a.requestErr
+	}
+	if a.requestURL != "" {
+		return a.requestURL, nil
+	}
+	return "https://example.com/v1/tasks", nil
+}
+
+func (taskRequestBuilder) BuildRequestHeader(
+	_ *gin.Context,
+	req *http.Request,
+	_ *relaycommon.RelayInfo,
+) error {
+	req.Header.Set("Content-Type", "application/json")
+	return nil
+}
 
 func TestDoRequestRebindsManualRequestToRelayCancellation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -53,6 +90,101 @@ func TestGetRelayCtxUsesRelayCancellationAndRequestFallback(t *testing.T) {
 	require.NoError(t, got.Err())
 }
 
+func TestRequestConstructionErrorsDoNotLeakUpstreamSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{}
+	secretURL := "https://user:password-secret@example.com/v1?api_key=query-secret%zz"
+	malformedSecretURL := "https://user:password-secret@example.com/v1?api_key=query-secret\n"
+
+	for _, testCase := range []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "api request URL error",
+			call: func() error {
+				_, err := DoApiRequest(
+					apiRequestURLAdaptor{requestErr: errors.New("failed for " + secretURL)},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+		{
+			name: "form request URL error",
+			call: func() error {
+				_, err := DoFormRequest(
+					apiRequestURLAdaptor{requestErr: errors.New("failed for " + secretURL)},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+		{
+			name: "websocket request URL error",
+			call: func() error {
+				_, err := DoWssRequest(
+					apiRequestURLAdaptor{requestErr: errors.New("failed for " + secretURL)},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+		{
+			name: "malformed request URL",
+			call: func() error {
+				_, err := DoApiRequest(
+					apiRequestURLAdaptor{requestURL: malformedSecretURL},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+		{
+			name: "task request URL error",
+			call: func() error {
+				_, err := buildTaskAPIRequest(
+					taskRequestBuilder{requestErr: errors.New("failed for " + secretURL)},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+		{
+			name: "malformed task request URL",
+			call: func() error {
+				_, err := buildTaskAPIRequest(
+					taskRequestBuilder{requestURL: malformedSecretURL},
+					ctx,
+					info,
+					nil,
+				)
+				return err
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.call()
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "password-secret")
+			assert.NotContains(t, err.Error(), "query-secret")
+			assert.NotContains(t, err.Error(), "example.com")
+		})
+	}
+}
+
 func TestLimitUpstreamResponseBodyBoundsBufferedAndErrorResponses(t *testing.T) {
 	oldLimit := constant.MaxUpstreamResponseBodyMB
 	constant.MaxUpstreamResponseBodyMB = 1
@@ -87,6 +219,49 @@ func TestLimitUpstreamResponseBodyBoundsBufferedAndErrorResponses(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestBuildTaskAPIRequestUsesSafeRedirectReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+	payload := []byte(`{"model":"video-model","prompt":"hello"}`)
+
+	req, err := buildTaskAPIRequest(
+		taskRequestBuilder{},
+		ctx,
+		&relaycommon.RelayInfo{},
+		bytes.NewReader(payload),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, req.GetBody, "bytes.Reader has an independent net/http replay snapshot")
+
+	sentBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, payload, sentBody)
+
+	replayedBody, err := req.GetBody()
+	require.NoError(t, err)
+	defer replayedBody.Close()
+	replayed, err := io.ReadAll(replayedBody)
+	require.NoError(t, err)
+	require.Equal(t, payload, replayed, "a 307/308 replay must not reuse the exhausted original reader")
+}
+
+func TestBuildTaskAPIRequestDoesNotInventReplayForOpaqueBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+	opaqueBody := struct{ io.Reader }{Reader: strings.NewReader("one-shot")}
+
+	req, err := buildTaskAPIRequest(
+		taskRequestBuilder{},
+		ctx,
+		&relaycommon.RelayInfo{},
+		opaqueBody,
+	)
+	require.NoError(t, err)
+	require.Nil(t, req.GetBody, "net/http must return 307/308 instead of replaying an exhausted unknown reader")
 }
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
@@ -189,6 +364,8 @@ func TestProcessHeaderOverride_PassthroughSkipsAcceptEncoding(t *testing.T) {
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	ctx.Request.Header.Set("X-Trace-Id", "trace-123")
 	ctx.Request.Header.Set("Accept-Encoding", "gzip")
+	ctx.Request.Header.Set("X-Forwarded-For", "127.0.0.1")
+	ctx.Request.Header.Set("Forwarded", "for=127.0.0.1")
 
 	info := &relaycommon.RelayInfo{
 		IsChannelTest: false,
@@ -205,6 +382,10 @@ func TestProcessHeaderOverride_PassthroughSkipsAcceptEncoding(t *testing.T) {
 
 	_, hasAcceptEncoding := headers["accept-encoding"]
 	require.False(t, hasAcceptEncoding)
+	_, hasXForwardedFor := headers["x-forwarded-for"]
+	require.False(t, hasXForwardedFor)
+	_, hasForwarded := headers["forwarded"]
+	require.False(t, hasForwarded)
 }
 
 func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.T) {

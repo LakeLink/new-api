@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -11,6 +12,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLogCleanupProgressDoesNotOverflow(t *testing.T) {
+	assert.Equal(t, 99, logCleanupProgress(math.MaxInt64-1, math.MaxInt64))
+	assert.Equal(t, 50, logCleanupProgress(math.MaxInt64/2, math.MaxInt64-1))
+	assert.Equal(t, 100, logCleanupProgress(math.MaxInt64, math.MaxInt64))
+}
 
 // withSystemTaskRegistry swaps the package registry for the given handlers for
 // the duration of a test and restores the original registry afterward.

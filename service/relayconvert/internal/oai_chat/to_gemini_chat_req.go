@@ -3,6 +3,7 @@ package oaichat
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -19,20 +20,44 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 	geminiRequest := dto.GeminiChatRequest{
 		Contents: make([]dto.GeminiChatContent, 0, len(textRequest.Messages)),
 		GenerationConfig: dto.GeminiChatGenerationConfig{
-			Temperature: textRequest.Temperature,
+			Temperature:      textRequest.Temperature,
+			TopP:             textRequest.TopP,
+			TopK:             textRequest.TopK,
+			MaxOutputTokens:  openAIChatMaxTokens(textRequest),
+			CandidateCount:   textRequest.N,
+			PresencePenalty:  textRequest.PresencePenalty,
+			FrequencyPenalty: textRequest.FrequencyPenalty,
+			ResponseLogprobs: textRequest.LogProbs,
 		},
 	}
+	if len(textRequest.ServiceTier) > 0 {
+		var serviceTier string
+		if err := common.Unmarshal(textRequest.ServiceTier, &serviceTier); err == nil {
+			if serviceTier, ok := sharedgemini.OpenAIServiceTierToGemini(serviceTier); ok {
+				geminiRequest.ServiceTier = common.GetPointer(serviceTier)
+			}
+		}
+	}
+	if len(textRequest.Store) > 0 {
+		var store bool
+		if err := common.Unmarshal(textRequest.Store, &store); err == nil {
+			geminiRequest.Store = common.GetPointer(store)
+		}
+	}
 
-	if textRequest.TopP != nil && *textRequest.TopP > 0 {
-		geminiRequest.GenerationConfig.TopP = common.GetPointer(*textRequest.TopP)
+	if textRequest.Seed != nil {
+		geminiRequest.GenerationConfig.Seed = common.GetPointer(*textRequest.Seed)
 	}
-	if maxTokens := textRequest.GetMaxTokens(); maxTokens > 0 {
-		geminiRequest.GenerationConfig.MaxOutputTokens = common.GetPointer(maxTokens)
+	if textRequest.TopLogProbs != nil {
+		if *textRequest.TopLogProbs < 0 || *textRequest.TopLogProbs > 20 {
+			return nil, errors.New("top_logprobs must be an integer between 0 and 20")
+		}
+		if textRequest.LogProbs == nil || !*textRequest.LogProbs {
+			return nil, errors.New("logprobs must be true when top_logprobs is set")
+		}
+		topLogProbs := int32(*textRequest.TopLogProbs)
+		geminiRequest.GenerationConfig.Logprobs = &topLogProbs
 	}
-	if textRequest.Seed != nil && *textRequest.Seed != 0 {
-		geminiRequest.GenerationConfig.Seed = common.GetPointer(int64(*textRequest.Seed))
-	}
-
 	upstreamModelName := textRequest.Model
 	if modelName := relaymeta.RelayInfoUpstreamModelName(info); modelName != "" {
 		upstreamModelName = modelName
@@ -75,9 +100,18 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 					if thinkingBudget, exists := thinkingConfig["thinking_budget"]; exists {
 						switch v := thinkingBudget.(type) {
 						case float64:
+							if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v ||
+								v < -1 || v > dto.MaxGeminiThinkingBudget {
+								return nil, fmt.Errorf(
+									"extra_body.google.thinking_config.thinking_budget must be an integer between -1 and %d",
+									dto.MaxGeminiThinkingBudget,
+								)
+							}
 							budgetInt := int(v)
 							tempThinkingConfig.ThinkingBudget = common.GetPointer(budgetInt)
-							tempThinkingConfig.IncludeThoughts = budgetInt > 0
+							if budgetInt > 0 {
+								tempThinkingConfig.IncludeThoughts = common.GetPointer(true)
+							}
 							hasThinkingConfig = true
 						default:
 							return nil, errors.New("extra_body.google.thinking_config.thinking_budget must be an integer")
@@ -86,7 +120,7 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 
 					if includeThoughts, exists := thinkingConfig["include_thoughts"]; exists {
 						if v, ok := includeThoughts.(bool); ok {
-							tempThinkingConfig.IncludeThoughts = v
+							tempThinkingConfig.IncludeThoughts = common.GetPointer(v)
 							hasThinkingConfig = true
 						} else {
 							return nil, errors.New("extra_body.google.thinking_config.include_thoughts must be a boolean")
@@ -108,7 +142,9 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 							if tempThinkingConfig.ThinkingBudget != nil {
 								geminiRequest.GenerationConfig.ThinkingConfig.ThinkingBudget = tempThinkingConfig.ThinkingBudget
 							}
-							geminiRequest.GenerationConfig.ThinkingConfig.IncludeThoughts = tempThinkingConfig.IncludeThoughts
+							if tempThinkingConfig.IncludeThoughts != nil {
+								geminiRequest.GenerationConfig.ThinkingConfig.IncludeThoughts = tempThinkingConfig.IncludeThoughts
+							}
 							if tempThinkingConfig.ThinkingLevel != "" {
 								geminiRequest.GenerationConfig.ThinkingConfig.ThinkingLevel = tempThinkingConfig.ThinkingLevel
 							}
@@ -213,7 +249,11 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 		geminiRequest.SetTools(geminiTools)
 
 		if textRequest.ToolChoice != nil {
-			geminiRequest.ToolConfig = sharedgemini.OpenAIToolChoiceToConfig(textRequest.ToolChoice)
+			toolConfig, err := sharedgemini.OpenAIToolChoiceToConfig(textRequest.ToolChoice)
+			if err != nil {
+				return nil, err
+			}
+			geminiRequest.ToolConfig = toolConfig
 		}
 	}
 
@@ -363,11 +403,11 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 				}
 				base64Data, mimeType, err := relaymedia.ResolveBase64Data(c, source, "formatting image for Gemini")
 				if err != nil {
-					return nil, fmt.Errorf("get file data from '%s' failed: %w", source.GetIdentifier(), err)
+					return nil, fmt.Errorf("get file data from '%s' failed: %w", common.MaskSensitiveInfo(source.GetIdentifier()), err)
 				}
 
 				if _, ok := sharedgemini.SupportedMimeTypes[strings.ToLower(mimeType)]; !ok {
-					return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, source.GetIdentifier(), sharedgemini.SupportedMimeTypesList())
+					return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, common.MaskSensitiveInfo(source.GetIdentifier()), sharedgemini.SupportedMimeTypesList())
 				}
 
 				parts = append(parts, dto.GeminiPart{

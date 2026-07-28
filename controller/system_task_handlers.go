@@ -37,10 +37,7 @@ func (channelTestHandler) Enabled() bool {
 
 func (channelTestHandler) Interval() time.Duration {
 	minutes := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
-	if minutes <= 0 {
-		minutes = 10
-	}
-	return time.Duration(minutes * float64(time.Minute))
+	return common.SafeFloatIntervalDuration(minutes, time.Minute, 10*time.Minute, "channel test")
 }
 
 func (channelTestHandler) NewPayload() any { return nil }
@@ -83,10 +80,12 @@ func (modelUpdateHandler) Interval() time.Duration {
 		"CHANNEL_UPSTREAM_MODEL_UPDATE_TASK_INTERVAL_MINUTES",
 		channelUpstreamModelUpdateTaskDefaultIntervalMinutes,
 	)
-	if intervalMinutes < 1 {
-		intervalMinutes = channelUpstreamModelUpdateTaskDefaultIntervalMinutes
-	}
-	return time.Duration(intervalMinutes) * time.Minute
+	return common.SafeIntervalDuration(
+		intervalMinutes,
+		time.Minute,
+		channelUpstreamModelUpdateTaskDefaultIntervalMinutes*time.Minute,
+		"upstream model update",
+	)
 }
 
 func (modelUpdateHandler) NewPayload() any { return nil }
@@ -120,7 +119,17 @@ type midjourneyPollHandler struct{}
 func (midjourneyPollHandler) Type() string { return model.SystemTaskTypeMidjourneyPoll }
 
 func (midjourneyPollHandler) Enabled() bool {
-	return constant.UpdateTask && model.HasUnfinishedMidjourneyTasks()
+	if !constant.UpdateTask {
+		return false
+	}
+	unfinished, err := model.HasUnfinishedMidjourneyTasks()
+	if err != nil {
+		common.SysLog(fmt.Sprintf("midjourney polling enablement query failed: %v", err))
+		// Schedule a pass so the database error is persisted on a failed task
+		// instead of being mistaken for an idle queue.
+		return true
+	}
+	return unfinished
 }
 
 func (midjourneyPollHandler) Interval() time.Duration { return 15 * time.Second }
@@ -128,7 +137,11 @@ func (midjourneyPollHandler) Interval() time.Duration { return 15 * time.Second 
 func (midjourneyPollHandler) NewPayload() any { return nil }
 
 func (midjourneyPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary := runMidjourneyTaskUpdateOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	summary, err := runMidjourneyTaskUpdateOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
@@ -140,7 +153,17 @@ type asyncTaskPollHandler struct{}
 func (asyncTaskPollHandler) Type() string { return model.SystemTaskTypeAsyncTaskPoll }
 
 func (asyncTaskPollHandler) Enabled() bool {
-	return constant.UpdateTask && model.HasUnfinishedSyncTasks()
+	if !constant.UpdateTask {
+		return false
+	}
+	unfinished, err := model.HasUnfinishedSyncTasks()
+	if err != nil {
+		common.SysLog(fmt.Sprintf("async task polling enablement query failed: %v", err))
+		// Schedule a pass so the database error is persisted on a failed task
+		// instead of being mistaken for an idle queue.
+		return true
+	}
+	return unfinished
 }
 
 func (asyncTaskPollHandler) Interval() time.Duration { return 15 * time.Second }
@@ -148,7 +171,11 @@ func (asyncTaskPollHandler) Interval() time.Duration { return 15 * time.Second }
 func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	summary, err := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

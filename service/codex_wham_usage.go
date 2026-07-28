@@ -4,13 +4,25 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/google/uuid"
 )
+
+const maxCodexWhamResponseBytes int64 = 4 << 20
+
+func readCodexWhamResponse(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("empty Codex usage response")
+	}
+	body, err := ReadResponseBodyWithLimit(resp.Body, maxCodexWhamResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("Codex usage %w", err)
+	}
+	return body, nil
+}
 
 func FetchCodexWhamUsage(
 	ctx context.Context,
@@ -37,17 +49,17 @@ func FetchCodexWhamUsage(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bu+"/backend-api/wham/usage", nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("create Codex usage request: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	setCodexWhamRequestHeaders(req, at, aid)
 
-	resp, err := client.Do(req)
+	resp, err := DoUpstreamRequest(client, req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("Codex usage request failed: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	defer resp.Body.Close()
 
-	body, err = io.ReadAll(resp.Body)
+	body, err = readCodexWhamResponse(resp)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}
@@ -79,17 +91,17 @@ func FetchCodexWhamRateLimitResetCredits(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bu+"/backend-api/wham/rate-limit-reset-credits", nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("create Codex credits request: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	setCodexWhamRequestHeaders(req, at, aid)
 
-	resp, err := client.Do(req)
+	resp, err := DoUpstreamRequest(client, req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("Codex credits request failed: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	defer resp.Body.Close()
 
-	body, err = io.ReadAll(resp.Body)
+	body, err = readCodexWhamResponse(resp)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}
@@ -123,7 +135,7 @@ func ConsumeCodexWhamRateLimitResetCredit(
 		"redeem_request_id": uuid.NewString(),
 	})
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("marshal Codex credit consumption request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -133,18 +145,18 @@ func ConsumeCodexWhamRateLimitResetCredit(
 		bytes.NewReader(requestBody),
 	)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("create Codex credit consumption request: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	setCodexWhamRequestHeaders(req, at, aid)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := DoUpstreamRequest(client, req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("Codex credit consumption request failed: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	defer resp.Body.Close()
 
-	body, err = io.ReadAll(resp.Body)
+	body, err = readCodexWhamResponse(resp)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}

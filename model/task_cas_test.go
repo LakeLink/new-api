@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,20 +39,28 @@ func TestMain(m *testing.M) {
 	if err := db.AutoMigrate(
 		&Task{},
 		&User{},
+		&BrowserSession{},
+		&AffiliateReward{},
 		&Token{},
 		&Log{},
 		&Channel{},
 		&QuotaData{},
 		&Ability{},
+		&Model{},
+		&Vendor{},
 		&TopUp{},
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},
+		&SubscriptionProviderPayment{},
 		&UserSubscription{},
+		&SubscriptionPreConsumeRecord{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&BillingReservation{},
+		&TaskBillingFinalization{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -62,7 +72,9 @@ func truncateTables(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
 		DB.Exec("DELETE FROM tasks")
+		DB.Exec("DELETE FROM browser_sessions")
 		DB.Exec("DELETE FROM users")
+		DB.Exec("DELETE FROM affiliate_rewards")
 		DB.Exec("DELETE FROM tokens")
 		DB.Exec("DELETE FROM logs")
 		DB.Exec("DELETE FROM channels")
@@ -70,13 +82,17 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM abilities")
 		DB.Exec("DELETE FROM top_ups")
 		DB.Exec("DELETE FROM subscription_orders")
+		DB.Exec("DELETE FROM subscription_provider_payments")
 		DB.Exec("DELETE FROM subscription_plans")
+		DB.Exec("DELETE FROM subscription_pre_consume_records")
 		DB.Exec("DELETE FROM user_subscriptions")
 		DB.Exec("DELETE FROM user_oauth_bindings")
 		DB.Exec("DELETE FROM perf_metrics")
 		DB.Exec("DELETE FROM system_instances")
 		DB.Exec("DELETE FROM system_task_locks")
 		DB.Exec("DELETE FROM system_tasks")
+		DB.Exec("DELETE FROM billing_reservations")
+		DB.Exec("DELETE FROM task_billing_finalizations")
 	})
 }
 
@@ -149,6 +165,46 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 	assert.Equal(t, task.FailReason, snap.FailReason)
 	assert.Equal(t, task.PrivateData.ResultURL, snap.ResultURL)
 	assert.JSONEq(t, string(task.Data), string(snap.Data))
+}
+
+func TestInitTaskSnapshotsSelectedPollingRouteForEveryProvider(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		UserId:     17,
+		UsingGroup: "default",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:    constant.ChannelTypeKling,
+			ChannelId:      23,
+			ChannelBaseUrl: "https://accepted-provider.example",
+			ApiKey:         "accepted-selected-key",
+		},
+	}
+
+	task := InitTask(constant.TaskPlatform("kling"), info)
+
+	assert.Equal(t, 1, task.PrivateData.RoutingSnapshotVersion)
+	assert.Equal(t, "accepted-selected-key", task.PrivateData.Key)
+	assert.Equal(t, constant.ChannelTypeKling, task.PrivateData.ChannelType)
+	assert.Equal(t, "https://accepted-provider.example", task.PrivateData.ChannelBaseURL)
+}
+
+func TestGetByTaskIdRejectsAmbiguousLegacyProviderIDs(t *testing.T) {
+	truncateTables(t)
+
+	for _, channelID := range []int{31, 32} {
+		insertTask(t, &Task{
+			TaskID:    "legacy-account-scoped-id",
+			UserId:    17,
+			ChannelId: channelID,
+			Status:    TaskStatusInProgress,
+			Data:      json.RawMessage(`{}`),
+		})
+	}
+
+	task, exists, err := GetByTaskId(17, "legacy-account-scoped-id")
+
+	require.ErrorContains(t, err, "ambiguous")
+	assert.False(t, exists)
+	assert.Nil(t, task)
 }
 
 // ---------------------------------------------------------------------------

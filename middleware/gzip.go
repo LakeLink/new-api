@@ -4,7 +4,9 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -24,7 +26,7 @@ func (rc *readCloser) Close() error {
 
 func DecompressRequestMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Body == nil || c.Request.Method == http.MethodGet {
+		if c.Request.Body == nil {
 			c.Next()
 			return
 		}
@@ -32,7 +34,7 @@ func DecompressRequestMiddleware() gin.HandlerFunc {
 		if maxMB <= 0 {
 			maxMB = 32
 		}
-		maxBytes := int64(maxMB) << 20
+		maxBytes := common.BytesFromMegabytes(maxMB)
 		if c.Request.ContentLength > maxBytes {
 			_ = c.Request.Body.Close()
 			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
@@ -44,7 +46,8 @@ func DecompressRequestMiddleware() gin.HandlerFunc {
 			return http.MaxBytesReader(c.Writer, body, maxBytes)
 		}
 
-		switch c.GetHeader("Content-Encoding") {
+		contentEncoding := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Encoding")))
+		switch contentEncoding {
 		case "gzip":
 			gzipReader, err := gzip.NewReader(origBody)
 			if err != nil {
@@ -61,6 +64,8 @@ func DecompressRequestMiddleware() gin.HandlerFunc {
 				},
 			})
 			c.Request.Header.Del("Content-Encoding")
+			c.Request.Header.Del("Content-Length")
+			c.Request.ContentLength = -1
 		case "br":
 			reader := brotli.NewReader(origBody)
 			c.Request.Body = wrapMaxBytes(&readCloser{
@@ -70,9 +75,15 @@ func DecompressRequestMiddleware() gin.HandlerFunc {
 				},
 			})
 			c.Request.Header.Del("Content-Encoding")
-		default:
+			c.Request.Header.Del("Content-Length")
+			c.Request.ContentLength = -1
+		case "", "identity":
 			// Even for uncompressed bodies, enforce a max size to avoid huge request allocations.
 			c.Request.Body = wrapMaxBytes(origBody)
+		default:
+			_ = origBody.Close()
+			c.AbortWithStatus(http.StatusUnsupportedMediaType)
+			return
 		}
 
 		// Continue processing the request

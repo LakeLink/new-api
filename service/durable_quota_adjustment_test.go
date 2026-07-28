@@ -105,6 +105,49 @@ func TestApplyDurableQuotaAdjustmentPreservesSubscriptionFunding(t *testing.T) {
 	assert.Equal(t, int64(20), info.SubscriptionPostDelta)
 }
 
+func TestReverseDurableQuotaAdjustmentRestoresSubscriptionOverflowAndToken(t *testing.T) {
+	db := setupDurableBillingSessionTest(t)
+	user, token := createDurableBillingBalances(t, db, "legacy-subscription-reversal")
+	subscription := model.UserSubscription{
+		UserId:              user.Id,
+		AmountTotal:         100,
+		AmountUsed:          90,
+		AllowWalletOverflow: true,
+	}
+	require.NoError(t, db.Create(&subscription).Error)
+	info := &relaycommon.RelayInfo{
+		RequestId:      "legacy-subscription-reversal-request",
+		UserId:         user.Id,
+		TokenId:        token.Id,
+		BillingSource:  BillingSourceSubscription,
+		SubscriptionId: subscription.Id,
+	}
+
+	chargeResult, applied, err := ApplyDurableQuotaAdjustment(info, "midjourney-submit:IMAGINE", 30, 0, false)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, model.BillingAdjustmentResult{SubscriptionDelta: 10, WalletDelta: 20, TokenDelta: 30}, chargeResult)
+	reversalResult, applied, err := ReverseDurableQuotaAdjustment(info, "midjourney-submit:IMAGINE", "midjourney-failure-refund:2")
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, model.BillingAdjustmentResult{SubscriptionDelta: -10, WalletDelta: -20, TokenDelta: -30}, reversalResult)
+	duplicateResult, applied, err := ReverseDurableQuotaAdjustment(info, "midjourney-submit:IMAGINE", "another-failure-reason")
+	require.NoError(t, err)
+	assert.False(t, applied)
+	assert.True(t, duplicateResult.AlreadyProcessed)
+	assert.Equal(t, -10, duplicateResult.SubscriptionDelta)
+	assert.Equal(t, -20, duplicateResult.WalletDelta)
+	assert.Equal(t, -30, duplicateResult.TokenDelta)
+
+	require.NoError(t, db.First(&user, user.Id).Error)
+	require.NoError(t, db.First(&token, token.Id).Error)
+	require.NoError(t, db.First(&subscription, subscription.Id).Error)
+	assert.Equal(t, 900, user.Quota)
+	assert.Equal(t, 400, token.RemainQuota)
+	assert.Equal(t, 100, token.UsedQuota)
+	assert.Equal(t, int64(90), subscription.AmountUsed)
+}
+
 func TestApplyDurableQuotaAdjustmentRejectsPurposeReuseWithDifferentDelta(t *testing.T) {
 	db := setupDurableBillingSessionTest(t)
 	user, token := createDurableBillingBalances(t, db, "legacy-mismatch")

@@ -6,5 +6,5 @@ var WorkerValidKey = ""
 var WorkerAllowHttpImageRequestEnabled = false
 
 func EnableWorker() bool {
-	return WorkerUrl != ""
+	return GetWorkerSetting().URL != ""
 }

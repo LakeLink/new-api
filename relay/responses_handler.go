@@ -86,13 +86,35 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.ReaderOnly(storage)
+		if info.RelayMode == relayconstant.RelayModeResponses {
+			jsonData, err := storage.Bytes()
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+			}
+			jsonData, err = refreshFinalRequestBilling(c, info, types.RelayFormatOpenAIResponses, jsonData)
+			if err != nil {
+				return finalRequestBillingAPIError(err, false)
+			}
+			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer closer.Close()
+			info.UpstreamRequestBodySize = size
+			requestBody = body
+		} else {
+			requestBody = common.ReaderOnly(storage)
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if err := validateConvertedRequest(convertedRequest); err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+		finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -112,7 +134,16 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
+		if info.RelayMode == relayconstant.RelayModeResponses {
+			jsonData, err = refreshFinalRequestBilling(c, info, finalRequestFormat, jsonData)
+			if err != nil {
+				return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+			}
+		} else if err := validateFinalBillableScalars(jsonData); err != nil {
+			return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+		}
+
+		logger.LogDebug(c, "Responses upstream request prepared: bytes=%d", len(jsonData))
 		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -132,7 +163,10 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		httpResp, newAPIError = adaptorHTTPResponse(resp)
+		if newAPIError != nil {
+			return newAPIError
+		}
 
 		if httpResp.StatusCode != http.StatusOK {
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
@@ -149,7 +183,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return newAPIError
 	}
 
-	usageDto := usage.(*dto.Usage)
+	usageDto := adaptorTextUsage(usage)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData

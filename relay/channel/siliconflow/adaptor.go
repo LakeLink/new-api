@@ -19,6 +19,20 @@ import (
 
 const siliconFlowBatchSizeModel = "Kwai-Kolors/Kolors"
 
+// ValidateImageBatchSize enforces SiliconFlow's native image batch contract.
+func ValidateImageBatchSize(model string, batchSize *uint) error {
+	if batchSize == nil {
+		return nil
+	}
+	if *batchSize < 1 || *batchSize > dto.MaxSiliconFlowImageBatchSize {
+		return fmt.Errorf("batch_size must be an integer between 1 and %d for SiliconFlow", dto.MaxSiliconFlowImageBatchSize)
+	}
+	if *batchSize > 1 && model != siliconFlowBatchSizeModel {
+		return fmt.Errorf("batch_size greater than 1 is only supported for %s", siliconFlowBatchSizeModel)
+	}
+	return nil
+}
+
 type Adaptor struct {
 }
 
@@ -57,14 +71,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		sfRequest.BatchSize = request.N
 	}
 	if sfRequest.BatchSize != nil {
-		batchSize := *sfRequest.BatchSize
-		if batchSize < 1 || batchSize > dto.MaxImageN || batchSize > dto.MaxSiliconFlowImageBatchSize {
-			return nil, fmt.Errorf("batch_size must be an integer between 1 and %d for SiliconFlow", dto.MaxSiliconFlowImageBatchSize)
+		if err := ValidateImageBatchSize(sfRequest.Model, sfRequest.BatchSize); err != nil {
+			return nil, err
 		}
+		batchSize := *sfRequest.BatchSize
 		if sfRequest.Model != siliconFlowBatchSizeModel {
-			if batchSize > 1 {
-				return nil, fmt.Errorf("batch_size greater than 1 is only supported for %s", siliconFlowBatchSizeModel)
-			}
 			sfRequest.BatchSize = nil
 			return sfRequest, nil
 		}

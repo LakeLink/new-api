@@ -122,6 +122,47 @@ func TestValidateRedirectURL(t *testing.T) {
 	}
 }
 
+func TestParseAbsoluteHTTPURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantURL string
+	}{
+		{
+			name:    "absolute HTTPS URL",
+			rawURL:  "HTTPS://notify.example.com/hooks/123?event=quota",
+			wantURL: "https://notify.example.com/hooks/123?event=quota",
+		},
+		{
+			name:    "Bark template URL",
+			rawURL:  "https://api.day.app/key/{{title}}/{{content}}",
+			wantURL: "https://api.day.app/key/%7B%7Btitle%7D%7D/%7B%7Bcontent%7D%7D",
+		},
+		{name: "empty URL"},
+		{name: "relative URL", rawURL: "/hooks/123"},
+		{name: "missing host", rawURL: "https:///hooks/123"},
+		{name: "out of range port", rawURL: "https://notify.example.com:65536/hooks/123"},
+		{name: "non HTTP scheme", rawURL: "gopher://notify.example.com/hooks/123"},
+		{name: "embedded credentials", rawURL: "https://user:secret@notify.example.com/hooks/123"},
+		{name: "fragment", rawURL: "https://notify.example.com/hooks/123#ignored"},
+		{name: "surrounding whitespace", rawURL: " https://notify.example.com/hooks/123"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := ParseAbsoluteHTTPURL(test.rawURL)
+			if test.wantURL == "" {
+				require.Error(t, err)
+				assert.Nil(t, parsed)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, parsed)
+			assert.Equal(t, test.wantURL, parsed.String())
+		})
+	}
+}
+
 func resetSessionCookieSettingsAfterTest(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {

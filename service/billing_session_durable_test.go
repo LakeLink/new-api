@@ -30,7 +30,18 @@ func setupDurableBillingSessionTest(t *testing.T) *gorm.DB {
 	model.DB = db
 	model.LOG_DB = db
 	common.RedisEnabled = false
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSubscription{}, &model.SystemTask{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.User{},
+		&model.Token{},
+		&model.UserSubscription{},
+		&model.SubscriptionPreConsumeRecord{},
+		&model.SystemTask{},
+		&model.BillingReservation{},
+		&model.TaskBillingFinalization{},
+		&model.QuotaData{},
+		&model.Log{},
+		&model.Channel{},
+	))
 	t.Cleanup(func() {
 		model.DB = oldDB
 		model.LOG_DB = oldLogDB
@@ -74,6 +85,14 @@ func TestBillingSessionSettlePersistsAtomicAdjustment(t *testing.T) {
 	assert.Equal(t, 370, token.RemainQuota)
 	assert.Equal(t, 130, token.UsedQuota)
 	assert.False(t, session.NeedsRefund())
+}
+
+func TestBillingSessionSettleRejectsQuotaOutsideStorageRange(t *testing.T) {
+	session := &BillingSession{}
+
+	err := session.Settle(common.MaxQuota + 1)
+
+	require.ErrorContains(t, err, "outside storage range")
 }
 
 func TestBillingSessionSettleReportsSubscriptionWalletOverflow(t *testing.T) {

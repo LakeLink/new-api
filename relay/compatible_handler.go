@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/xai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -49,7 +50,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	includeUsage := true
 	// 判断用户是否需要返回使用情况
 	if request.StreamOptions != nil {
-		includeUsage = request.StreamOptions.IncludeUsage
+		includeUsage = lo.FromPtrOr(request.StreamOptions.IncludeUsage, false)
 	}
 
 	convertNonStreamUpstreamStream := info.RelayMode == relayconstant.RelayModeChatCompletions &&
@@ -70,7 +71,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		// 如果支持StreamOptions，且请求中没有设置StreamOptions，根据配置文件设置StreamOptions
 		if constant.ForceStreamOption || convertNonStreamUpstreamStream {
 			request.StreamOptions = &dto.StreamOptions{
-				IncludeUsage: true,
+				IncludeUsage: common.GetPointer(true),
 			}
 		}
 	}
@@ -92,6 +93,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if newApiErr != nil {
 			return newApiErr
 		}
+		if info.ChannelType == constant.ChannelTypeXai {
+			xai.ApplyXAIUsagePricing(info, usage)
+		}
 
 		var containAudioTokens = usage.CompletionTokenDetails.AudioTokens > 0 || usage.PromptTokensDetails.AudioTokens > 0
 		var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
@@ -111,10 +115,20 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
+		jsonData, err := storage.Bytes()
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		jsonData, err = refreshFinalRequestBilling(c, info, types.RelayFormatOpenAI, jsonData)
+		if err != nil {
+			return finalRequestBillingAPIError(err, false)
+		}
 		if common.DebugEnabled {
-			if debugBytes, bErr := storage.Bytes(); bErr == nil {
-				logger.LogDebug(c, "requestBody: %s", debugBytes)
-			}
+			logger.LogDebug(
+				c,
+				"OpenAI-compatible upstream request prepared: bytes=%d",
+				len(jsonData),
+			)
 		}
 		requestBody = common.ReaderOnly(storage)
 	} else {
@@ -122,7 +136,11 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		if err := validateConvertedRequest(convertedRequest); err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+		finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 
 		if info.ChannelSetting.SystemPrompt != "" {
 			// 如果有系统提示，则将其添加到请求中
@@ -184,8 +202,19 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		jsonData, err = refreshFinalRequestBilling(c, info, finalRequestFormat, jsonData)
+		if err != nil {
+			return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+		}
+		if _, err := refreshFinalImagenRequest(info, jsonData); err != nil {
+			errorCode := types.ErrorCodeConvertRequestFailed
+			if len(info.ParamOverride) > 0 {
+				errorCode = types.ErrorCodeChannelParamOverrideInvalid
+			}
+			return types.NewErrorWithStatusCode(err, errorCode, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
 
-		logger.LogDebug(c, "text request body: %s", jsonData)
+		logger.LogDebug(c, "text upstream request prepared: bytes=%d", len(jsonData))
 
 		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
@@ -206,7 +235,11 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		var responseErr *types.NewAPIError
+		httpResp, responseErr = adaptorHTTPResponse(resp)
+		if responseErr != nil {
+			return responseErr
+		}
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
 		if httpResp.StatusCode != http.StatusOK {
 			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
@@ -223,13 +256,15 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return newApiErr
 	}
 
-	var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+	usageDto := adaptorTextUsage(usage)
+	var containAudioTokens = usageDto != nil &&
+		(usageDto.CompletionTokenDetails.AudioTokens > 0 || usageDto.PromptTokensDetails.AudioTokens > 0)
 	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
 
 	if containAudioTokens && containsAudioRatios {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+		service.PostAudioConsumeQuota(c, info, usageDto, "")
 	} else {
-		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
 }

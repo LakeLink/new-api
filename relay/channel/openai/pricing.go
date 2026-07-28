@@ -15,6 +15,9 @@ import (
 // built-in OpenAI prices: administrator-defined fixed or token ratios remain
 // authoritative.
 func applyOpenAIUsagePricing(info *relaycommon.RelayInfo, usage *dto.Usage, actualServiceTier string) {
+	if usage != nil {
+		usage.ActualServiceTier = actualServiceTier
+	}
 	if info == nil || usage == nil || info.ChannelType != constant.ChannelTypeOpenAI || info.PriceData.UsePrice || info.TieredBillingSnapshot != nil {
 		return
 	}
@@ -37,7 +40,15 @@ func applyOpenAIUsagePricing(info *relaycommon.RelayInfo, usage *dto.Usage, actu
 				info.PriceData.CacheCreation5mRatio = info.PriceData.CacheCreationRatio
 			}
 		}
+		// OpenAI does not support Priority processing for long-context
+		// requests, so the >272K multiplier cannot compose with this tier.
 		return
+	}
+
+	if strings.EqualFold(actualServiceTier, "flex") {
+		// Flex token prices match Batch prices: half the standard rate.
+		// Relative output and cache ratios stay unchanged.
+		info.PriceData.ModelRatio *= 0.5
 	}
 
 	if usage.PromptTokens <= ratio_setting.OpenAILongContextThreshold || !ratio_setting.IsOpenAILongContextModel(info.OriginModelName) {
@@ -49,6 +60,15 @@ func applyOpenAIUsagePricing(info *relaycommon.RelayInfo, usage *dto.Usage, actu
 	// completion ratio by 0.75 expresses those two independent multipliers.
 	info.PriceData.ModelRatio *= 2
 	info.PriceData.CompletionRatio *= 0.75
+}
+
+func preserveProviderUsageMetadata(destination, source *dto.Usage) {
+	if destination == nil || source == nil {
+		return
+	}
+	destination.Cost = source.Cost
+	destination.CostInUSDTicks = source.CostInUSDTicks
+	destination.ActualServiceTier = source.ActualServiceTier
 }
 
 func lastStreamResponseServiceTier(data string) string {

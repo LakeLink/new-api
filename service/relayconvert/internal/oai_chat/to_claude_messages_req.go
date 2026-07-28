@@ -3,6 +3,7 @@ package oaichat
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -26,33 +27,46 @@ const (
 type openRouterRequestReasoning struct {
 	Enabled   bool   `json:"enabled"`
 	Effort    string `json:"effort,omitempty"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
+	MaxTokens *int   `json:"max_tokens,omitempty"`
 	Exclude   bool   `json:"exclude,omitempty"`
+}
+
+// openAIChatMaxTokens preserves which optional max-token field the client
+// supplied, including an explicit zero. max_completion_tokens is the newer
+// field and takes precedence when both are present.
+func openAIChatMaxTokens(request dto.GeneralOpenAIRequest) *uint {
+	if request.MaxCompletionTokens != nil {
+		return request.MaxCompletionTokens
+	}
+	return request.MaxTokens
 }
 
 func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
 	claudeTools := make([]any, 0, len(textRequest.Tools))
 
-	for _, tool := range textRequest.Tools {
-		if params, ok := tool.Function.Parameters.(map[string]any); ok {
-			claudeTool := dto.Tool{
-				Name:        tool.Function.Name,
-				Description: tool.Function.Description,
-			}
-			claudeTool.InputSchema = make(map[string]interface{})
-			if params["type"] != nil {
-				claudeTool.InputSchema["type"] = params["type"].(string)
-			}
-			claudeTool.InputSchema["properties"] = params["properties"]
-			claudeTool.InputSchema["required"] = params["required"]
-			for key, value := range params {
-				if key == "type" || key == "properties" || key == "required" {
-					continue
-				}
-				claudeTool.InputSchema[key] = value
-			}
-			claudeTools = append(claudeTools, &claudeTool)
+	for index, tool := range textRequest.Tools {
+		if tool.Type != "" && tool.Type != "function" {
+			return nil, fmt.Errorf("tools[%d].type %q is not supported by Claude Messages", index, tool.Type)
 		}
+		inputSchema := map[string]any{"type": "object"}
+		if tool.Function.Parameters != nil {
+			var err error
+			inputSchema, err = common.Any2Type[map[string]any](tool.Function.Parameters)
+			if err != nil || inputSchema == nil {
+				return nil, fmt.Errorf("tools[%d].function.parameters must be a JSON object", index)
+			}
+			schemaType, exists := inputSchema["type"]
+			if !exists || schemaType == nil {
+				inputSchema["type"] = "object"
+			} else if schemaTypeString, ok := schemaType.(string); !ok || schemaTypeString != "object" {
+				return nil, fmt.Errorf("tools[%d].function.parameters.type must be object", index)
+			}
+		}
+		claudeTools = append(claudeTools, &dto.Tool{
+			Name:        tool.Function.Name,
+			Description: tool.Function.Description,
+			InputSchema: inputSchema,
+		})
 	}
 
 	if textRequest.WebSearchOptions != nil {
@@ -89,11 +103,11 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 
 		switch textRequest.WebSearchOptions.SearchContextSize {
 		case "low":
-			webSearchTool.MaxUses = webSearchMaxUsesLow
-		case "medium":
-			webSearchTool.MaxUses = webSearchMaxUsesMedium
+			webSearchTool.MaxUses = common.GetPointer(uint(webSearchMaxUsesLow))
+		case "", "medium":
+			webSearchTool.MaxUses = common.GetPointer(uint(webSearchMaxUsesMedium))
 		case "high":
-			webSearchTool.MaxUses = webSearchMaxUsesHigh
+			webSearchTool.MaxUses = common.GetPointer(uint(webSearchMaxUsesHigh))
 		}
 
 		claudeTools = append(claudeTools, &webSearchTool)
@@ -103,13 +117,9 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		Model:         textRequest.Model,
 		StopSequences: nil,
 		Temperature:   textRequest.Temperature,
+		MaxTokens:     openAIChatMaxTokens(textRequest),
+		TopP:          textRequest.TopP,
 		Tools:         claudeTools,
-	}
-	if maxTokens := textRequest.GetMaxTokens(); maxTokens > 0 {
-		claudeRequest.MaxTokens = common.GetPointer(maxTokens)
-	}
-	if textRequest.TopP != nil {
-		claudeRequest.TopP = common.GetPointer(*textRequest.TopP)
 	}
 	if textRequest.TopK != nil {
 		claudeRequest.TopK = common.GetPointer(*textRequest.TopK)
@@ -125,22 +135,20 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		}
 	}
 
-	if claudeRequest.MaxTokens == nil || *claudeRequest.MaxTokens == 0 {
+	if claudeRequest.MaxTokens == nil {
 		defaultMaxTokens := uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(textRequest.Model))
 		claudeRequest.MaxTokens = &defaultMaxTokens
 	}
 
-	if baseModel, effortLevel, ok := reasoning.TrimEffortSuffix(textRequest.Model); ok && effortLevel != "" &&
-		(strings.HasPrefix(textRequest.Model, "claude-opus-4-6") ||
-			strings.HasPrefix(textRequest.Model, "claude-opus-4-7") ||
-			strings.HasPrefix(textRequest.Model, "claude-opus-4-8")) {
+	if baseModel, effortLevel, ok := reasoning.ParseClaudeEffortSuffix(textRequest.Model); ok &&
+		(strings.HasPrefix(baseModel, "claude-opus-4-6") ||
+			reasoning.IsClaudeAdaptiveThinkingOnlyModel(baseModel)) {
 		claudeRequest.Model = baseModel
 		claudeRequest.Thinking = &dto.Thinking{
 			Type: "adaptive",
 		}
 		claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
-		if strings.HasPrefix(baseModel, "claude-opus-4-7") ||
-			strings.HasPrefix(baseModel, "claude-opus-4-8") {
+		if reasoning.IsClaudeSamplingRestrictedModel(baseModel) {
 			claudeRequest.Thinking.Display = "summarized"
 			claudeRequest.Temperature = nil
 			claudeRequest.TopP = nil
@@ -153,8 +161,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		strings.HasSuffix(textRequest.Model, "-thinking") {
 
 		trimmedModel := strings.TrimSuffix(textRequest.Model, "-thinking")
-		if strings.HasPrefix(trimmedModel, "claude-opus-4-7") ||
-			strings.HasPrefix(trimmedModel, "claude-opus-4-8") {
+		if reasoning.IsClaudeAdaptiveThinkingOnlyModel(trimmedModel) {
 			claudeRequest.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
 			claudeRequest.OutputConfig = json.RawMessage(`{"effort":"high"}`)
 			claudeRequest.Temperature = nil
@@ -167,7 +174,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 
 			claudeRequest.Thinking = &dto.Thinking{
 				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](int(float64(*claudeRequest.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)),
+				BudgetTokens: common.GetPointer(model_setting.GetClaudeSettings().GetThinkingBudgetTokens(*claudeRequest.MaxTokens)),
 			}
 			claudeRequest.TopP = nil
 			claudeRequest.Temperature = common.GetPointer[float64](1.0)
@@ -178,21 +185,31 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 	}
 
 	if textRequest.ReasoningEffort != "" {
-		switch textRequest.ReasoningEffort {
-		case "low":
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](1280),
+		if reasoning.IsClaudeAdaptiveThinkingOnlyModel(claudeRequest.Model) {
+			if textRequest.ReasoningEffort == "none" && !reasoning.IsClaudeAlwaysThinkingModel(claudeRequest.Model) {
+				claudeRequest.Thinking = &dto.Thinking{Type: "disabled"}
+				claudeRequest.OutputConfig = nil
+			} else if reasoning.IsClaudeEffortLevel(textRequest.ReasoningEffort) {
+				claudeRequest.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
+				claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, textRequest.ReasoningEffort))
 			}
-		case "medium":
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](2048),
-			}
-		case "high":
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](4096),
+		} else {
+			switch textRequest.ReasoningEffort {
+			case "low":
+				claudeRequest.Thinking = &dto.Thinking{
+					Type:         "enabled",
+					BudgetTokens: common.GetPointer[int](1280),
+				}
+			case "medium":
+				claudeRequest.Thinking = &dto.Thinking{
+					Type:         "enabled",
+					BudgetTokens: common.GetPointer[int](2048),
+				}
+			case "high":
+				claudeRequest.Thinking = &dto.Thinking{
+					Type:         "enabled",
+					BudgetTokens: common.GetPointer[int](4096),
+				}
 			}
 		}
 	}
@@ -203,25 +220,52 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 			return nil, err
 		}
 
-		budgetTokens := reasoningConfig.MaxTokens
-		if budgetTokens > 0 {
+		if reasoning.IsClaudeAdaptiveThinkingOnlyModel(claudeRequest.Model) &&
+			(reasoning.IsClaudeEffortLevel(reasoningConfig.Effort) || reasoningConfig.MaxTokens != nil) {
+			effort := reasoningConfig.Effort
+			if !reasoning.IsClaudeEffortLevel(effort) {
+				effort = "high"
+			}
+			claudeRequest.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
+			claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effort))
+		} else if reasoningConfig.MaxTokens != nil {
 			claudeRequest.Thinking = &dto.Thinking{
 				Type:         "enabled",
-				BudgetTokens: &budgetTokens,
+				BudgetTokens: reasoningConfig.MaxTokens,
 			}
 		}
+	}
+
+	if reasoning.IsClaudeSamplingRestrictedModel(claudeRequest.Model) {
+		claudeRequest.Temperature = nil
+		claudeRequest.TopP = nil
+		claudeRequest.TopK = nil
 	}
 
 	if textRequest.Stop != nil {
 		switch stop := textRequest.Stop.(type) {
 		case string:
 			claudeRequest.StopSequences = []string{stop}
-		case []interface{}:
-			stopSequences := make([]string, 0)
-			for _, item := range stop {
-				stopSequences = append(stopSequences, item.(string))
+		case []string:
+			if len(stop) > 4 {
+				return nil, errors.New("stop must contain at most 4 sequences")
+			}
+			claudeRequest.StopSequences = append([]string(nil), stop...)
+		case []any:
+			if len(stop) > 4 {
+				return nil, errors.New("stop must contain at most 4 sequences")
+			}
+			stopSequences := make([]string, 0, len(stop))
+			for index, item := range stop {
+				value, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("stop[%d] must be a string", index)
+				}
+				stopSequences = append(stopSequences, value)
 			}
 			claudeRequest.StopSequences = stopSequences
+		default:
+			return nil, errors.New("stop must be a string or an array of strings")
 		}
 	}
 
@@ -405,7 +449,11 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 					inputObj := make(map[string]any)
 					if args := toolCall.Function.Arguments; args != "" {
 						if err := common.Unmarshal([]byte(args), &inputObj); err != nil {
-							common.SysLog("tool call function arguments is not a map[string]any: " + fmt.Sprintf("%v", toolCall.Function.Arguments))
+							common.SysLog(fmt.Sprintf(
+								"failed to decode tool call arguments as an object: bytes=%d, error=%v",
+								len(args),
+								err,
+							))
 						}
 					}
 					claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{

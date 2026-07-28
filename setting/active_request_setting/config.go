@@ -25,5 +25,5 @@ func init() {
 
 // GetActiveRequestSetting returns the current active request setting.
 func GetActiveRequestSetting() *ActiveRequestSetting {
-	return &activeRequestSetting
+	return config.Snapshot[ActiveRequestSetting]("active_request_setting")
 }

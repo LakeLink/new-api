@@ -1,17 +1,20 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type wechatLoginResponse struct {
@@ -20,30 +23,38 @@ type wechatLoginResponse struct {
 	Data    string `json:"data"`
 }
 
-func getWeChatIdByCode(code string) (string, error) {
+const maxWeChatAuthResponseBytes int64 = 1 << 20
+
+func getWeChatIdByCode(ctx context.Context, code string) (string, error) {
 	if code == "" {
 		return "", errors.New("无效的参数")
 	}
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/wechat/user?code=%s", common.WeChatServerAddress, url.QueryEscape(code)), nil)
+	serverAddress := common.GetLegacyOptionString("WeChatServerAddress", &common.WeChatServerAddress)
+	serverToken := common.GetLegacyOptionString("WeChatServerToken", &common.WeChatServerToken)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/api/wechat/user?code=%s", serverAddress, url.QueryEscape(code)), nil)
 	if err != nil {
-		return "", err
+		return "", errors.New("微信认证服务配置无效")
 	}
-	req.Header.Set("Authorization", common.WeChatServerToken)
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	httpResponse, err := client.Do(req)
+	req.Header.Set("Authorization", serverToken)
+	client := service.GetHttpClientWithTimeout(5 * time.Second)
+	httpResponse, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
-		return "", err
+		return "", errors.New("微信认证服务暂时不可用")
 	}
 	defer httpResponse.Body.Close()
+	if httpResponse.StatusCode < http.StatusOK || httpResponse.StatusCode >= http.StatusMultipleChoices {
+		return "", errors.New("微信认证服务暂时不可用")
+	}
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxWeChatAuthResponseBytes+1))
+	if err != nil || int64(len(body)) > maxWeChatAuthResponseBytes {
+		return "", errors.New("微信认证服务返回了无效响应")
+	}
 	var res wechatLoginResponse
-	err = common.DecodeJson(httpResponse.Body, &res)
-	if err != nil {
-		return "", err
+	if err := common.Unmarshal(body, &res); err != nil {
+		return "", errors.New("微信认证服务返回了无效响应")
 	}
 	if !res.Success {
-		return "", errors.New(res.Message)
+		return "", errors.New("验证码错误或已过期")
 	}
 	if res.Data == "" {
 		return "", errors.New("验证码错误或已过期")
@@ -52,15 +63,22 @@ func getWeChatIdByCode(code string) (string, error) {
 }
 
 func WeChatAuth(c *gin.Context) {
-	if !common.WeChatAuthEnabled {
+	if !common.GetLegacyOptionBool("WeChatAuthEnabled", &common.WeChatAuthEnabled) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "管理员未开启通过微信登录以及注册",
 			"success": false,
 		})
 		return
 	}
-	code := c.Query("code")
-	wechatId, err := getWeChatIdByCode(code)
+	var req wechatBindRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": "无效的参数",
+			"success": false,
+		})
+		return
+	}
+	wechatId, err := getWeChatIdByCode(c.Request.Context(), req.Code)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"message": err.Error(),
@@ -71,7 +89,12 @@ func WeChatAuth(c *gin.Context) {
 	user := model.User{
 		WeChatId: wechatId,
 	}
-	if model.IsWeChatIdAlreadyTaken(wechatId) {
+	taken, err := model.IsWeChatIdAlreadyTaken(wechatId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if taken {
 		err := user.FillUserByWeChatId()
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -88,18 +111,48 @@ func WeChatAuth(c *gin.Context) {
 			return
 		}
 	} else {
-		if common.RegisterEnabled {
-			user.Username = "wechat_" + strconv.Itoa(model.GetMaxUserId()+1)
+		if common.GetLegacyOptionBool("RegisterEnabled", &common.RegisterEnabled) {
+			user.Username = newOAuthUsername("wechat_")
 			user.DisplayName = "WeChat User"
 			user.Role = common.RoleCommonUser
 			user.Status = common.UserStatusEnabled
 
-			if err := user.Insert(0); err != nil {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": err.Error(),
-				})
-				return
+			err := model.DB.Transaction(func(tx *gorm.DB) error {
+				if err := user.InsertWithTx(tx, 0); err != nil {
+					return err
+				}
+				return model.BindBuiltInOAuthIdentityWithTx(
+					tx,
+					model.BuiltInOAuthProviderWeChat,
+					wechatId,
+					user.Id,
+				)
+			})
+			if err != nil {
+				var conflict *model.BuiltInOAuthIdentityConflictError
+				if errors.As(err, &conflict) {
+					winner := model.User{WeChatId: wechatId}
+					if fillErr := winner.FillUserByWeChatId(); fillErr != nil {
+						common.ApiError(c, fillErr)
+						return
+					}
+					if winner.Id == 0 {
+						c.JSON(http.StatusOK, gin.H{
+							"success": false,
+							"message": "用户已注销",
+						})
+						return
+					}
+					user = winner
+				} else {
+					c.JSON(http.StatusOK, gin.H{
+						"success": false,
+						"message": err.Error(),
+					})
+					return
+				}
+			} else {
+				user.FinalizeOAuthUserCreation(0)
 			}
 		} else {
 			c.JSON(http.StatusOK, gin.H{
@@ -125,7 +178,7 @@ type wechatBindRequest struct {
 }
 
 func WeChatBind(c *gin.Context) {
-	if !common.WeChatAuthEnabled {
+	if !common.GetLegacyOptionBool("WeChatAuthEnabled", &common.WeChatAuthEnabled) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "管理员未开启通过微信登录以及注册",
 			"success": false,
@@ -146,7 +199,7 @@ func WeChatBind(c *gin.Context) {
 		return
 	}
 	code := req.Code
-	wechatId, err := getWeChatIdByCode(code)
+	wechatId, err := getWeChatIdByCode(c.Request.Context(), code)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"message": err.Error(),
@@ -154,15 +207,26 @@ func WeChatBind(c *gin.Context) {
 		})
 		return
 	}
-	if model.IsWeChatIdAlreadyTaken(wechatId) {
+	taken, err := model.IsWeChatIdAlreadyTaken(wechatId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if taken {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "该微信账号已被绑定",
 		})
 		return
 	}
-	user.WeChatId = wechatId
-	err = user.Update(false)
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		return model.BindBuiltInOAuthIdentityWithTx(
+			tx,
+			model.BuiltInOAuthProviderWeChat,
+			wechatId,
+			user.Id,
+		)
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return

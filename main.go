@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -37,8 +38,6 @@ import (
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-
-	_ "net/http/pprof"
 )
 
 //go:embed web/default/dist
@@ -70,15 +69,14 @@ func main() {
 		common.SysLog("running in debug mode")
 	}
 
-	defer func() {
-		err := model.CloseDB()
-		if err != nil {
-			common.FatalLog("failed to close database: " + err.Error())
-		}
-	}()
+	// Background cache, scheduler, and reporting workers live for the process
+	// lifetime. Keep the shared database pools open until process termination so
+	// those workers cannot race an explicit sql.DB.Close during the final
+	// shutdown bookkeeping below; the operating system reclaims the pools when
+	// the process exits.
 
-	// Recover durable billing settlements/refunds left pending by an earlier
-	// process before accepting new relay traffic.
+	// Recover durable financial operations left pending by an earlier process
+	// before accepting new relay traffic.
 	service.StartBillingAdjustmentWorker()
 
 	if common.RedisEnabled {
@@ -89,20 +87,29 @@ func main() {
 		common.SysLog("memory cache enabled")
 		common.SysLog(fmt.Sprintf("sync frequency: %d seconds", common.SyncFrequency))
 
-		// Add panic recovery and retry for InitChannelCache
+		// Preserve the legacy one-time ability repair for a panic, but fail
+		// startup directly on ordinary database errors.
+		var channelCacheErr error
+		var channelCachePanicked bool
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					common.SysLog(fmt.Sprintf("InitChannelCache panic: %v, retrying once", r))
-					// Retry once
-					_, _, fixErr := model.FixAbility()
-					if fixErr != nil {
-						common.FatalLog(fmt.Sprintf("InitChannelCache failed: %s", fixErr.Error()))
-					}
+					channelCachePanicked = true
+					channelCacheErr = fmt.Errorf("initialize channel cache: %v", r)
 				}
 			}()
-			model.InitChannelCache()
+			channelCacheErr = model.InitChannelCache()
 		}()
+		if channelCacheErr != nil {
+			if !channelCachePanicked {
+				common.FatalLog(fmt.Sprintf("InitChannelCache failed: %s", channelCacheErr.Error()))
+				return
+			}
+			common.SysLog(fmt.Sprintf("InitChannelCache failed: %v, repairing abilities and retrying once", channelCacheErr))
+			if _, _, fixErr := model.FixAbility(); fixErr != nil {
+				common.FatalLog(fmt.Sprintf("InitChannelCache repair failed: %s", fixErr.Error()))
+			}
+		}
 
 		go model.SyncChannelCache(common.SyncFrequency)
 	}
@@ -163,12 +170,25 @@ func main() {
 		model.InitBatchUpdater()
 	}
 
+	var pprofServer *http.Server
+	var stopPprofMonitor context.CancelFunc
 	if os.Getenv("ENABLE_PPROF") == "true" {
+		pprofServer = &http.Server{
+			Addr:              pprofListenAddress(),
+			Handler:           newPprofHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+		}
 		gopool.Go(func() {
-			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
+			if err := pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("pprof server failed: %v", err)
+			}
 		})
-		go common.Monitor()
-		common.SysLog("pprof enabled")
+		monitorCtx, stopMonitor := context.WithCancel(context.Background())
+		stopPprofMonitor = stopMonitor
+		go common.Monitor(monitorCtx)
+		common.SysLog("pprof enabled on " + pprofServer.Addr)
 	}
 
 	err = common.StartPyroScope()
@@ -178,11 +198,19 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	if err := configureTrustedProxies(server); err != nil {
+		common.FatalLog("invalid TRUSTED_PROXIES configuration: " + err.Error())
+		return
+	}
+	server.Use(middleware.SecurityHeaders())
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
-		common.SysLog(fmt.Sprintf("panic detected: %v", err))
+		common.SysLog(
+			"panic detected: " +
+				common.LocalLogPreview(common.MaskSensitiveInfo(fmt.Sprint(err))),
+		)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
-				"message": fmt.Sprintf("Panic detected, error: %v. Please submit a issue here: https://github.com/Calcium-Ion/new-api", err),
+				"message": "Panic detected. Please submit an issue here: https://github.com/Calcium-Ion/new-api",
 				"type":    "new_api_panic",
 			},
 		})
@@ -195,13 +223,7 @@ func main() {
 	middleware.SetUpLogger(server)
 	// Initialize session store
 	store := cookie.NewStore([]byte(common.SessionSecret))
-	store.Options(sessions.Options{
-		Path:     "/",
-		MaxAge:   2592000, // 30 days
-		HttpOnly: true,
-		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
-	})
+	store.Options(sessionCookieOptions())
 	server.Use(sessions.Sessions("session", store))
 
 	InjectUmamiAnalytics()
@@ -220,8 +242,11 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: server,
+		Addr:              ":" + port,
+		Handler:           server,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {
@@ -240,11 +265,24 @@ func main() {
 	common.SysLog(fmt.Sprintf("received signal: %v, shutting down...", sig))
 
 	// SSE streams may run for minutes; give them time to finish before forced exit
-	shutdownTimeout := time.Duration(common.GetEnvOrDefault("SHUTDOWN_TIMEOUT_SECONDS", 120)) * time.Second
+	shutdownTimeout := common.SafeIntervalDuration(
+		common.GetEnvOrDefault("SHUTDOWN_TIMEOUT_SECONDS", 120),
+		time.Second,
+		120*time.Second,
+		"SHUTDOWN_TIMEOUT_SECONDS",
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
+	}
+	if stopPprofMonitor != nil {
+		stopPprofMonitor()
+	}
+	if pprofServer != nil {
+		if err := pprofServer.Shutdown(ctx); err != nil {
+			common.SysError(fmt.Sprintf("pprof server forced to shutdown: %v", err))
+		}
 	}
 	if common.BatchUpdateEnabled {
 		for attempt := 1; attempt <= 3; attempt++ {
@@ -259,10 +297,61 @@ func main() {
 		}
 	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
-	if common.DataExportEnabled {
+	if common.GetLegacyOptionBool("DataExportEnabled", &common.DataExportEnabled) {
 		model.SaveQuotaDataCache()
 	}
 	common.SysLog("server exited")
+}
+
+func configureTrustedProxies(engine *gin.Engine) error {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		// Gin otherwise trusts forwarding headers from every source, allowing
+		// direct clients to spoof the IP used by rate limits and audit logs.
+		return engine.SetTrustedProxies(nil)
+	}
+
+	entries := strings.Split(raw, ",")
+	proxies := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return fmt.Errorf("empty proxy entry")
+		}
+		proxies = append(proxies, entry)
+	}
+	return engine.SetTrustedProxies(proxies)
+}
+
+func sessionCookieOptions() sessions.Options {
+	// OAuth providers return through a top-level cross-site GET. Lax keeps the
+	// signed state/session cookie available on that callback while still
+	// withholding it from ordinary cross-site subrequests.
+	return sessions.Options{
+		Path:     "/",
+		MaxAge:   2592000, // 30 days
+		HttpOnly: true,
+		Secure:   common.SessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+func pprofListenAddress() string {
+	address := strings.TrimSpace(os.Getenv("PPROF_ADDR"))
+	if address == "" {
+		return "127.0.0.1:8005"
+	}
+	return address
+}
+
+func newPprofHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
 }
 
 func InjectUmamiAnalytics() {
@@ -343,7 +432,9 @@ func InitResources() error {
 		return err
 	}
 
-	model.CheckSetup()
+	if err = model.CheckSetup(); err != nil {
+		return fmt.Errorf("failed to check system setup state: %w", err)
+	}
 
 	// Initialize options, should after model.InitDB()
 	model.InitOptionMap()

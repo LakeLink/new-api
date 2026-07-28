@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 )
 
@@ -15,7 +16,34 @@ func UnmarshalJsonStr(data string, v any) error {
 }
 
 func DecodeJson(reader io.Reader, v any) error {
-	return json.NewDecoder(reader).Decode(v)
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+
+	// Decode exactly one JSON value. json.Decoder.Decode otherwise accepts a
+	// valid prefix and silently leaves trailing garbage or a second value
+	// unread, which lets malformed request and upstream payloads pass
+	// validation depending on whether they were decoded from a stream.
+	remaining := io.MultiReader(decoder.Buffered(), reader)
+	var buffer [4096]byte
+	for {
+		n, err := remaining.Read(buffer[:])
+		for _, character := range buffer[:n] {
+			switch character {
+			case ' ', '\t', '\r', '\n':
+				continue
+			default:
+				return fmt.Errorf("invalid trailing JSON data")
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read trailing JSON data: %w", err)
+		}
+	}
 }
 
 func Marshal(v any) ([]byte, error) {

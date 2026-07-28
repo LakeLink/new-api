@@ -139,7 +139,7 @@ func HashBackupCode(code string) (string, error) {
 
 // Get2FAIssuer 获取2FA发行者名称
 func Get2FAIssuer() string {
-	return SystemName
+	return GetLegacyOptionString("SystemName", &SystemName)
 }
 
 // getEnvOrDefault 获取环境变量或默认值

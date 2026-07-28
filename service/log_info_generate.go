@@ -84,6 +84,11 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other["cache_ratio"] = cacheRatio
 	other["model_price"] = modelPrice
 	other["user_group_ratio"] = userGroupRatio
+	if relayInfo.RerankerInfo != nil && relayInfo.CohereSearchUnits != nil {
+		other["billing_unit"] = "search"
+		other["search_units"] = *relayInfo.CohereSearchUnits
+		other["search_unit_price"] = modelPrice
+	}
 	other["frt"] = float64(relayInfo.FirstResponseTime.UnixMilli() - relayInfo.StartTime.UnixMilli())
 	if relayInfo.ReasoningEffort != "" {
 		other["reasoning_effort"] = relayInfo.ReasoningEffort
@@ -134,7 +139,7 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]inter
 	if relayInfo == nil || other == nil || !relayInfo.IsStream || relayInfo.StreamStatus == nil {
 		return
 	}
-	ss := relayInfo.StreamStatus
+	ss := relayInfo.StreamStatus.Snapshot()
 	status := "ok"
 	if !ss.IsNormalEnd() || ss.HasErrors() {
 		status = "error"

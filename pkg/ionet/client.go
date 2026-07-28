@@ -3,12 +3,15 @@ package ionet
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 )
 
 const (
@@ -24,18 +27,83 @@ type DefaultHTTPClient struct {
 
 // NewDefaultHTTPClient creates a new default HTTP client
 func NewDefaultHTTPClient(timeout time.Duration) *DefaultHTTPClient {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
 	return &DefaultHTTPClient{
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout:       timeout,
+			CheckRedirect: checkRedirect,
 		},
 	}
 }
 
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil {
+		return fmt.Errorf("invalid redirect request")
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if req.URL.User != nil {
+		return fmt.Errorf("redirect URL credentials are not allowed")
+	}
+	if len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return nil
+	}
+	previous := via[len(via)-1]
+	if previous != nil && previous.URL != nil &&
+		strings.EqualFold(previous.URL.Scheme, "https") &&
+		strings.EqualFold(req.URL.Scheme, "http") {
+		return fmt.Errorf("HTTPS to HTTP redirect is not allowed")
+	}
+	crossOrigin := !strings.EqualFold(req.URL.Scheme, via[0].URL.Scheme) ||
+		!strings.EqualFold(req.URL.Host, via[0].URL.Host)
+	if !crossOrigin {
+		return nil
+	}
+	if req.Body != nil && req.Body != http.NoBody {
+		return fmt.Errorf("cross-origin redirect with request body is not allowed")
+	}
+	safeHeaders := map[string]struct{}{
+		"Accept":          {},
+		"Accept-Encoding": {},
+		"Range":           {},
+		"User-Agent":      {},
+	}
+	for header := range req.Header {
+		if _, safe := safeHeaders[http.CanonicalHeaderKey(header)]; !safe {
+			req.Header.Del(header)
+		}
+	}
+	return nil
+}
+
+func readBoundedHTTPResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	if body == nil {
+		return nil, fmt.Errorf("response body is nil")
+	}
+	data, err := io.ReadAll(io.LimitReader(body, common.ReadLimitWithOverrunByte(maxBytes)))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
 // Do executes an HTTP request
 func (c *DefaultHTTPClient) Do(req *HTTPRequest) (*HTTPResponse, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("HTTP client is nil")
+	}
+	if req == nil {
+		return nil, fmt.Errorf("HTTP request is nil")
+	}
 	httpReq, err := http.NewRequest(req.Method, req.URL, bytes.NewReader(req.Body))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, fmt.Errorf("failed to create HTTP request: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 
 	// Set headers
@@ -45,13 +113,15 @@ func (c *DefaultHTTPClient) Do(req *HTTPRequest) (*HTTPResponse, error) {
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, fmt.Errorf("HTTP request failed: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	var body bytes.Buffer
-	_, err = body.ReadFrom(resp.Body)
+	maxMB := constant.MaxUpstreamResponseBodyMB
+	if maxMB <= 0 {
+		maxMB = 128
+	}
+	body, err := readBoundedHTTPResponseBody(resp.Body, common.BytesFromMegabytes(maxMB))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -67,7 +137,7 @@ func (c *DefaultHTTPClient) Do(req *HTTPRequest) (*HTTPResponse, error) {
 	return &HTTPResponse{
 		StatusCode: resp.StatusCode,
 		Headers:    headers,
-		Body:       body.Bytes(),
+		Body:       body,
 	}, nil
 }
 

@@ -29,7 +29,7 @@ func GetAllModelsMeta(c *gin.Context) {
 	// 统计供应商计数（全部数据，不受分页影响）
 	vendorCounts, _ := model.GetVendorModelCounts()
 
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(modelsMeta)
 	common.ApiSuccess(c, gin.H{
 		"items":         modelsMeta,
@@ -57,7 +57,7 @@ func SearchModelsMeta(c *gin.Context) {
 	// 批量填充附加字段，提升列表接口性能
 	enrichModels(modelsMeta)
 	vendorCounts, _ := model.GetVendorModelCounts()
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(modelsMeta)
 	common.ApiSuccess(c, gin.H{
 		"items":         modelsMeta,
@@ -160,7 +160,7 @@ func DeleteModelMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.DB.Delete(&model.Model{}, id).Error; err != nil {
+	if err := model.DeleteModelByID(id); err != nil {
 		common.ApiError(c, err)
 		return
 	}

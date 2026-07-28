@@ -1,6 +1,11 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 // CheckinSetting 签到功能配置
 type CheckinSetting struct {
@@ -16,6 +21,16 @@ var checkinSetting = CheckinSetting{
 	MaxQuota: 10000, // 默认最大额度 10000 (约 0.02 USD)
 }
 
+func (s CheckinSetting) Validate() error {
+	if s.MinQuota < 0 || s.MinQuota > common.MaxQuota {
+		return fmt.Errorf("minimum check-in quota must be in the range [0, %d]", common.MaxQuota)
+	}
+	if s.MaxQuota < s.MinQuota || s.MaxQuota > common.MaxQuota {
+		return fmt.Errorf("maximum check-in quota must be in the range [%d, %d]", s.MinQuota, common.MaxQuota)
+	}
+	return nil
+}
+
 func init() {
 	// 注册到全局配置管理器
 	config.GlobalConfig.Register("checkin_setting", &checkinSetting)
@@ -23,15 +38,16 @@ func init() {
 
 // GetCheckinSetting 获取签到配置
 func GetCheckinSetting() *CheckinSetting {
-	return &checkinSetting
+	return config.Snapshot[CheckinSetting]("checkin_setting")
 }
 
 // IsCheckinEnabled 是否启用签到功能
 func IsCheckinEnabled() bool {
-	return checkinSetting.Enabled
+	return GetCheckinSetting().Enabled
 }
 
 // GetCheckinQuotaRange 获取签到额度范围
 func GetCheckinQuotaRange() (min, max int) {
-	return checkinSetting.MinQuota, checkinSetting.MaxQuota
+	setting := GetCheckinSetting()
+	return setting.MinQuota, setting.MaxQuota
 }

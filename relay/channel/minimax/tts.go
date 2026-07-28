@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -27,23 +26,23 @@ type MiniMaxTTSRequest struct {
 	TimbreWeights     []TimbreWeight     `json:"timbre_weights,omitempty"`
 	LanguageBoost     string             `json:"language_boost,omitempty"`
 	VoiceModify       *VoiceModify       `json:"voice_modify,omitempty"`
-	SubtitleEnable    bool               `json:"subtitle_enable,omitempty"`
+	SubtitleEnable    *bool              `json:"subtitle_enable,omitempty"`
 	OutputFormat      string             `json:"output_format,omitempty"`
-	AigcWatermark     bool               `json:"aigc_watermark,omitempty"`
+	AigcWatermark     *bool              `json:"aigc_watermark,omitempty"`
 }
 
 type StreamOptions struct {
-	ExcludeAggregatedAudio bool `json:"exclude_aggregated_audio,omitempty"`
+	ExcludeAggregatedAudio *bool `json:"exclude_aggregated_audio,omitempty"`
 }
 
 type VoiceSetting struct {
-	VoiceID           string  `json:"voice_id"`
-	Speed             float64 `json:"speed,omitempty"`
-	Vol               float64 `json:"vol,omitempty"`
-	Pitch             int     `json:"pitch,omitempty"`
-	Emotion           string  `json:"emotion,omitempty"`
-	TextNormalization bool    `json:"text_normalization,omitempty"`
-	LatexRead         bool    `json:"latex_read,omitempty"`
+	VoiceID           string   `json:"voice_id"`
+	Speed             float64  `json:"speed,omitempty"`
+	Vol               *float64 `json:"vol,omitempty"`
+	Pitch             *int     `json:"pitch,omitempty"`
+	Emotion           string   `json:"emotion,omitempty"`
+	TextNormalization *bool    `json:"text_normalization,omitempty"`
+	LatexRead         *bool    `json:"latex_read,omitempty"`
 }
 
 type PronunciationDict struct {
@@ -51,11 +50,11 @@ type PronunciationDict struct {
 }
 
 type AudioSetting struct {
-	SampleRate int    `json:"sample_rate,omitempty"`
-	Bitrate    int    `json:"bitrate,omitempty"`
+	SampleRate *int   `json:"sample_rate,omitempty"`
+	Bitrate    *int   `json:"bitrate,omitempty"`
 	Format     string `json:"format,omitempty"`
-	Channel    int    `json:"channel,omitempty"`
-	ForceCbr   bool   `json:"force_cbr,omitempty"`
+	Channel    *int   `json:"channel,omitempty"`
+	ForceCbr   *bool  `json:"force_cbr,omitempty"`
 }
 
 type TimbreWeight struct {
@@ -64,9 +63,9 @@ type TimbreWeight struct {
 }
 
 type VoiceModify struct {
-	Pitch        int    `json:"pitch,omitempty"`
-	Intensity    int    `json:"intensity,omitempty"`
-	Timbre       int    `json:"timbre,omitempty"`
+	Pitch        *int   `json:"pitch,omitempty"`
+	Intensity    *int   `json:"intensity,omitempty"`
+	Timbre       *int   `json:"timbre,omitempty"`
 	SoundEffects string `json:"sound_effects,omitempty"`
 }
 
@@ -107,7 +106,9 @@ func getContentTypeByFormat(format string) string {
 }
 
 func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	body, readErr := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+
+	body, readErr := service.ReadUpstreamResponseBody(resp.Body)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to read minimax response: %w", readErr),
@@ -115,8 +116,6 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 			http.StatusInternalServerError,
 		)
 	}
-	defer resp.Body.Close()
-
 	// Parse response
 	var minimaxResp MiniMaxTTSResponse
 	if unmarshalErr := common.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
@@ -185,7 +184,9 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 }
 
 func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	body, readErr := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+
+	body, readErr := service.ReadUpstreamResponseBody(resp.Body)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			errors.New("failed to read minimax response"),
@@ -193,8 +194,6 @@ func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *rel
 			http.StatusInternalServerError,
 		)
 	}
-	defer resp.Body.Close()
-
 	service.CopyUpstreamResponseHeaders(c, resp.Header)
 
 	c.Data(resp.StatusCode, "application/json", body)

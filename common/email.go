@@ -4,18 +4,19 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"net/mail"
 	"net/smtp"
 	"slices"
 	"strings"
 	"time"
 )
 
-func generateMessageID() (string, error) {
-	split := strings.Split(SMTPFrom, "@")
-	if len(split) < 2 {
+func generateMessageID(from string) (string, error) {
+	at := strings.LastIndexByte(from, '@')
+	if at <= 0 || at == len(from)-1 {
 		return "", fmt.Errorf("invalid SMTP account")
 	}
-	domain := strings.Split(SMTPFrom, "@")[1]
+	domain := from[at+1:]
 	return fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), GetRandomString(12), domain), nil
 }
 
@@ -76,28 +77,47 @@ func newSMTPClient(addr string) (*smtp.Client, error) {
 }
 
 func SendEmail(subject string, receiver string, content string) error {
-	if SMTPFrom == "" { // for compatibility
-		SMTPFrom = SMTPAccount
+	from := strings.TrimSpace(SMTPFrom)
+	if from == "" { // for compatibility
+		from = strings.TrimSpace(SMTPAccount)
 	}
-	id, err2 := generateMessageID()
-	if err2 != nil {
-		return err2
+	fromAddress, err := mail.ParseAddress(from)
+	if err != nil || fromAddress.Address != from {
+		return fmt.Errorf("invalid SMTP sender address")
 	}
 	if SMTPServer == "" && SMTPAccount == "" {
 		return fmt.Errorf("SMTP 服务器未配置")
 	}
+	rawRecipients := strings.Split(receiver, ";")
+	recipients := make([]string, 0, len(rawRecipients))
+	toHeaders := make([]string, 0, len(rawRecipients))
+	for _, rawRecipient := range rawRecipients {
+		rawRecipient = strings.TrimSpace(rawRecipient)
+		recipientAddress, parseErr := mail.ParseAddress(rawRecipient)
+		if parseErr != nil || recipientAddress.Address != rawRecipient {
+			return fmt.Errorf("invalid SMTP recipient address")
+		}
+		recipients = append(recipients, recipientAddress.Address)
+		toHeaders = append(toHeaders, recipientAddress.String())
+	}
+	if len(recipients) == 0 {
+		return fmt.Errorf("SMTP recipient address is required")
+	}
+	id, err := generateMessageID(fromAddress.Address)
+	if err != nil {
+		return err
+	}
 	encodedSubject := fmt.Sprintf("=?UTF-8?B?%s?=", base64.StdEncoding.EncodeToString([]byte(subject)))
+	fromHeader := (&mail.Address{Name: SystemName, Address: fromAddress.Address}).String()
 	mail := []byte(fmt.Sprintf("To: %s\r\n"+
-		"From: %s <%s>\r\n"+
+		"From: %s\r\n"+
 		"Subject: %s\r\n"+
 		"Date: %s\r\n"+
 		"Message-ID: %s\r\n"+ // 添加 Message-ID 头
 		"Content-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n",
-		receiver, SystemName, SMTPFrom, encodedSubject, time.Now().Format(time.RFC1123Z), id, content))
+		strings.Join(toHeaders, ", "), fromHeader, encodedSubject, time.Now().Format(time.RFC1123Z), id, content))
 	auth := getSMTPAuth()
 	addr := fmt.Sprintf("%s:%d", SMTPServer, SMTPPort)
-	to := strings.Split(receiver, ";")
-	var err error
 	client, err := newSMTPClient(addr)
 	if err != nil {
 		return err
@@ -108,10 +128,10 @@ func SendEmail(subject string, receiver string, content string) error {
 			return err
 		}
 	}
-	if err = client.Mail(SMTPFrom); err != nil {
+	if err = client.Mail(fromAddress.Address); err != nil {
 		return err
 	}
-	for _, receiver := range to {
+	for _, receiver := range recipients {
 		if err = client.Rcpt(receiver); err != nil {
 			return err
 		}
@@ -130,7 +150,7 @@ func SendEmail(subject string, receiver string, content string) error {
 	}
 	err = client.Quit()
 	if err != nil {
-		SysError(fmt.Sprintf("failed to send email to %s: %v", receiver, err))
+		SysError(fmt.Sprintf("failed to send email to %s: %v", MaskEmail(receiver), err))
 	}
 	return err
 }

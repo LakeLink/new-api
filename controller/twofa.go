@@ -433,6 +433,15 @@ func Verify2FALogin(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "会话已过期，请重新登录"})
 		return
 	}
+	if user.Status != common.UserStatusEnabled {
+		session.Clear()
+		_ = session.Save()
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "用户已被禁用",
+		})
+		return
+	}
 
 	// 获取2FA记录
 	twoFA, err := model.GetTwoFAByUserId(user.Id)

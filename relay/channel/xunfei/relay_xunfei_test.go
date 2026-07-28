@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 
 	"github.com/gorilla/websocket"
@@ -33,7 +34,8 @@ func TestRequestOpenAIToXunfeiPreservesSupportedSystemRoleAndTopK(t *testing.T) 
 	require.Len(t, converted.Payload.Message.Text, 2)
 	assert.Equal(t, "system", converted.Payload.Message.Text[0].Role)
 	assert.Equal(t, "answer tersely", converted.Payload.Message.Text[0].Content)
-	assert.Equal(t, 3, converted.Parameter.Chat.TopK, "OpenAI n must not be repurposed as Spark top_k")
+	require.NotNil(t, converted.Parameter.Chat.TopK)
+	assert.Equal(t, 3, *converted.Parameter.Chat.TopK, "OpenAI n must not be repurposed as Spark top_k")
 }
 
 func TestRequestOpenAIToXunfeiDoesNotFabricateAssistantMessage(t *testing.T) {
@@ -120,5 +122,60 @@ func TestXunfeiMakeRequestSurfacesProviderErrorFrame(t *testing.T) {
 		assert.Contains(t, result.Err.Error(), "upstream rejected request")
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for Xunfei error result")
+	}
+}
+
+func TestXunfeiMakeRequestMasksSignedQueryOnDialFailure(t *testing.T) {
+	_, err := xunfeiMakeRequest(
+		context.Background(),
+		dto.GeneralOpenAIRequest{},
+		"lite",
+		"wss://spark-api.example/path?authorization=query-secret%zz",
+		"app-id",
+	)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "query-secret")
+	assert.NotContains(t, err.Error(), "spark-api.example")
+}
+
+func TestXunfeiMakeRequestRejectsOversizedWebsocketMessage(t *testing.T) {
+	originalLimit := constant.MaxUpstreamResponseBodyMB
+	constant.MaxUpstreamResponseBodyMB = 1
+	t.Cleanup(func() { constant.MaxUpstreamResponseBodyMB = originalLimit })
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer conn.Close()
+		if _, _, err = conn.ReadMessage(); err != nil {
+			t.Errorf("read websocket request: %v", err)
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", (1<<20)+1)))
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	results, err := xunfeiMakeRequest(
+		ctx,
+		dto.GeneralOpenAIRequest{},
+		"lite",
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		"app-id",
+	)
+	require.NoError(t, err)
+
+	select {
+	case result := <-results:
+		require.Error(t, result.Err)
+		assert.Contains(t, result.Err.Error(), "read limit")
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for oversized-frame rejection")
 	}
 }

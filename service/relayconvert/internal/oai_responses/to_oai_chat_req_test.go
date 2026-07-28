@@ -23,7 +23,7 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 		Instructions:         mustRawMessage(t, "system rules"),
 		Input:                mustRawMessage(t, "hello"),
 		Stream:               &stream,
-		StreamOptions:        &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions:        &dto.StreamOptions{IncludeUsage: lo.ToPtr(true)},
 		MaxOutputTokens:      &maxOutputTokens,
 		Temperature:          &temperature,
 		TopP:                 &topP,
@@ -43,7 +43,7 @@ func TestResponsesRequestToChatCompletionsRequestInstructionsAndScalarInput(t *t
 	assert.Equal(t, dto.Message{Role: "user", Content: "hello"}, got.Messages[1])
 	assert.Same(t, &stream, got.Stream)
 	require.NotNil(t, got.StreamOptions)
-	assert.True(t, got.StreamOptions.IncludeUsage)
+	assert.True(t, lo.FromPtrOr(got.StreamOptions.IncludeUsage, false))
 	assert.Equal(t, maxOutputTokens, lo.FromPtr(got.MaxCompletionTokens))
 	assert.Equal(t, 0.0, lo.FromPtr(got.Temperature))
 	assert.Equal(t, 0.9, lo.FromPtr(got.TopP))

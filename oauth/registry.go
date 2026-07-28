@@ -88,27 +88,34 @@ func IsCustomProvider(name string) bool {
 
 // LoadCustomProviders loads all custom OAuth providers from the database
 func LoadCustomProviders() error {
-	// First, unregister all existing custom providers
-	mu.Lock()
-	for name := range customProviderSlugs {
-		delete(providers, name)
-	}
-	customProviderSlugs = make(map[string]bool)
-	mu.Unlock()
-
-	// Load all custom providers from database
 	customProviders, err := model.GetAllCustomOAuthProviders()
 	if err != nil {
 		common.SysError("Failed to load custom OAuth providers: " + err.Error())
 		return err
 	}
 
-	// Register each custom provider
+	loadedProviders := make(map[string]Provider, len(customProviders))
+	loadedSlugs := make(map[string]bool, len(customProviders))
 	for _, config := range customProviders {
-		provider := NewGenericOAuthProvider(config)
-		RegisterCustom(config.Slug, provider)
-		common.SysLog("Loaded custom OAuth provider: " + config.Name + " (" + config.Slug + ")")
+		if config == nil {
+			continue
+		}
+		loadedProviders[config.Slug] = NewGenericOAuthProvider(config)
+		loadedSlugs[config.Slug] = true
 	}
+
+	// Publish the complete replacement in one critical section. Readers never
+	// observe the empty or partially populated registry during a reload, and a
+	// failed database read leaves the last known-good providers intact.
+	mu.Lock()
+	for name := range customProviderSlugs {
+		delete(providers, name)
+	}
+	for name, provider := range loadedProviders {
+		providers[name] = provider
+	}
+	customProviderSlugs = loadedSlugs
+	mu.Unlock()
 
 	common.SysLog(fmt.Sprintf("Loaded %d custom OAuth providers", len(customProviders)))
 	return nil

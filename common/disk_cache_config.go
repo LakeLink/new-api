@@ -51,14 +51,14 @@ func IsDiskCacheEnabled() bool {
 func GetDiskCacheThresholdBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.ThresholdMB) << 20
+	return BytesFromMegabytes(diskCacheConfig.ThresholdMB)
 }
 
 // GetDiskCacheMaxSizeBytes 获取磁盘缓存最大大小（字节）
 func GetDiskCacheMaxSizeBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.MaxSizeMB) << 20
+	return BytesFromMegabytes(diskCacheConfig.MaxSizeMB)
 }
 
 // GetDiskCachePath 获取磁盘缓存目录
@@ -160,6 +160,7 @@ func ResetDiskCacheUsage() {
 func SyncDiskCacheStats() {
 	fileCount, totalSize, err := GetDiskCacheInfo()
 	if err != nil {
+		SysError("failed to synchronize disk cache statistics: " + err.Error())
 		return
 	}
 	atomic.StoreInt64(&diskCacheStats.ActiveDiskFiles, int64(fileCount))
@@ -173,5 +174,8 @@ func IsDiskCacheAvailable(requestSize int64) bool {
 	}
 	maxBytes := GetDiskCacheMaxSizeBytes()
 	currentUsage := atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes)
-	return currentUsage+requestSize <= maxBytes
+	if requestSize < 0 || currentUsage < 0 || currentUsage > maxBytes {
+		return false
+	}
+	return requestSize <= maxBytes-currentUsage
 }

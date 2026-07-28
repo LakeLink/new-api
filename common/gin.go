@@ -62,7 +62,7 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 	if maxMB <= 0 {
 		maxMB = 128 // 默认 128MB
 	}
-	maxBytes := int64(maxMB) << 20
+	maxBytes := BytesFromMegabytes(maxMB)
 
 	contentLength := c.Request.ContentLength
 
@@ -130,11 +130,15 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 		return err
 	}
 	contentType := c.Request.Header.Get("Content-Type")
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	isJSON := mediaType == "" ||
+		mediaType == gin.MIMEJSON ||
+		(strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json"))
 
 	// disk-backed JSON: stream-decode directly from the file to avoid
 	// materializing the entire payload back into a transient []byte
 	// (diskStorage.Bytes() would ReadFull the whole file into the heap).
-	if storage.IsDisk() && strings.HasPrefix(contentType, "application/json") {
+	if storage.IsDisk() && isJSON {
 		if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
 			return seekErr
 		}
@@ -152,15 +156,14 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(contentType, "application/json") {
+	if isJSON {
 		err = Unmarshal(requestBody, v)
-	} else if strings.Contains(contentType, gin.MIMEPOSTForm) {
+	} else if mediaType == gin.MIMEPOSTForm {
 		err = parseFormData(requestBody, v)
-	} else if strings.Contains(contentType, gin.MIMEMultipartPOSTForm) {
+	} else if mediaType == gin.MIMEMultipartPOSTForm {
 		err = parseMultipartFormData(c, requestBody, v)
 	} else {
-		// skip for now
-		// TODO: someday non json request have variant model, we will need to implementation this
+		return fmt.Errorf("unsupported content type %q", contentType)
 	}
 	if err != nil {
 		return err
@@ -283,12 +286,9 @@ func ParseMultipartFormReusable(c *gin.Context) (*multipart.Form, error) {
 
 	// Use the original Content-Type saved on first call to avoid boundary
 	// mismatch when callers overwrite c.Request.Header after multipart rebuild.
-	var contentType string
-	if saved, ok := c.Get("_original_multipart_ct"); ok {
-		contentType = saved.(string)
-	} else {
-		contentType = c.Request.Header.Get("Content-Type")
-		c.Set("_original_multipart_ct", contentType)
+	contentType, err := originalMultipartContentType(c)
+	if err != nil {
+		return nil, err
 	}
 	boundary, err := parseBoundary(contentType)
 	if err != nil {
@@ -347,18 +347,12 @@ func parseFormData(data []byte, v any) error {
 }
 
 func parseMultipartFormData(c *gin.Context, data []byte, v any) error {
-	var contentType string
-	if saved, ok := c.Get("_original_multipart_ct"); ok {
-		contentType = saved.(string)
-	} else {
-		contentType = c.Request.Header.Get("Content-Type")
-		c.Set("_original_multipart_ct", contentType)
+	contentType, err := originalMultipartContentType(c)
+	if err != nil {
+		return err
 	}
 	boundary, err := parseBoundary(contentType)
 	if err != nil {
-		if errors.Is(err, errBoundaryNotFound) {
-			return Unmarshal(data, v) // Fallback to JSON
-		}
 		return err
 	}
 
@@ -378,6 +372,19 @@ func parseMultipartFormData(c *gin.Context, data []byte, v any) error {
 	}
 
 	return processFormMap(formMap, v)
+}
+
+func originalMultipartContentType(c *gin.Context) (string, error) {
+	if saved, ok := c.Get("_original_multipart_ct"); ok {
+		contentType, valid := saved.(string)
+		if !valid {
+			return "", fmt.Errorf("invalid cached multipart content type: %T", saved)
+		}
+		return contentType, nil
+	}
+	contentType := c.Request.Header.Get("Content-Type")
+	c.Set("_original_multipart_ct", contentType)
+	return contentType, nil
 }
 
 var errBoundaryNotFound = errors.New("multipart boundary not found")
@@ -405,5 +412,5 @@ func multipartMemoryLimit() int64 {
 	if limitMB <= 0 {
 		limitMB = 32
 	}
-	return int64(limitMB) << 20
+	return BytesFromMegabytes(limitMB)
 }

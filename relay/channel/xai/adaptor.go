@@ -38,6 +38,9 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+	if info != nil && info.RelayMode == constant.RelayModeImagesEdits {
+		return nil, errors.New("xAI image edits are not supported by this adapter")
+	}
 	xaiRequest := ImageRequest{
 		Model:          request.Model,
 		Prompt:         request.Prompt,
@@ -74,7 +77,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		return toMap, nil
 	}
 	if strings.HasPrefix(request.Model, "grok-3-mini") {
-		if lo.FromPtrOr(request.MaxCompletionTokens, uint(0)) == 0 && lo.FromPtrOr(request.MaxTokens, uint(0)) != 0 {
+		if request.MaxCompletionTokens == nil && request.MaxTokens != nil {
 			request.MaxCompletionTokens = request.MaxTokens
 			request.MaxTokens = nil
 		}
@@ -126,6 +129,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			usage, err = xAIStreamHandler(c, info, resp)
 		} else {
 			usage, err = xAIHandler(c, info, resp)
+		}
+	}
+	if err == nil {
+		if textUsage, ok := usage.(*dto.Usage); ok {
+			ApplyXAIUsagePricing(info, textUsage)
 		}
 	}
 	return

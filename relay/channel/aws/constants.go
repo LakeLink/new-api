@@ -20,15 +20,12 @@ var awsModelIDMap = map[string]string{
 	"claude-opus-4-6":            "anthropic.claude-opus-4-6-v1",
 	"claude-opus-4-7":            "anthropic.claude-opus-4-7",
 	"claude-opus-4-8":            "anthropic.claude-opus-4-8",
+	"claude-opus-5":              "anthropic.claude-opus-5",
 	// Nova models
 	"nova-micro-v1:0":   "amazon.nova-micro-v1:0",
 	"nova-lite-v1:0":    "amazon.nova-lite-v1:0",
 	"nova-pro-v1:0":     "amazon.nova-pro-v1:0",
 	"nova-premier-v1:0": "amazon.nova-premier-v1:0",
-	"nova-canvas-v1:0":  "amazon.nova-canvas-v1:0",
-	"nova-reel-v1:0":    "amazon.nova-reel-v1:0",
-	"nova-reel-v1:1":    "amazon.nova-reel-v1:1",
-	"nova-sonic-v1:0":   "amazon.nova-sonic-v1:0",
 }
 
 var awsModelCanCrossRegionMap = map[string]map[string]bool{
@@ -108,42 +105,23 @@ var awsModelCanCrossRegionMap = map[string]map[string]bool{
 		"ap": true,
 		"eu": true,
 	},
-	// Nova models - all support three major regions
+	// Nova Micro, Lite, and Pro publish US and EU geo inference profiles.
+	// APAC regions have in-region availability for some models, but these
+	// Nova v1 models do not publish an APAC geo inference profile.
 	"amazon.nova-micro-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
+		"us": true,
+		"eu": true,
 	},
 	"amazon.nova-lite-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
+		"us": true,
+		"eu": true,
 	},
 	"amazon.nova-pro-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
+		"us": true,
+		"eu": true,
 	},
 	"amazon.nova-premier-v1:0": {
 		"us": true,
-	},
-	"amazon.nova-canvas-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
-	},
-	"amazon.nova-reel-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
-	},
-	"amazon.nova-reel-v1:1": {
-		"us": true,
-	},
-	"amazon.nova-sonic-v1:0": {
-		"us":   true,
-		"eu":   true,
-		"apac": true,
 	},
 }
 
@@ -158,4 +136,20 @@ var ChannelName = "aws"
 // 判断是否为Nova模型
 func isNovaModel(modelId string) bool {
 	return strings.Contains(modelId, "nova-")
+}
+
+func isNovaTextModel(modelID string) bool {
+	modelID = getAwsModelID(modelID)
+	for _, prefix := range []string{"us.", "eu.", "apac.", "jp.", "global."} {
+		modelID = strings.TrimPrefix(modelID, prefix)
+	}
+	switch modelID {
+	case "amazon.nova-micro-v1:0",
+		"amazon.nova-lite-v1:0",
+		"amazon.nova-pro-v1:0",
+		"amazon.nova-premier-v1:0":
+		return true
+	default:
+		return false
+	}
 }

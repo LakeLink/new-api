@@ -11,9 +11,11 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +70,127 @@ func TestCalculateTextQuotaSummaryUnifiedForClaudeSemantic(t *testing.T) {
 	require.Equal(t, messageSummary.CacheCreationTokens1h, chatSummary.CacheCreationTokens1h)
 	require.True(t, chatSummary.IsClaudeUsageSemantic)
 	require.Equal(t, 1488, chatSummary.Quota)
+}
+
+func TestCalculateTextQuotaSummaryFallsBackWhenUsageIsMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-3.5-flash",
+		PriceData: types.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+	}
+	relayInfo.SetEstimatePromptTokens(25)
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, nil)
+
+	require.Equal(t, 25, summary.PromptTokens)
+	require.Equal(t, 25, summary.TotalTokens)
+	require.Empty(t, summary.GeminiServiceTier)
+}
+
+func TestCalculateTextQuotaSummaryBillsGeminiGroundingFromActualQueries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyGeminiGroundingSearchCount, 2)
+	common.SetContextKey(ctx, constant.ContextKeyGeminiGroundingTool, "google_search")
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-3.5-flash",
+		PriceData: types.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	usage := &dto.Usage{PromptTokens: 1, TotalTokens: 1}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, usage)
+
+	require.Equal(t, 2, summary.GeminiSearchCallCount)
+	require.Equal(t, "google_search", summary.GeminiSearchTool)
+	require.Equal(t, 14.0, summary.GeminiSearchPrice)
+	// Token quota (1) plus 2 Google Search queries at $14/1K.
+	require.Equal(t, 14_001, summary.Quota)
+}
+
+func TestCalculateTextQuotaSummaryUsesGeminiMapsPromptPrice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyGeminiGroundingSearchCount, 1)
+	common.SetContextKey(ctx, constant.ContextKeyGeminiGroundingTool, "google_maps")
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gemini-2.5-pro",
+		PriceData: types.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{PromptTokens: 1, TotalTokens: 1})
+
+	require.Equal(t, "google_maps", summary.GeminiSearchTool)
+	require.Equal(t, 25.0, summary.GeminiSearchPrice)
+	require.Equal(t, 12_501, summary.Quota)
+}
+
+func TestClaudeInferenceGeoPremiumDoesNotMultiplyServerToolFees(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("claude_web_search_requests", 1)
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "claude-sonnet-4-6",
+		PriceData: types.PriceData{
+			ModelRatio:      1.5,
+			CompletionRatio: 5,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	relayInfo.PriceData.AddOtherRatio("anthropic_inference_geo", 1.1)
+	require.True(t, relayInfo.PriceData.HasOtherRatio("anthropic_inference_geo"))
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{PromptTokens: 1_000, TotalTokens: 1_000})
+
+	// Token charge: 1,000 * 1.5 * 1.1 = 1,650 quota.
+	// Web search: $10 / 1,000 * 500,000 = 5,000 quota, without
+	// the token-only data-residency premium.
+	require.Equal(t, 6_650, summary.Quota)
+}
+
+func TestFixedPriceToolOnlyUsageExcludesTokenOnlyProviderMultiplier(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("claude_web_search_requests", 1)
+
+	priceData := types.PriceData{
+		UsePrice:   true,
+		ModelPrice: 0,
+		GroupRatioInfo: types.GroupRatioInfo{
+			GroupRatio: 1,
+		},
+	}
+	priceData.AddOtherRatio("anthropic_inference_geo", 1.1)
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "claude-sonnet-4-6",
+		PriceData:       priceData,
+		StartTime:       time.Now(),
+	}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{})
+
+	// Claude web search is $10/1K requests: 5,000 quota per call. The
+	// inference-geo premium applies to tokens/model usage, not server tools.
+	require.Equal(t, 5_000, summary.Quota)
+	require.True(t, hasBillableTextUsage(summary, relayInfo))
 }
 
 func TestCalculateTextQuotaSummaryUsesSplitClaudeCacheCreationRatios(t *testing.T) {
@@ -186,7 +309,9 @@ func TestCalculateTextQuotaSummaryUsesClaudeBillingUsageBeforeTopLevelUsage(t *t
 		}),
 	}
 
-	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveBillingUsage(usage))
+	effectiveUsage, err := effectiveBillingUsage(usage)
+	require.NoError(t, err)
+	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveUsage)
 
 	require.True(t, summary.IsClaudeUsageSemantic)
 	require.Equal(t, dto.BillingUsageSemanticAnthropic, summary.UsageSemantic)
@@ -230,7 +355,9 @@ func TestCalculateTextQuotaSummaryUsesGeminiBillingUsageBeforeTopLevelUsage(t *t
 		}),
 	}
 
-	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveBillingUsage(usage))
+	effectiveUsage, err := effectiveBillingUsage(usage)
+	require.NoError(t, err)
+	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveUsage)
 
 	require.False(t, summary.IsClaudeUsageSemantic)
 	require.Equal(t, dto.BillingUsageSemanticGemini, summary.UsageSemantic)
@@ -239,6 +366,52 @@ func TestCalculateTextQuotaSummaryUsesGeminiBillingUsageBeforeTopLevelUsage(t *t
 	require.Equal(t, 7, summary.CacheTokens)
 	require.Equal(t, 128, summary.TotalTokens)
 	require.Equal(t, 145, summary.Quota)
+}
+
+func TestCalculateTextQuotaSummaryUsesGeminiCachedModalityDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	originalQuotaPerUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 500000
+	t.Cleanup(func() { common.QuotaPerUnit = originalQuotaPerUnit })
+
+	relayInfo := &relaycommon.RelayInfo{
+		RelayFormat:     types.RelayFormatGemini,
+		OriginModelName: "gemini-2.5-flash-lite",
+		PriceData: types.PriceData{
+			ModelRatio:      0.05,
+			CompletionRatio: 4,
+			CacheRatio:      0.1,
+			ImageRatio:      1,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	usage := &dto.Usage{BillingUsage: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{
+		PromptTokenCount:        1_000_000,
+		CachedContentTokenCount: 250_000,
+		PromptTokensDetails: []dto.GeminiPromptTokensDetails{
+			{Modality: "TEXT", TokenCount: 300_000},
+			{Modality: "IMAGE", TokenCount: 100_000},
+			{Modality: "AUDIO", TokenCount: 600_000},
+		},
+		CacheTokensDetails: []dto.GeminiPromptTokensDetails{
+			{Modality: "IMAGE", TokenCount: 50_000},
+			{Modality: "AUDIO", TokenCount: 200_000},
+		},
+	})}
+
+	effectiveUsage, err := effectiveBillingUsage(usage)
+	require.NoError(t, err)
+	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveUsage)
+
+	require.Equal(t, 200_000, effectiveUsage.GeminiCachedAudioInputTokens)
+	require.Equal(t, 50_000, effectiveUsage.GeminiCachedImageInputTokens)
+	require.Equal(t, 200_000, summary.CachedAudioTokens)
+	require.Equal(t, 50_000, summary.CachedImageTokens)
+	// Non-cached text/image: $0.035; cached image: $0.0005;
+	// non-cached audio: $0.12; cached audio: $0.006. Total: $0.1615.
+	require.Equal(t, 80_750, summary.Quota)
 }
 
 func TestCalculateTextQuotaSummaryUsesOpenAIBillingUsageBeforeTopLevelUsage(t *testing.T) {
@@ -268,7 +441,9 @@ func TestCalculateTextQuotaSummaryUsesOpenAIBillingUsageBeforeTopLevelUsage(t *t
 		}),
 	}
 
-	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveBillingUsage(usage))
+	effectiveUsage, err := effectiveBillingUsage(usage)
+	require.NoError(t, err)
+	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveUsage)
 
 	require.False(t, summary.IsClaudeUsageSemantic)
 	require.Equal(t, dto.BillingUsageSemanticOpenAI, summary.UsageSemantic)
@@ -565,6 +740,9 @@ func TestComposeTieredTextQuotaKeepsToolCallSurcharges(t *testing.T) {
 				dto.BuildInToolFileSearch: &relaycommon.BuildInToolInfo{
 					CallCount: 2,
 				},
+				"image_generation": &relaycommon.BuildInToolInfo{
+					CallCount: 2,
+				},
 			},
 		},
 		TieredBillingSnapshot: &billingexpr.BillingSnapshot{
@@ -587,8 +765,129 @@ func TestComposeTieredTextQuotaKeepsToolCallSurcharges(t *testing.T) {
 		ActualQuotaAfterGroup:  1000,
 	})
 
-	require.Equal(t, int64(13000), summary.ToolCallSurchargeQuota.Round(0).IntPart())
-	require.Equal(t, 14000, quota)
+	require.Equal(t, int64(18380), summary.ToolCallSurchargeQuota.Round(0).IntPart())
+	require.Equal(t, 19380, quota)
+}
+
+func TestResponsesImageGenerationSettlementUsesActualOutputCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("image_generation_call", true)
+	ctx.Set("image_generation_call_quality", "low")
+	ctx.Set("image_generation_call_size", "1024x1024")
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5",
+		ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{
+			BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
+				"image_generation": {CallCount: 3},
+			},
+		},
+	}
+	summary := textQuotaSummary{
+		ModelName:  "gpt-5",
+		GroupRatio: 1,
+	}
+
+	surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
+
+	unitPrice, ok := dto.OpenAIImageOutputCostUSD("gpt-image-1", "low", "1024x1024")
+	require.True(t, ok)
+	expected := decimal.NewFromFloat(unitPrice * 3 * common.QuotaPerUnit)
+	expectedFloat, _ := expected.Float64()
+	actualFloat, _ := surcharge.Float64()
+	require.InDelta(t, expectedFloat, actualFloat, 1e-9)
+	require.Equal(t, 3, summary.ImageGenerationCallCount)
+	require.Equal(t, unitPrice, summary.ImageGenerationCallPrice)
+}
+
+func TestResponsesImageGenerationSettlementPricesModelAndPartials(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name               string
+		configuredPartials int
+		actualPartials     int
+		wantPartials       int
+	}{
+		{name: "omitted partials", configuredPartials: 0, actualPartials: 3, wantPartials: 0},
+		{name: "explicit zero partials", configuredPartials: 0, actualPartials: 0, wantPartials: 0},
+		{name: "maximum partials", configuredPartials: 3, actualPartials: 3, wantPartials: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			relayInfo := &relaycommon.RelayInfo{
+				OriginModelName: "gpt-5",
+				ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{
+					BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
+						"image_generation": {
+							CallCount:          1,
+							ImageModel:         "gpt-image-2",
+							ImageQuality:       "low",
+							ImageSize:          "1024x1024",
+							ImagePartialImages: test.configuredPartials,
+							ImagePartialCount:  test.actualPartials,
+						},
+					},
+				},
+			}
+			summary := textQuotaSummary{ModelName: "gpt-5", GroupRatio: 1}
+
+			surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
+
+			basePrice, ok := dto.OpenAIImageOutputCostUSD(
+				"gpt-image-2",
+				"low",
+				"1024x1024",
+			)
+			require.True(t, ok)
+			partialPrice, ok := dto.OpenAIImagePartialOutputCostUSD(
+				"gpt-image-2",
+				test.wantPartials,
+			)
+			require.True(t, ok)
+			expected := decimal.NewFromFloat((basePrice + partialPrice) * common.CurrentQuotaPerUnit())
+			expectedFloat, _ := expected.Float64()
+			actualFloat, _ := surcharge.Float64()
+			require.InDelta(t, expectedFloat, actualFloat, 1e-9)
+			require.Equal(t, "gpt-image-2", summary.ImageGenerationModel)
+			require.Equal(t, test.wantPartials, summary.ImageGenerationPartials)
+			require.InDelta(t, basePrice+partialPrice, summary.ImageGenerationCostUSD, 1e-12)
+		})
+	}
+}
+
+func TestResponsesFileSearchSettlementUsesModelPriceOverride(t *testing.T) {
+	require.NoError(t, operation_setting.UpdateToolPrices(map[string]float64{
+		"file_search":              2.5,
+		"file_search:gpt-special*": 9,
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, operation_setting.UpdateToolPrices(map[string]float64{}))
+	})
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-special-1",
+		PriceData: types.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+		},
+		ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{
+			BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
+				dto.BuildInToolFileSearch: {CallCount: 2},
+			},
+		},
+		StartTime: time.Now(),
+	}
+
+	summary := calculateTextQuotaSummary(ctx, relayInfo, &dto.Usage{PromptTokens: 1})
+
+	require.NoError(t, summary.BillingError)
+	require.Equal(t, 9.0, summary.FileSearchPrice)
+	require.Equal(t, common.QuotaFromFloat(9.0*2/1000*common.QuotaPerUnit), common.QuotaFromDecimal(summary.ToolCallSurchargeQuota))
 }
 
 func TestComposeTieredTextQuotaFallbackKeepsToolCallSurcharges(t *testing.T) {

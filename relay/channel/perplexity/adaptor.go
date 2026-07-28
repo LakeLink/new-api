@@ -62,15 +62,19 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		return nil, errors.New("request is nil")
 	}
 	if request.WebSearchOptions != nil && request.WebSearchOptions.SearchType != "" {
-		switch strings.ToLower(request.WebSearchOptions.SearchType) {
+		searchType := strings.ToLower(request.WebSearchOptions.SearchType)
+		switch searchType {
 		case "fast", "pro", "auto":
-			request.WebSearchOptions.SearchType = strings.ToLower(request.WebSearchOptions.SearchType)
+			request.WebSearchOptions.SearchType = searchType
 		default:
 			return nil, fmt.Errorf("unsupported Perplexity search_type %q", request.WebSearchOptions.SearchType)
 		}
-	}
-	if lo.FromPtrOr(request.TopP, 0) >= 1 {
-		request.TopP = lo.ToPtr(0.99)
+		if request.Model != "sonar-pro" {
+			return nil, fmt.Errorf("Perplexity search_type is only supported by sonar-pro")
+		}
+		if (searchType == "pro" || searchType == "auto") && !lo.FromPtrOr(request.Stream, false) {
+			return nil, fmt.Errorf("Perplexity %s search_type requires streaming", searchType)
+		}
 	}
 	return requestOpenAI2Perplexity(*request), nil
 }

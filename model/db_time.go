@@ -19,17 +19,25 @@ func getDBTimestampTx(tx *gorm.DB) int64 {
 		tx = DB
 	}
 	var ts int64
-	var err error
-	switch {
-	case common.UsingMainDatabase(common.DatabaseTypePostgreSQL):
-		err = tx.Raw("SELECT EXTRACT(EPOCH FROM NOW())::bigint").Scan(&ts).Error
-	case common.UsingMainDatabase(common.DatabaseTypeSQLite):
-		err = tx.Raw("SELECT strftime('%s','now')").Scan(&ts).Error
-	default:
-		err = tx.Raw("SELECT UNIX_TIMESTAMP()").Scan(&ts).Error
-	}
+	err := tx.Raw("SELECT " + mainDatabaseUnixTimestampSQL()).Scan(&ts).Error
 	if err != nil || ts <= 0 {
 		return common.GetTimestamp()
 	}
 	return ts
+}
+
+func mainDatabaseUnixTimestampSQL() string {
+	switch {
+	case common.UsingMainDatabase(common.DatabaseTypePostgreSQL):
+		// PostgreSQL's NOW() is fixed at the transaction start, unlike MySQL's
+		// UNIX_TIMESTAMP() and SQLite's 'now'. statement_timestamp keeps lease
+		// and lifecycle timestamps current during a long-running transaction,
+		// while remaining stable within one statement on every dialect. Floor
+		// also avoids PostgreSQL's numeric-to-bigint rounding.
+		return "FLOOR(EXTRACT(EPOCH FROM statement_timestamp()))::bigint"
+	case common.UsingMainDatabase(common.DatabaseTypeSQLite):
+		return "CAST(strftime('%s','now') AS INTEGER)"
+	default:
+		return "UNIX_TIMESTAMP()"
+	}
 }

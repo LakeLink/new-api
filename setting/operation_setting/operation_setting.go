@@ -1,6 +1,9 @@
 package operation_setting
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 var DemoSiteEnabled = false
 var SelfUseModeEnabled = false
@@ -15,18 +18,31 @@ var AutomaticDisableKeywords = []string{
 	"Your account is not authorized",
 }
 
+var automaticDisableKeywordsMutex sync.RWMutex
+
 func AutomaticDisableKeywordsToString() string {
+	automaticDisableKeywordsMutex.RLock()
+	defer automaticDisableKeywordsMutex.RUnlock()
 	return strings.Join(AutomaticDisableKeywords, "\n")
 }
 
 func AutomaticDisableKeywordsFromString(s string) {
-	AutomaticDisableKeywords = []string{}
+	keywords := make([]string, 0)
 	ak := strings.Split(s, "\n")
 	for _, k := range ak {
 		k = strings.TrimSpace(k)
 		k = strings.ToLower(k)
 		if k != "" {
-			AutomaticDisableKeywords = append(AutomaticDisableKeywords, k)
+			keywords = append(keywords, k)
 		}
 	}
+	automaticDisableKeywordsMutex.Lock()
+	AutomaticDisableKeywords = keywords
+	automaticDisableKeywordsMutex.Unlock()
+}
+
+func GetAutomaticDisableKeywords() []string {
+	automaticDisableKeywordsMutex.RLock()
+	defer automaticDisableKeywordsMutex.RUnlock()
+	return append([]string(nil), AutomaticDisableKeywords...)
 }

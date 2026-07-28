@@ -2,10 +2,12 @@ package kling
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,12 +44,12 @@ type DynamicMask struct {
 }
 
 type CameraConfig struct {
-	Horizontal float64 `json:"horizontal,omitempty"`
-	Vertical   float64 `json:"vertical,omitempty"`
-	Pan        float64 `json:"pan,omitempty"`
-	Tilt       float64 `json:"tilt,omitempty"`
-	Roll       float64 `json:"roll,omitempty"`
-	Zoom       float64 `json:"zoom,omitempty"`
+	Horizontal *float64 `json:"horizontal,omitempty"`
+	Vertical   *float64 `json:"vertical,omitempty"`
+	Pan        *float64 `json:"pan,omitempty"`
+	Tilt       *float64 `json:"tilt,omitempty"`
+	Roll       *float64 `json:"roll,omitempty"`
+	Zoom       *float64 `json:"zoom,omitempty"`
 }
 
 type CameraControl struct {
@@ -65,7 +67,7 @@ type requestPayload struct {
 	AspectRatio    string         `json:"aspect_ratio,omitempty"`
 	ModelName      string         `json:"model_name,omitempty"`
 	Model          string         `json:"model,omitempty"` // Compatible with upstreams that only recognize "model"
-	CfgScale       float64        `json:"cfg_scale,omitempty"`
+	CfgScale       *float64       `json:"cfg_scale,omitempty"`
 	StaticMask     string         `json:"static_mask,omitempty"`
 	DynamicMasks   []DynamicMask  `json:"dynamic_masks,omitempty"`
 	CameraControl  *CameraControl `json:"camera_control,omitempty"`
@@ -128,8 +130,49 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
-	// Use the standard validation method for TaskSubmitReq
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+}
+
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
+}
+
+// EstimateBilling keeps std/5s as the configured per-call base. Kling's video
+// SKU doubles for 10s and legacy pro mode is 3.5x; master models have no
+// std/pro distinction. See the provider specification linked from
+// https://app.klingai.com/global/dev/document-api/quickStart/productIntroduction/overview.
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil
+	}
+	payload, err := a.convertToRequestPayload(&req, info)
+	if err != nil {
+		return nil
+	}
+	duration, err := strconv.Atoi(payload.Duration)
+	if err != nil {
+		return nil
+	}
+
+	ratios := make(map[string]float64, 2)
+	if duration > 5 {
+		ratios["duration"] = float64(duration) / 5
+	}
+	if payload.Mode == "pro" && !strings.Contains(strings.ToLower(payload.ModelName), "master") {
+		ratios["quality"] = 3.5
+	}
+	if len(ratios) == 0 {
+		return nil
+	}
+	return ratios
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -163,7 +206,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if !exists {
 		return nil, fmt.Errorf("request not found in context")
 	}
-	req := v.(relaycommon.TaskSubmitReq)
+	req, ok := v.(relaycommon.TaskSubmitReq)
+	if !ok {
+		return nil, fmt.Errorf("invalid request type in context")
+	}
 
 	body, err := a.convertToRequestPayload(&req, info)
 	if err != nil {
@@ -189,7 +235,9 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -215,7 +263,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 }
 
 // FetchTask fetch task status
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+func (a *TaskAdaptor) FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -225,14 +273,14 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		return nil, fmt.Errorf("invalid action")
 	}
 	path := lo.Ternary(action == constant.TaskActionGenerate, "/v1/videos/image2video", "/v1/videos/text2video")
-	url := fmt.Sprintf("%s%s/%s", baseUrl, path, taskID)
+	requestURL := fmt.Sprintf("%s%s/%s", strings.TrimRight(baseUrl, "/"), path, url.PathEscape(taskID))
 	if isNewAPIRelay(key) {
-		url = fmt.Sprintf("%s/kling%s/%s", baseUrl, path, taskID)
+		requestURL = fmt.Sprintf("%s/kling%s/%s", strings.TrimRight(baseUrl, "/"), path, url.PathEscape(taskID))
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 
 	token, err := a.createJWTTokenWithKey(key)
@@ -248,7 +296,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	return service.DoUpstreamRequest(client, req)
 }
 
 func (a *TaskAdaptor) GetModelList() []string {
@@ -264,27 +312,65 @@ func (a *TaskAdaptor) GetChannelName() string {
 // ============================
 
 func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, info *relaycommon.RelayInfo) (*requestPayload, error) {
+	modelName := taskcommon.DefaultString(info.UpstreamModelName, "kling-v1")
+	defaultCfgScale := 0.5
+	image := req.Image
+	if image == "" && len(req.Images) > 0 {
+		image = req.Images[0]
+	}
+	imageTail := ""
+	if len(req.Images) > 1 {
+		imageTail = req.Images[1]
+	}
 	r := requestPayload{
 		Prompt:         req.Prompt,
-		Image:          req.Image,
+		Image:          image,
+		ImageTail:      imageTail,
 		Mode:           taskcommon.DefaultString(req.Mode, "std"),
 		Duration:       fmt.Sprintf("%d", taskcommon.DefaultInt(req.Duration, 5)),
 		AspectRatio:    a.getAspectRatio(req.Size),
-		ModelName:      info.UpstreamModelName,
-		Model:          info.UpstreamModelName,
-		CfgScale:       0.5,
+		ModelName:      modelName,
+		Model:          modelName,
+		CfgScale:       &defaultCfgScale,
 		StaticMask:     "",
 		DynamicMasks:   []DynamicMask{},
 		CameraControl:  nil,
 		CallbackUrl:    "",
 		ExternalTaskId: "",
 	}
-	if r.ModelName == "" {
-		r.ModelName = "kling-v1"
-		r.Model = "kling-v1"
-	}
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
+	}
+	// The model is fixed by channel routing and pricing. Metadata aliases must
+	// not be able to switch either representation of it.
+	r.ModelName = modelName
+	r.Model = modelName
+	if r.CfgScale != nil &&
+		(math.IsNaN(*r.CfgScale) || math.IsInf(*r.CfgScale, 0) || *r.CfgScale < 0 || *r.CfgScale > 1) {
+		return nil, fmt.Errorf("cfg_scale must be between 0 and 1")
+	}
+	r.Mode = strings.ToLower(strings.TrimSpace(r.Mode))
+	if strings.Contains(strings.ToLower(modelName), "master") {
+		// Master SKUs have no std/pro distinction and reject the mode field.
+		_, metadataHasMode := req.Metadata["mode"]
+		if req.Mode != "" || metadataHasMode {
+			return nil, fmt.Errorf("mode is not supported by %s", modelName)
+		}
+		r.Mode = ""
+	} else if r.Mode != "std" && r.Mode != "pro" {
+		return nil, fmt.Errorf("mode must be either std or pro")
+	}
+
+	duration, err := strconv.Atoi(r.Duration)
+	if err != nil {
+		return nil, fmt.Errorf("duration must be an integer string: %w", err)
+	}
+	if strings.HasPrefix(strings.ToLower(modelName), "kling-v3") {
+		if duration < 3 || duration > 15 {
+			return nil, fmt.Errorf("duration must be between 3 and 15 seconds for Kling v3")
+		}
+	} else if duration != 5 && duration != 10 {
+		return nil, fmt.Errorf("duration must be either 5 or 10 seconds for %s", modelName)
 	}
 	return &r, nil
 }

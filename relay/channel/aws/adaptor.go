@@ -90,17 +90,19 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info.ChannelOtherSettings.AwsKeyType == dto.AwsKeyTypeApiKey {
-		awsModelId := getAwsModelID(info.UpstreamModelName)
-		a.ClientMode = ClientModeApiKey
 		awsSecret := strings.Split(info.ApiKey, "|")
 		if len(awsSecret) != 2 {
 			return "", errors.New("invalid aws api key, should be in format of <api-key>|<region>")
 		}
-		return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/converse", awsModelId, awsSecret[1]), nil
-	} else {
-		a.ClientMode = ClientModeAKSK
-		return "", nil
+		if strings.TrimSpace(awsSecret[0]) == "" || strings.TrimSpace(awsSecret[1]) == "" {
+			return "", errors.New("invalid aws api key, api key and region are required")
+		}
 	}
+	// The SDK path supports both access-key credentials and Bedrock bearer API
+	// keys. It also keeps the native provider request/response protocol paired;
+	// sending a Claude-native payload directly to the Converse endpoint does not.
+	a.ClientMode = ClientModeAKSK
+	return "", nil
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
@@ -117,7 +119,13 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	}
 	// 检查是否为Nova模型
 	if isNovaModel(request.Model) {
-		novaReq := convertToNovaRequest(request)
+		if !isNovaTextModel(request.Model) {
+			return nil, fmt.Errorf("AWS Nova model %q is not supported by the chat adapter", request.Model)
+		}
+		novaReq, err := convertToNovaRequest(request)
+		if err != nil {
+			return nil, err
+		}
 		a.IsNova = true
 		return novaReq, nil
 	}
@@ -163,7 +171,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		usage, err = claudeAdaptor.DoResponse(c, resp, info)
 	} else {
 		if a.IsNova {
-			err, usage = handleNovaRequest(c, info, a)
+			if info.IsStream {
+				err, usage = handleNovaStreamRequest(c, info, a)
+			} else {
+				err, usage = handleNovaRequest(c, info, a)
+			}
 		} else {
 			if info.IsStream {
 				err, usage = awsStreamHandler(c, info, a)

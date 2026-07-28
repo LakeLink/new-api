@@ -25,6 +25,7 @@ var ModelList = []string{
 	"jina-reranker-v2-base-multilingual",
 	"jina-reranker-m0",
 	"jina-reranker-v3",
+	"jina-reranker-v3.5",
 }
 
 var ChannelName = "jina"

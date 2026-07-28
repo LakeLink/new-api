@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"context"
 	"fmt"
-	"io"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -10,15 +12,30 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/service"
 )
 
-func getGeminiVideoURL(channel *model.Channel, task *model.Task, apiKey string) (string, error) {
+func readVideoTaskResponse(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, fmt.Errorf("empty task response")
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("task endpoint returned status %d", resp.StatusCode)
+	}
+	body, err := service.ReadUpstreamResponseBody(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func getGeminiVideoURL(ctx context.Context, channel *model.Channel, task *model.Task, apiKey string) (string, error) {
 	if channel == nil || task == nil {
 		return "", fmt.Errorf("invalid channel or task")
 	}
 
 	if url := extractGeminiVideoURLFromTaskData(task); url != "" {
-		return ensureAPIKey(url, apiKey), nil
+		return ensureAPIKey(url, apiKey)
 	}
 
 	baseURL := constant.ChannelBaseURLs[channel.Type]
@@ -36,7 +53,7 @@ func getGeminiVideoURL(channel *model.Channel, task *model.Task, apiKey string) 
 	}
 
 	proxy := channel.GetSetting().Proxy
-	resp, err := adaptor.FetchTask(baseURL, apiKey, map[string]any{
+	resp, err := adaptor.FetchTask(ctx, baseURL, apiKey, map[string]any{
 		"task_id": task.GetUpstreamTaskID(),
 		"action":  task.Action,
 	}, proxy)
@@ -45,18 +62,18 @@ func getGeminiVideoURL(channel *model.Channel, task *model.Task, apiKey string) 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readVideoTaskResponse(resp)
 	if err != nil {
 		return "", fmt.Errorf("read task response failed: %w", err)
 	}
 
 	taskInfo, parseErr := adaptor.ParseTaskResult(body)
 	if parseErr == nil && taskInfo != nil && taskInfo.RemoteUrl != "" {
-		return ensureAPIKey(taskInfo.RemoteUrl, apiKey), nil
+		return ensureAPIKey(taskInfo.RemoteUrl, apiKey)
 	}
 
 	if url := extractGeminiVideoURLFromPayload(body); url != "" {
-		return ensureAPIKey(url, apiKey), nil
+		return ensureAPIKey(url, apiKey)
 	}
 
 	if parseErr != nil {
@@ -145,7 +162,7 @@ func extractGeminiVideoURLFromGeneratedSamples(gvr map[string]any) string {
 	return ""
 }
 
-func getVertexVideoURL(channel *model.Channel, task *model.Task) (string, error) {
+func getVertexVideoURL(ctx context.Context, channel *model.Channel, task *model.Task) (string, error) {
 	if channel == nil || task == nil {
 		return "", fmt.Errorf("invalid channel or task")
 	}
@@ -171,7 +188,7 @@ func getVertexVideoURL(channel *model.Channel, task *model.Task) (string, error)
 		return "", fmt.Errorf("vertex key not available for task")
 	}
 
-	resp, err := adaptor.FetchTask(baseURL, key, map[string]any{
+	resp, err := adaptor.FetchTask(ctx, baseURL, key, map[string]any{
 		"task_id": task.GetUpstreamTaskID(),
 		"action":  task.Action,
 	}, channel.GetSetting().Proxy)
@@ -180,7 +197,7 @@ func getVertexVideoURL(channel *model.Channel, task *model.Task) (string, error)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readVideoTaskResponse(resp)
 	if err != nil {
 		return "", fmt.Errorf("read task response failed: %w", err)
 	}
@@ -280,15 +297,25 @@ func buildVideoDataURL(mimeType string, encoding string, base64Data string) stri
 	return "data:" + mime + ";base64," + base64Data
 }
 
-func ensureAPIKey(uri, key string) string {
+func ensureAPIKey(uri, key string) (string, error) {
 	if key == "" || uri == "" {
-		return uri
+		return uri, nil
 	}
-	if strings.Contains(uri, "key=") {
-		return uri
+	if strings.HasPrefix(uri, "data:") {
+		return uri, nil
 	}
-	if strings.Contains(uri, "?") {
-		return fmt.Sprintf("%s&key=%s", uri, key)
+	parsedURL, err := url.Parse(uri)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		return "", fmt.Errorf("invalid Gemini video URL")
 	}
-	return fmt.Sprintf("%s?key=%s", uri, key)
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("Gemini video URL credentials are not allowed")
+	}
+	query, err := url.ParseQuery(parsedURL.RawQuery)
+	if err != nil {
+		return "", fmt.Errorf("invalid Gemini video URL query")
+	}
+	query.Set("key", key)
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
 }

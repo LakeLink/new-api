@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"sort"
@@ -11,29 +12,78 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
+type telegramAuthRequest struct {
+	ID        int64  `json:"id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Username  string `json:"username"`
+	PhotoURL  string `json:"photo_url"`
+	AuthDate  int64  `json:"auth_date"`
+	Hash      string `json:"hash"`
+	Lang      string `json:"lang"`
+}
+
+func decodeTelegramAuthorization(body io.Reader) (map[string][]string, error) {
+	var request telegramAuthRequest
+	if err := common.DecodeJson(body, &request); err != nil {
+		return nil, errors.New("invalid Telegram authorization body")
+	}
+	if request.ID <= 0 || request.AuthDate <= 0 {
+		return nil, errors.New("invalid Telegram authorization body")
+	}
+	params := map[string][]string{
+		"id":        {strconv.FormatInt(request.ID, 10)},
+		"auth_date": {strconv.FormatInt(request.AuthDate, 10)},
+		"hash":      {request.Hash},
+	}
+	for key, value := range map[string]string{
+		"first_name": request.FirstName,
+		"last_name":  request.LastName,
+		"username":   request.Username,
+		"photo_url":  request.PhotoURL,
+		"lang":       request.Lang,
+	} {
+		if value != "" {
+			params[key] = []string{value}
+		}
+	}
+	return params, nil
+}
+
 func TelegramBind(c *gin.Context) {
-	if !common.TelegramOAuthEnabled {
+	if !common.GetLegacyOptionBool("TelegramOAuthEnabled", &common.TelegramOAuthEnabled) {
 		c.JSON(200, gin.H{
 			"message": "管理员未开启通过 Telegram 登录以及注册",
 			"success": false,
 		})
 		return
 	}
-	params := c.Request.URL.Query()
-	if !checkTelegramAuthorization(params, common.TelegramBotToken) {
+	params, err := decodeTelegramAuthorization(c.Request.Body)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !checkTelegramAuthorization(params, common.GetLegacyOptionString("TelegramBotToken", &common.TelegramBotToken)) {
 		c.JSON(200, gin.H{
 			"message": "无效的请求",
 			"success": false,
 		})
 		return
 	}
-	telegramId := params["id"][0]
-	if model.IsTelegramIdAlreadyTaken(telegramId) {
+	telegramID := params["id"][0]
+	taken, err := model.IsTelegramIdAlreadyTaken(telegramID)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if taken {
 		c.JSON(200, gin.H{
 			"message": "该 Telegram 账户已被绑定",
 			"success": false,
@@ -56,8 +106,26 @@ func TelegramBind(c *gin.Context) {
 		})
 		return
 	}
-	user.TelegramId = telegramId
-	if err := user.Update(false); err != nil {
+	claimed, err := claimTelegramAuthorization(params)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return
+	}
+	if !claimed {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "无效的请求",
+			"success": false,
+		})
+		return
+	}
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		return model.BindBuiltInOAuthIdentityWithTx(
+			tx,
+			model.BuiltInOAuthProviderTelegram,
+			telegramID,
+			user.Id,
+		)
+	}); err != nil {
 		c.JSON(200, gin.H{
 			"message": err.Error(),
 			"success": false,
@@ -65,19 +133,29 @@ func TelegramBind(c *gin.Context) {
 		return
 	}
 
-	c.Redirect(302, common.ThemeAwarePath("/console/personal"))
+	c.JSON(http.StatusOK, gin.H{
+		"message": "",
+		"success": true,
+	})
 }
 
 func TelegramLogin(c *gin.Context) {
-	if !common.TelegramOAuthEnabled {
+	if !common.GetLegacyOptionBool("TelegramOAuthEnabled", &common.TelegramOAuthEnabled) {
 		c.JSON(200, gin.H{
 			"message": "管理员未开启通过 Telegram 登录以及注册",
 			"success": false,
 		})
 		return
 	}
-	params := c.Request.URL.Query()
-	if !checkTelegramAuthorization(params, common.TelegramBotToken) {
+	params, err := decodeTelegramAuthorization(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": "无效的请求",
+			"success": false,
+		})
+		return
+	}
+	if !checkTelegramAuthorization(params, common.GetLegacyOptionString("TelegramBotToken", &common.TelegramBotToken)) {
 		c.JSON(200, gin.H{
 			"message": "无效的请求",
 			"success": false,
@@ -85,8 +163,8 @@ func TelegramLogin(c *gin.Context) {
 		return
 	}
 
-	telegramId := params["id"][0]
-	user := model.User{TelegramId: telegramId}
+	telegramID := params["id"][0]
+	user := model.User{TelegramId: telegramID}
 	if err := user.FillUserByTelegramId(); err != nil {
 		c.JSON(200, gin.H{
 			"message": err.Error(),
@@ -94,7 +172,47 @@ func TelegramLogin(c *gin.Context) {
 		})
 		return
 	}
+	if user.Id == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "用户已注销",
+			"success": false,
+		})
+		return
+	}
+	if user.Status != common.UserStatusEnabled {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "用户已被封禁",
+			"success": false,
+		})
+		return
+	}
+	claimed, err := claimTelegramAuthorization(params)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return
+	}
+	if !claimed {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "无效的请求",
+			"success": false,
+		})
+		return
+	}
 	setupLogin(&user, c)
+}
+
+func claimTelegramAuthorization(params map[string][]string) (bool, error) {
+	authDate, err := strconv.ParseInt(params["auth_date"][0], 10, 64)
+	if err != nil {
+		return false, err
+	}
+	const assertionTTL = 5 * time.Minute
+	return model.ClaimAuthenticationToken(
+		"telegram",
+		params["hash"][0],
+		time.Unix(authDate, 0).Add(assertionTTL).UnixMilli(),
+		time.Now().UnixMilli(),
+	)
 }
 
 func checkTelegramAuthorization(params map[string][]string, token string) bool {
@@ -106,8 +224,8 @@ func checkTelegramAuthorization(params map[string][]string, token string) bool {
 		return false
 	}
 	now := time.Now().Unix()
-	// Telegram login data is an authentication assertion, not a reusable account
-	// credential. Reject replayed assertions and clocks implausibly in the future.
+	// Telegram login data is a short-lived authentication assertion. Reject
+	// stale assertions and clocks implausibly in the future.
 	if authDate > now+30 || now-authDate > int64((5*time.Minute)/time.Second) {
 		return false
 	}

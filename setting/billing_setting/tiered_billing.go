@@ -2,6 +2,7 @@ package billing_setting
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -22,6 +23,34 @@ type BillingSetting struct {
 	BillingExpr map[string]string `json:"billing_expr"`
 }
 
+func (s BillingSetting) Validate() error {
+	for model, mode := range s.BillingMode {
+		if strings.TrimSpace(model) == "" {
+			return fmt.Errorf("billing mode model name must not be empty")
+		}
+		switch mode {
+		case BillingModeRatio, BillingModeTieredExpr:
+		default:
+			return fmt.Errorf("billing mode for %q must be %q or %q", model, BillingModeRatio, BillingModeTieredExpr)
+		}
+	}
+	for model, expression := range s.BillingExpr {
+		if strings.TrimSpace(model) == "" {
+			return fmt.Errorf("billing expression model name must not be empty")
+		}
+		if strings.TrimSpace(expression) == "" {
+			continue
+		}
+		if len(expression) > 64*1024 {
+			return fmt.Errorf("billing expression for %q exceeds 65536 bytes", model)
+		}
+		if err := smokeTestExpr(expression); err != nil {
+			return fmt.Errorf("billing expression for %q is invalid: %w", model, err)
+		}
+	}
+	return nil
+}
+
 var billingSetting = BillingSetting{
 	BillingMode: make(map[string]string),
 	BillingExpr: make(map[string]string),
@@ -36,23 +65,24 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func GetBillingMode(model string) string {
-	if mode, ok := billingSetting.BillingMode[model]; ok {
+	setting := config.Snapshot[BillingSetting]("billing_setting")
+	if mode, ok := setting.BillingMode[model]; ok {
 		return mode
 	}
 	return BillingModeRatio
 }
 
 func GetBillingExpr(model string) (string, bool) {
-	expr, ok := billingSetting.BillingExpr[model]
+	expr, ok := config.Snapshot[BillingSetting]("billing_setting").BillingExpr[model]
 	return expr, ok
 }
 
 func GetBillingModeCopy() map[string]string {
-	return lo.Assign(billingSetting.BillingMode)
+	return lo.Assign(config.Snapshot[BillingSetting]("billing_setting").BillingMode)
 }
 
 func GetBillingExprCopy() map[string]string {
-	return lo.Assign(billingSetting.BillingExpr)
+	return lo.Assign(config.Snapshot[BillingSetting]("billing_setting").BillingExpr)
 }
 
 func GetPricingSyncData(base map[string]any) map[string]any {

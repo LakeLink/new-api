@@ -254,16 +254,18 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				_ = helper.StringData(c, string(data))
 				streamStarted = true
 			}
-			final := openAICompletionResponse{
-				ID:      responseId,
-				Object:  "text_completion",
-				Created: created,
-				Model:   model,
-				Choices: make([]openAICompletionChoice, 0),
-				Usage:   usage,
-			}
-			if data, err := common.Marshal(final); err == nil {
-				_ = helper.StringData(c, string(data))
+			if info.ShouldIncludeUsage {
+				final := openAICompletionResponse{
+					ID:      responseId,
+					Object:  "text_completion",
+					Created: created,
+					Model:   model,
+					Choices: make([]openAICompletionChoice, 0),
+					Usage:   usage,
+				}
+				if data, err := common.Marshal(final); err == nil {
+					_ = helper.StringData(c, string(data))
+				}
 			}
 			helper.Done(c)
 			break
@@ -282,10 +284,13 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				_ = helper.StringData(c, string(data))
 			}
 		}
-		// emit usage frame
-		if final := helper.GenerateFinalUsageResponse(responseId, created, model, *usage); final != nil {
-			if data, err := common.Marshal(final); err == nil {
-				_ = helper.StringData(c, string(data))
+		// Emit the OpenAI usage-only frame only when stream_options.include_usage
+		// was requested. Usage is still returned internally for billing.
+		if info.ShouldIncludeUsage {
+			if final := helper.GenerateFinalUsageResponse(responseId, created, model, *usage); final != nil {
+				if data, err := common.Marshal(final); err == nil {
+					_ = helper.StringData(c, string(data))
+				}
 			}
 		}
 		// send [DONE]
@@ -327,11 +332,12 @@ func writeOllamaStreamError(c *gin.Context, message string) error {
 
 // non-stream handler for chat/generate
 func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	body, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	body, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	raw := string(body)
 	if common.DebugEnabled {
 		println("ollama non-stream raw resp:", raw)

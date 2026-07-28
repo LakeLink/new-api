@@ -100,7 +100,7 @@ func ApplyThinkingConfig(geminiRequest *dto.GeminiChatRequest, info *relaycommon
 				clampedBudget := clampThinkingBudget(modelName, budgetTokens)
 				geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{
 					ThinkingBudget:  common.GetPointer(clampedBudget),
-					IncludeThoughts: true,
+					IncludeThoughts: common.GetPointer(true),
 				}
 			}
 		}
@@ -119,15 +119,15 @@ func ApplyThinkingConfig(geminiRequest *dto.GeminiChatRequest, info *relaycommon
 
 		if isUnsupported {
 			geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{
-				IncludeThoughts: true,
+				IncludeThoughts: common.GetPointer(true),
 			}
 		} else {
 			geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{
-				IncludeThoughts: true,
+				IncludeThoughts: common.GetPointer(true),
 			}
 			if geminiRequest.GenerationConfig.MaxOutputTokens != nil && *geminiRequest.GenerationConfig.MaxOutputTokens > 0 {
-				budgetTokens := model_setting.GetGeminiSettings().ThinkingAdapterBudgetTokensPercentage * float64(*geminiRequest.GenerationConfig.MaxOutputTokens)
-				clampedBudget := clampThinkingBudget(modelName, int(budgetTokens))
+				budgetTokens := model_setting.GetGeminiSettings().GetThinkingBudgetTokens(*geminiRequest.GenerationConfig.MaxOutputTokens)
+				clampedBudget := clampThinkingBudget(modelName, budgetTokens)
 				geminiRequest.GenerationConfig.ThinkingConfig.ThinkingBudget = common.GetPointer(clampedBudget)
 			} else if len(oaiRequest) > 0 {
 				geminiRequest.GenerationConfig.ThinkingConfig.ThinkingBudget = common.GetPointer(clampThinkingBudgetByEffort(modelName, oaiRequest[0].ReasoningEffort))
@@ -141,7 +141,7 @@ func ApplyThinkingConfig(geminiRequest *dto.GeminiChatRequest, info *relaycommon
 		}
 	} else if _, level, ok := reasoning.TrimEffortSuffix(modelName); ok && level != "" {
 		geminiRequest.GenerationConfig.ThinkingConfig = &dto.GeminiThinkingConfig{
-			IncludeThoughts: true,
+			IncludeThoughts: common.GetPointer(true),
 			ThinkingLevel:   level,
 		}
 		info.ReasoningEffort = level
@@ -200,6 +200,18 @@ func SupportedMimeTypesList() []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// OpenAIServiceTierToGemini maps equivalent OpenAI-compatible service tier
+// spellings to the enum accepted by Gemini GenerateContent.
+func OpenAIServiceTierToGemini(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "auto", "default":
+		return dto.GeminiServiceTierStandard, true
+	default:
+		return dto.NormalizeGeminiServiceTier(value)
+	}
 }
 
 func isNew25ProModel(modelName string) bool {

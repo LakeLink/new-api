@@ -259,9 +259,9 @@ func ClaimSystemTask(id int64, taskType string, runnerID string, lockUntil int64
 		return nil, false, nil
 	}
 
-	if err := DB.Where("id = ?", id).First(&task).Error; err != nil {
-		return nil, false, err
-	}
+	task.Status = SystemTaskStatusRunning
+	task.LockedBy = runnerID
+	task.UpdatedAt = now
 	return &task, true, nil
 }
 
@@ -273,7 +273,8 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 		LockedUntil: lockUntil,
 		UpdatedAt:   now,
 	}
-	if err := DB.Create(lock).Error; err == nil {
+	createErr := DB.Create(lock).Error
+	if createErr == nil {
 		return true, "", nil
 	}
 
@@ -281,9 +282,12 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 	err := DB.Where("type = ?", taskType).First(&existing).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, "", nil
+			// A uniqueness race leaves an existing row. If no row exists, the
+			// original insert failed for another reason and must not be hidden
+			// as ordinary lock contention.
+			return false, "", createErr
 		}
-		return false, "", err
+		return false, "", errors.Join(createErr, err)
 	}
 	if existing.LockedUntil >= now {
 		return false, "", nil
@@ -432,6 +436,63 @@ func (task *SystemTask) ToResponse() SystemTaskResponse {
 
 func activeSystemTaskStatuses() []string {
 	return []string{string(SystemTaskStatusPending), string(SystemTaskStatusRunning)}
+}
+
+const systemTaskCleanupBatchSize = 500
+
+// CleanupTerminalSystemTasks removes a bounded batch of old operational task
+// history while retaining the latest row of every type for scheduler cadence
+// checks. Billing adjustments are an exactly-once financial ledger and are
+// deliberately excluded: deleting a succeeded adjustment would allow the same
+// deterministic task ID to be recreated and applied again.
+func CleanupTerminalSystemTasks(olderThanSeconds int64) (int64, error) {
+	if olderThanSeconds <= 0 {
+		olderThanSeconds = 7 * 24 * 3600
+	}
+	cutoff := GetDBTimestamp() - olderThanSeconds
+	var deleted int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		latestByType := tx.Model(&SystemTask{}).
+			Select("MAX(id)").
+			Group("type")
+		var tasks []SystemTask
+		if err := tx.Select("id", "task_id").
+			Where(
+				"type <> ? AND status IN ? AND updated_at < ? AND id NOT IN (?)",
+				SystemTaskTypeBillingAdjustment,
+				[]SystemTaskStatus{SystemTaskStatusSucceeded, SystemTaskStatusFailed},
+				cutoff,
+				latestByType,
+			).
+			Order("id asc").
+			Limit(systemTaskCleanupBatchSize).
+			Find(&tasks).Error; err != nil {
+			return err
+		}
+		if len(tasks) == 0 {
+			return nil
+		}
+
+		ids := make([]int64, 0, len(tasks))
+		taskIDs := make([]string, 0, len(tasks))
+		for _, task := range tasks {
+			ids = append(ids, task.ID)
+			taskIDs = append(taskIDs, task.TaskID)
+		}
+		if err := tx.Where("task_id IN ?", taskIDs).Delete(&SystemTaskLock{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where(
+			"id IN ? AND type <> ? AND status IN ? AND updated_at < ?",
+			ids,
+			SystemTaskTypeBillingAdjustment,
+			[]SystemTaskStatus{SystemTaskStatusSucceeded, SystemTaskStatusFailed},
+			cutoff,
+		).Delete(&SystemTask{})
+		deleted = result.RowsAffected
+		return result.Error
+	})
+	return deleted, err
 }
 
 func marshalSystemTaskJSON(v any) (string, error) {

@@ -2,7 +2,6 @@ package console_setting
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,7 +34,7 @@ func validateURL(urlStr string, index int, itemType string) error {
 	if !urlRegex.MatchString(urlStr) {
 		return fmt.Errorf("第%d个%s的URL格式不正确", index, itemType)
 	}
-	if _, err := url.Parse(urlStr); err != nil {
+	if _, err := common.ParseAbsoluteHTTPURL(urlStr); err != nil {
 		return fmt.Errorf("第%d个%s的URL无法解析：%s", index, itemType, err.Error())
 	}
 	return nil

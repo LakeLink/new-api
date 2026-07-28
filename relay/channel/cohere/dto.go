@@ -7,7 +7,7 @@ type CohereRequest struct {
 	ChatHistory []ChatHistory `json:"chat_history"`
 	Message     string        `json:"message"`
 	Stream      bool          `json:"stream"`
-	MaxTokens   uint          `json:"max_tokens"`
+	MaxTokens   *uint         `json:"max_tokens,omitempty"`
 	SafetyMode  string        `json:"safety_mode,omitempty"`
 }
 
@@ -35,8 +35,9 @@ type CohereRerankRequest struct {
 	Documents       []any  `json:"documents"`
 	Query           string `json:"query"`
 	Model           string `json:"model"`
-	TopN            int    `json:"top_n"`
-	ReturnDocuments bool   `json:"return_documents"`
+	TopN            *int   `json:"top_n,omitempty"`
+	ReturnDocuments *bool  `json:"return_documents,omitempty"`
+	MaxChunksPerDoc *int   `json:"max_chunks_per_doc,omitempty"`
 }
 
 type CohereRerankResponseResult struct {
@@ -50,8 +51,9 @@ type CohereMeta struct {
 }
 
 type CohereBilledUnits struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  int      `json:"input_tokens"`
+	OutputTokens int      `json:"output_tokens"`
+	SearchUnits  *float64 `json:"search_units,omitempty"`
 }
 
 type CohereTokens struct {

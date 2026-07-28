@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -60,6 +61,154 @@ func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
 	assert.Equal(t, 600, got.Quota)
 	assert.Equal(t, 420, got.UsedQuota)
 	assert.Equal(t, 4, got.RequestCount)
+}
+
+func TestUserUpdateDoesNotOverwriteSecurityOrBindingFields(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	oldAccessToken := "old-dashboard-token"
+	user := User{
+		Id:             11,
+		Username:       "security-race-user",
+		Password:       "password",
+		DisplayName:    "before",
+		Role:           common.RoleCommonUser,
+		Status:         common.UserStatusEnabled,
+		Email:          "before@example.com",
+		TelegramId:     "telegram-before",
+		AccessToken:    &oldAccessToken,
+		SessionVersion: 2,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	staleUser, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+
+	newAccessToken := "new-dashboard-token"
+	require.NoError(t, DB.Model(&User{}).
+		Where("id = ?", user.Id).
+		Updates(map[string]interface{}{
+			"role":            common.RoleAdminUser,
+			"status":          common.UserStatusDisabled,
+			"email":           "after@example.com",
+			"telegram_id":     "telegram-after",
+			"access_token":    newAccessToken,
+			"session_version": 9,
+		}).Error)
+
+	staleUser.DisplayName = "after"
+	require.NoError(t, staleUser.Update(false))
+
+	var got User
+	require.NoError(t, DB.First(&got, user.Id).Error)
+	assert.Equal(t, "after", got.DisplayName)
+	assert.Equal(t, common.RoleAdminUser, got.Role)
+	assert.Equal(t, common.UserStatusDisabled, got.Status)
+	assert.Equal(t, "after@example.com", got.Email)
+	assert.Equal(t, "telegram-after", got.TelegramId)
+	assert.Equal(t, newAccessToken, got.GetAccessToken())
+	assert.Equal(t, int64(9), got.SessionVersion)
+}
+
+func TestUserAdministrationChangeRevokesAuthenticationState(t *testing.T) {
+	setupUserUpdateTestState(t)
+	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
+
+	accessToken := "dashboard-token"
+	user := User{
+		Id:             12,
+		Username:       "managed-user",
+		Password:       "password",
+		Role:           common.RoleCommonUser,
+		Status:         common.UserStatusEnabled,
+		AccessToken:    &accessToken,
+		SessionVersion: 3,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	browserSessionID, err := CreateBrowserSession(user.Id, time.Now().Unix())
+	require.NoError(t, err)
+
+	updated, err := UpdateUserAdministration(
+		user.Id,
+		common.RoleCommonUser,
+		common.UserStatusEnabled,
+		common.RoleAdminUser,
+		common.UserStatusEnabled,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, common.RoleAdminUser, updated.Role)
+	assert.Empty(t, updated.GetAccessToken())
+	assert.Equal(t, int64(4), updated.SessionVersion)
+
+	resolved, err := GetUserByBrowserSession(
+		user.Id,
+		browserSessionID,
+		time.Now().Unix(),
+	)
+	require.NoError(t, err)
+	assert.Nil(t, resolved)
+}
+
+func TestUserAdministrationRejectsStaleRoleAndStatus(t *testing.T) {
+	setupUserUpdateTestState(t)
+	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
+
+	user := User{
+		Id:       13,
+		Username: "managed-conflict-user",
+		Password: "password",
+		Role:     common.RoleCommonUser,
+		Status:   common.UserStatusDisabled,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	_, err := UpdateUserAdministration(
+		user.Id,
+		common.RoleCommonUser,
+		common.UserStatusEnabled,
+		common.RoleAdminUser,
+		common.UserStatusEnabled,
+	)
+	require.ErrorIs(t, err, ErrUserAdministrationConflict)
+
+	var got User
+	require.NoError(t, DB.First(&got, user.Id).Error)
+	assert.Equal(t, common.RoleCommonUser, got.Role)
+	assert.Equal(t, common.UserStatusDisabled, got.Status)
+}
+
+func TestAdministrativePasswordResetRevokesAuthenticationState(t *testing.T) {
+	setupUserUpdateTestState(t)
+	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
+
+	accessToken := "administrative-reset-token"
+	user := User{
+		Id:             14,
+		Username:       "administrative-reset-user",
+		Password:       "old-password-hash",
+		DisplayName:    "Administrative Reset",
+		Role:           common.RoleCommonUser,
+		Status:         common.UserStatusEnabled,
+		Group:          "default",
+		AccessToken:    &accessToken,
+		SessionVersion: 5,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	browserSessionID, err := CreateBrowserSession(user.Id, time.Now().Unix())
+	require.NoError(t, err)
+
+	user.Password = "NewPassword123"
+	require.NoError(t, user.Edit(true))
+	assert.Empty(t, user.GetAccessToken())
+	assert.Equal(t, int64(6), user.SessionVersion)
+
+	resolved, err := GetUserByBrowserSession(
+		user.Id,
+		browserSessionID,
+		time.Now().Unix(),
+	)
+	require.NoError(t, err)
+	assert.Nil(t, resolved)
 }
 
 func TestUpdateUserSettingOnlyUpdatesSetting(t *testing.T) {

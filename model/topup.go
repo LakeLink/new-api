@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -17,18 +18,69 @@ type TopUp struct {
 	Amount int64 `json:"amount"`
 	// Quota is the exact amount credited to the user. Older rows leave this at
 	// zero and are interpreted using the legacy provider-specific fields.
-	Quota             int     `json:"quota" gorm:"not null;default:0"`
-	RefundedQuota     int     `json:"refunded_quota" gorm:"not null;default:0"`
-	Money             float64 `json:"money"`
-	TradeNo           string  `json:"trade_no" gorm:"unique;type:varchar(255);index"`
-	ProviderPaymentId string  `json:"provider_payment_id" gorm:"type:varchar(255);index"`
-	ProviderProductId string  `json:"provider_product_id" gorm:"type:varchar(255);index"`
-	Currency          string  `json:"currency" gorm:"type:varchar(8)"`
-	PaymentMethod     string  `json:"payment_method" gorm:"type:varchar(50)"`
-	PaymentProvider   string  `json:"payment_provider" gorm:"type:varchar(50);default:''"`
-	CreateTime        int64   `json:"create_time"`
-	CompleteTime      int64   `json:"complete_time"`
-	Status            string  `json:"status"`
+	Quota                int     `json:"quota" gorm:"not null;default:0"`
+	RefundedQuota        int     `json:"refunded_quota" gorm:"not null;default:0"`
+	ProviderRefundEvents string  `json:"-" gorm:"type:text"`
+	Money                float64 `json:"money"`
+	TradeNo              string  `json:"trade_no" gorm:"type:varchar(255)"`
+	TradeNoHash          *string `json:"-" gorm:"type:char(64);uniqueIndex:ux_topups_trade_no_hash"`
+	ProviderPaymentId    string  `json:"provider_payment_id" gorm:"type:varchar(255)"`
+	ProviderPaymentHash  *string `json:"-" gorm:"type:char(64);uniqueIndex:ux_topups_provider_payment_hash"`
+	// ProviderPaidAmountMinor distinguishes the verified provider settlement
+	// amount from Money, which remains the original checkout quote. Nil denotes
+	// a legacy completed row whose exact paid amount was not persisted; a
+	// non-nil zero records a valid 100%-promotion checkout.
+	ProviderPaidAmountMinor *int64 `json:"provider_paid_amount_minor" gorm:"type:bigint"`
+	ProviderProductId       string `json:"provider_product_id" gorm:"type:varchar(255)"`
+	Currency                string `json:"currency" gorm:"type:varchar(8)"`
+	PaymentMethod           string `json:"payment_method" gorm:"type:varchar(50)"`
+	PaymentProvider         string `json:"payment_provider" gorm:"type:varchar(50);default:''"`
+	CreateTime              int64  `json:"create_time"`
+	CompleteTime            int64  `json:"complete_time"`
+	Status                  string `json:"status"`
+}
+
+func (topUp *TopUp) normalizeIdentities() error {
+	tradeNo, tradeNoHash, err := normalizeTradeNumberIdentity(topUp.TradeNo)
+	if err != nil {
+		return err
+	}
+	topUp.TradeNo = tradeNo
+	topUp.TradeNoHash = &tradeNoHash
+	if topUp.ProviderPaymentId == "" {
+		topUp.ProviderPaymentHash = nil
+		return nil
+	}
+	paymentProvider, providerPaymentID, providerPaymentHash, err :=
+		normalizeProviderPaymentIdentity(topUp.PaymentProvider, topUp.ProviderPaymentId)
+	if err != nil {
+		return err
+	}
+	topUp.PaymentProvider = paymentProvider
+	topUp.ProviderPaymentId = providerPaymentID
+	topUp.ProviderPaymentHash = &providerPaymentHash
+	return nil
+}
+
+func (topUp *TopUp) BeforeCreate(_ *gorm.DB) error {
+	return topUp.normalizeIdentities()
+}
+
+func (topUp *TopUp) BeforeUpdate(tx *gorm.DB) error {
+	// Map-based status updates use a zero-value model and must not synthesize a
+	// provider identity. Save calls carry the persisted ID and full identity.
+	if topUp.Id <= 0 {
+		return nil
+	}
+	if err := topUp.normalizeIdentities(); err != nil {
+		return err
+	}
+	tx.Statement.SetColumn("trade_no", topUp.TradeNo)
+	tx.Statement.SetColumn("trade_no_hash", topUp.TradeNoHash)
+	tx.Statement.SetColumn("payment_provider", topUp.PaymentProvider)
+	tx.Statement.SetColumn("provider_payment_id", topUp.ProviderPaymentId)
+	tx.Statement.SetColumn("provider_payment_hash", topUp.ProviderPaymentHash)
+	return nil
 }
 
 const (
@@ -53,10 +105,12 @@ func TopUpQuotaForAmount(amount int64, amountIsTokens bool) (int, error) {
 	}
 	quotaValue := decimal.NewFromInt(amount)
 	if !amountIsTokens {
-		if common.QuotaPerUnit <= 0 {
+		quotaPerUnit := common.CurrentQuotaPerUnit()
+		if math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) ||
+			quotaPerUnit <= 0 || quotaPerUnit > float64(common.MaxQuota) {
 			return 0, errors.New("额度单位配置错误")
 		}
-		quotaValue = quotaValue.Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+		quotaValue = quotaValue.Mul(decimal.NewFromFloat(quotaPerUnit))
 	}
 	quota, clamp := common.QuotaFromDecimalChecked(quotaValue)
 	if clamp != nil {
@@ -73,15 +127,28 @@ func topUpCreditQuota(topUp *TopUp) (int, error) {
 		return 0, errors.New("充值订单不存在")
 	}
 	if topUp.Quota > 0 {
+		if topUp.Quota > common.MaxQuota {
+			return 0, errors.New("无效的充值额度")
+		}
 		return topUp.Quota, nil
 	}
 	// Backward compatibility for orders created before the exact quota column
 	// was introduced.
-	value := decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+	value := decimal.NewFromInt(topUp.Amount)
+	quotaPerUnit := 0.0
+	if topUp.PaymentProvider != PaymentProviderCreem {
+		quotaPerUnit = common.CurrentQuotaPerUnit()
+		if math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) ||
+			quotaPerUnit <= 0 || quotaPerUnit > float64(common.MaxQuota) {
+			return 0, errors.New("额度单位配置错误")
+		}
+		value = value.Mul(decimal.NewFromFloat(quotaPerUnit))
+	}
 	if topUp.PaymentProvider == PaymentProviderStripe {
-		value = decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
-	} else if topUp.PaymentProvider == PaymentProviderCreem {
-		value = decimal.NewFromInt(topUp.Amount)
+		if math.IsNaN(topUp.Money) || math.IsInf(topUp.Money, 0) || topUp.Money <= 0 {
+			return 0, errors.New("无效的充值金额")
+		}
+		value = decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(quotaPerUnit))
 	}
 	quota, clamp := common.QuotaFromDecimalChecked(value)
 	if clamp != nil {
@@ -91,6 +158,29 @@ func topUpCreditQuota(topUp *TopUp) (int, error) {
 		return 0, errors.New("无效的充值额度")
 	}
 	return quota, nil
+}
+
+func topUpPaidAmountMinor(topUp *TopUp) (int64, error) {
+	if topUp == nil {
+		return 0, errors.New("充值订单不存在")
+	}
+	if topUp.ProviderPaidAmountMinor != nil {
+		if *topUp.ProviderPaidAmountMinor < 0 {
+			return 0, errors.New("persisted provider payment amount is invalid")
+		}
+		return *topUp.ProviderPaidAmountMinor, nil
+	}
+	if math.IsNaN(topUp.Money) || math.IsInf(topUp.Money, 0) || topUp.Money <= 0 {
+		return 0, errors.New("persisted provider payment amount is invalid")
+	}
+	expectedMinorDecimal := decimal.NewFromFloat(topUp.Money).
+		Mul(decimal.NewFromInt(100)).
+		Round(0)
+	if !expectedMinorDecimal.IsPositive() ||
+		expectedMinorDecimal.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
+		return 0, errors.New("persisted provider payment amount is invalid")
+	}
+	return expectedMinorDecimal.IntPart(), nil
 }
 
 const (
@@ -151,13 +241,38 @@ func GetTopUpById(id int) *TopUp {
 }
 
 func GetTopUpByTradeNo(tradeNo string) *TopUp {
-	var topUp *TopUp
-	var err error
-	err = DB.Where("trade_no = ?", tradeNo).First(&topUp).Error
-	if err != nil {
-		return nil
-	}
+	topUp, _ := FindTopUpByTradeNo(tradeNo)
 	return topUp
+}
+
+// FindTopUpByTradeNo preserves database failures for payment/webhook callers
+// that must distinguish a missing order from a transient storage outage.
+func FindTopUpByTradeNo(tradeNo string) (*TopUp, error) {
+	var topUp TopUp
+	if err := findTopUpByTradeNo(DB, tradeNo, &topUp); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTopUpNotFound
+		}
+		return nil, err
+	}
+	return &topUp, nil
+}
+
+func findTopUpByTradeNo(db *gorm.DB, tradeNo string, topUp *TopUp) error {
+	if db == nil || topUp == nil {
+		return errors.New("topup lookup is invalid")
+	}
+	tradeNo, tradeNoHash, err := normalizeTradeNumberIdentity(tradeNo)
+	if err != nil {
+		return err
+	}
+	if err := db.Where("trade_no_hash = ?", tradeNoHash).First(topUp).Error; err != nil {
+		return err
+	}
+	if topUp.TradeNo != tradeNo {
+		return errors.New("trade number identity hash collision")
+	}
+	return nil
 }
 
 func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, targetStatus string) error {
@@ -165,18 +280,16 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 		return errors.New("未提供支付单号")
 	}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	return DB.Transaction(func(tx *gorm.DB) error {
 		topUp := &TopUp{}
-		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+		if err := findTopUpByTradeNo(lockForUpdate(tx), tradeNo, topUp); err != nil {
 			return ErrTopUpNotFound
 		}
 		if expectedPaymentProvider != "" && topUp.PaymentProvider != expectedPaymentProvider {
 			return ErrPaymentMethodMismatch
+		}
+		if topUp.Status == targetStatus {
+			return nil
 		}
 		if topUp.Status != common.TopUpStatusPending {
 			return ErrTopUpStatusInvalid
@@ -187,22 +300,20 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 	})
 }
 
-func Recharge(referenceId string, customerId string, providerPaymentId string, callerIp string) (err error) {
+func Recharge(referenceId string, customerId string, providerPaymentId string, paidAmountMinor int64, callerIp string) (err error) {
 	if referenceId == "" {
 		return errors.New("未提供支付单号")
+	}
+	if paidAmountMinor < 0 {
+		return errors.New("支付金额无效")
 	}
 
 	var quota int
 	completed := false
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error
+		err := findTopUpByTradeNo(lockForUpdate(tx), referenceId, topUp)
 		if err != nil {
 			return errors.New("充值订单不存在")
 		}
@@ -211,7 +322,43 @@ func Recharge(referenceId string, customerId string, providerPaymentId string, c
 			return ErrPaymentMethodMismatch
 		}
 
-		if topUp.Status == common.TopUpStatusSuccess || topUp.Status == TopUpStatusPartiallyRefunded || topUp.Status == TopUpStatusRefunded {
+		if math.IsNaN(topUp.Money) || math.IsInf(topUp.Money, 0) || topUp.Money <= 0 {
+			return errors.New("支付金额与订单不匹配")
+		}
+		expectedAmountMinor := decimal.NewFromFloat(topUp.Money).
+			Mul(decimal.NewFromInt(100)).
+			Round(0)
+		if !expectedAmountMinor.IsPositive() ||
+			expectedAmountMinor.GreaterThan(decimal.NewFromInt(math.MaxInt64)) ||
+			paidAmountMinor > expectedAmountMinor.IntPart() {
+			return errors.New("支付金额与订单不匹配")
+		}
+		terminal := topUp.Status == common.TopUpStatusSuccess ||
+			topUp.Status == TopUpStatusPartiallyRefunded ||
+			topUp.Status == TopUpStatusRefunded
+		if terminal {
+			changed := false
+			if topUp.ProviderPaidAmountMinor != nil {
+				if providerPaymentId != topUp.ProviderPaymentId ||
+					*topUp.ProviderPaidAmountMinor != paidAmountMinor {
+					return ErrPaymentMethodMismatch
+				}
+			} else {
+				// Legacy completed rows lack exact amount evidence. A verified
+				// replay may fill it once, but it still cannot replace an
+				// already-bound provider payment identity.
+				if topUp.ProviderPaymentId != "" && providerPaymentId != topUp.ProviderPaymentId {
+					return ErrPaymentMethodMismatch
+				}
+				if topUp.ProviderPaymentId == "" && providerPaymentId != "" {
+					topUp.ProviderPaymentId = providerPaymentId
+				}
+				topUp.ProviderPaidAmountMinor = &paidAmountMinor
+				changed = true
+			}
+			if changed {
+				return tx.Save(topUp).Error
+			}
 			return nil
 		}
 		if topUp.Status != common.TopUpStatusPending {
@@ -226,6 +373,7 @@ func Recharge(referenceId string, customerId string, providerPaymentId string, c
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
 		topUp.Quota = quota
+		topUp.ProviderPaidAmountMinor = &paidAmountMinor
 		if providerPaymentId != "" {
 			topUp.ProviderPaymentId = providerPaymentId
 		}
@@ -253,7 +401,10 @@ func Recharge(referenceId string, customerId string, providerPaymentId string, c
 	if err := InvalidateUserCache(topUp.UserId); err != nil {
 		common.SysLog("failed to invalidate user cache after Stripe topup: " + err.Error())
 	}
-	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值额度: %v，支付金额：%.2f", logger.FormatQuota(quota), topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
+	paidMoney := decimal.NewFromInt(paidAmountMinor).
+		Div(decimal.NewFromInt(100)).
+		InexactFloat64()
+	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值额度: %v，支付金额：%.2f", logger.FormatQuota(quota), paidMoney), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
 
 	return nil
 }
@@ -266,13 +417,9 @@ func RechargeEpay(referenceId string, paymentMethod string, providerPaymentId st
 	var quota int
 	completed := false
 	topUp := &TopUp{}
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error; err != nil {
+		if err := findTopUpByTradeNo(lockForUpdate(tx), referenceId, topUp); err != nil {
 			return ErrTopUpNotFound
 		}
 		if topUp.PaymentProvider != PaymentProviderEpay || (paymentMethod != "" && topUp.PaymentMethod != paymentMethod) {
@@ -484,11 +631,6 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		return errors.New("未提供订单号")
 	}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	var userId int
 	var quotaToAdd int
 	var payMoney float64
@@ -498,7 +640,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		topUp := &TopUp{}
 		// 行级锁，避免并发补单
-		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
+		if err := findTopUpByTradeNo(lockForUpdate(tx), tradeNo, topUp); err != nil {
 			return errors.New("充值订单不存在")
 		}
 
@@ -554,22 +696,20 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	RecordTopupLog(userId, fmt.Sprintf("管理员补单成功，充值金额: %v，支付金额：%f", logger.FormatQuota(quotaToAdd), payMoney), callerIp, paymentMethod, "admin")
 	return nil
 }
-func RechargeCreem(referenceId string, providerPaymentId string, customerEmail string, customerName string, callerIp string) (err error) {
+func RechargeCreem(referenceId string, providerPaymentId string, paidAmountMinor int64, customerEmail string, customerName string, callerIp string) (err error) {
 	if referenceId == "" {
 		return errors.New("未提供支付单号")
+	}
+	if paidAmountMinor < 0 {
+		return errors.New("支付金额无效")
 	}
 
 	var quota int
 	completed := false
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error
+		err := findTopUpByTradeNo(lockForUpdate(tx), referenceId, topUp)
 		if err != nil {
 			return errors.New("充值订单不存在")
 		}
@@ -578,7 +718,29 @@ func RechargeCreem(referenceId string, providerPaymentId string, customerEmail s
 			return ErrPaymentMethodMismatch
 		}
 
-		if topUp.Status == common.TopUpStatusSuccess || topUp.Status == TopUpStatusPartiallyRefunded || topUp.Status == TopUpStatusRefunded {
+		terminal := topUp.Status == common.TopUpStatusSuccess ||
+			topUp.Status == TopUpStatusPartiallyRefunded ||
+			topUp.Status == TopUpStatusRefunded
+		if terminal {
+			changed := false
+			if topUp.ProviderPaidAmountMinor != nil {
+				if providerPaymentId != topUp.ProviderPaymentId ||
+					*topUp.ProviderPaidAmountMinor != paidAmountMinor {
+					return ErrPaymentMethodMismatch
+				}
+			} else {
+				if topUp.ProviderPaymentId != "" && providerPaymentId != topUp.ProviderPaymentId {
+					return ErrPaymentMethodMismatch
+				}
+				if topUp.ProviderPaymentId == "" && providerPaymentId != "" {
+					topUp.ProviderPaymentId = providerPaymentId
+				}
+				topUp.ProviderPaidAmountMinor = &paidAmountMinor
+				changed = true
+			}
+			if changed {
+				return tx.Save(topUp).Error
+			}
 			return nil
 		}
 		if topUp.Status != common.TopUpStatusPending {
@@ -592,6 +754,7 @@ func RechargeCreem(referenceId string, providerPaymentId string, customerEmail s
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
 		topUp.Quota = quota
+		topUp.ProviderPaidAmountMinor = &paidAmountMinor
 		if providerPaymentId != "" {
 			topUp.ProviderPaymentId = providerPaymentId
 		}
@@ -637,13 +800,16 @@ func RechargeCreem(referenceId string, providerPaymentId string, customerEmail s
 	if err := InvalidateUserCache(topUp.UserId); err != nil {
 		common.SysLog("failed to invalidate user cache after Creem topup: " + err.Error())
 	}
-	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
+	paidMoney := decimal.NewFromInt(paidAmountMinor).
+		Div(decimal.NewFromInt(100)).
+		InexactFloat64()
+	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, paidMoney), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
 
 	return nil
 }
 
-func RechargeWaffo(tradeNo string, callerIp string) (err error) {
-	if tradeNo == "" {
+func RechargeWaffo(tradeNo string, providerPaymentId string, callerIp string) (err error) {
+	if tradeNo == "" || providerPaymentId == "" {
 		return errors.New("未提供支付单号")
 	}
 
@@ -651,13 +817,8 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 	completed := false
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error
+		err := findTopUpByTradeNo(lockForUpdate(tx), tradeNo, topUp)
 		if err != nil {
 			return errors.New("充值订单不存在")
 		}
@@ -667,6 +828,13 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 		}
 
 		if topUp.Status == common.TopUpStatusSuccess || topUp.Status == TopUpStatusPartiallyRefunded || topUp.Status == TopUpStatusRefunded {
+			if topUp.ProviderPaymentId != "" && topUp.ProviderPaymentId != providerPaymentId {
+				return ErrPaymentMethodMismatch
+			}
+			if topUp.ProviderPaymentId == "" {
+				topUp.ProviderPaymentId = providerPaymentId
+				return tx.Save(topUp).Error
+			}
 			return nil // 幂等：已成功直接返回
 		}
 
@@ -682,6 +850,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 		topUp.CompleteTime = common.GetTimestamp()
 		topUp.Status = common.TopUpStatusSuccess
 		topUp.Quota = quotaToAdd
+		topUp.ProviderPaymentId = providerPaymentId
 		if err := tx.Save(topUp).Error; err != nil {
 			return err
 		}
@@ -718,13 +887,8 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 	completed := false
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error
+		err := findTopUpByTradeNo(lockForUpdate(tx), tradeNo, topUp)
 		if err != nil {
 			return errors.New("充值订单不存在")
 		}
@@ -796,12 +960,20 @@ func ReverseTopUpByTradeNo(paymentProvider string, tradeNo string, refundMoney f
 	return reverseTopUp(paymentProvider, "trade_no", tradeNo, refundMoney, full)
 }
 
-func reverseTopUp(paymentProvider string, lookupColumn string, lookupValue string, refundMoney float64, full bool) error {
+// ReverseTopUpByTradeNoEvent applies a provider refund amount exactly once.
+// Providers such as Waffo Pancake report each partial refund independently
+// rather than reporting a cumulative refunded total, so the verified provider
+// event ID and minor-unit amount are persisted on the order.
+func ReverseTopUpByTradeNoEvent(paymentProvider string, tradeNo string, eventID string, refundMinor int64) error {
+	if paymentProvider == "" || tradeNo == "" || eventID == "" || refundMinor <= 0 {
+		return errors.New("invalid provider refund event")
+	}
+
 	var userId int
 	var revoked int
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var topUp TopUp
-		if err := lockForUpdate(tx).Where(lookupColumn+" = ?", lookupValue).First(&topUp).Error; err != nil {
+		if err := findTopUpByTradeNo(lockForUpdate(tx), tradeNo, &topUp); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrTopUpNotFound
 			}
@@ -809,6 +981,157 @@ func reverseTopUp(paymentProvider string, lookupColumn string, lookupValue strin
 		}
 		if topUp.PaymentProvider != paymentProvider {
 			return ErrPaymentMethodMismatch
+		}
+		if topUp.Quota == 0 && topUp.Amount == 0 {
+			return ErrTopUpNotFound
+		}
+		if topUp.Status != common.TopUpStatusSuccess &&
+			topUp.Status != TopUpStatusPartiallyRefunded &&
+			topUp.Status != TopUpStatusRefunded {
+			return ErrTopUpStatusInvalid
+		}
+
+		quota, err := topUpCreditQuota(&topUp)
+		if err != nil {
+			return err
+		}
+		expectedMinor, err := topUpPaidAmountMinor(&topUp)
+		if err != nil {
+			return err
+		}
+		if expectedMinor <= 0 || refundMinor > expectedMinor {
+			return errors.New("provider refund amount is invalid")
+		}
+
+		refundEvents := map[string]int64{}
+		if topUp.ProviderRefundEvents != "" {
+			if err := common.UnmarshalJsonStr(topUp.ProviderRefundEvents, &refundEvents); err != nil {
+				return fmt.Errorf("invalid persisted provider refund state: %w", err)
+			}
+		}
+		if persistedMinor, exists := refundEvents[eventID]; exists {
+			if persistedMinor != refundMinor {
+				return errors.New("provider refund event amount changed")
+			}
+			return nil
+		}
+		const maxProviderRefundEvents = 1000
+		if len(refundEvents) >= maxProviderRefundEvents {
+			return errors.New("provider refund event limit exceeded")
+		}
+		refundEvents[eventID] = refundMinor
+
+		cumulativeMinor := int64(0)
+		for _, amountMinor := range refundEvents {
+			if amountMinor <= 0 || amountMinor > expectedMinor {
+				return errors.New("persisted provider refund amount is invalid")
+			}
+			if cumulativeMinor > expectedMinor-amountMinor {
+				return errors.New("provider refund total exceeds payment amount")
+			}
+			cumulativeMinor += amountMinor
+		}
+		desired := decimal.NewFromInt(int64(quota)).
+			Mul(decimal.NewFromInt(cumulativeMinor)).
+			Div(decimal.NewFromInt(expectedMinor))
+		desiredRefundedQuota, clamp := common.QuotaFromDecimalChecked(desired)
+		if clamp != nil {
+			return clamp
+		}
+		if desiredRefundedQuota < topUp.RefundedQuota {
+			return errors.New("provider refund state would reduce refunded quota")
+		}
+		revoked = desiredRefundedQuota - topUp.RefundedQuota
+
+		var user User
+		if err := lockForUpdate(tx).Where("id = ?", topUp.UserId).First(&user).Error; err != nil {
+			return err
+		}
+		newQuota, err := checkedQuotaBalanceDelta(user.Quota, -revoked)
+		if err != nil {
+			return err
+		}
+		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", newQuota).Error; err != nil {
+			return err
+		}
+		encodedEvents, err := common.Marshal(refundEvents)
+		if err != nil {
+			return err
+		}
+		topUp.Quota = quota
+		topUp.RefundedQuota = desiredRefundedQuota
+		topUp.ProviderRefundEvents = string(encodedEvents)
+		if desiredRefundedQuota == quota {
+			topUp.Status = TopUpStatusRefunded
+		} else {
+			topUp.Status = TopUpStatusPartiallyRefunded
+		}
+		if err := tx.Save(&topUp).Error; err != nil {
+			return err
+		}
+		userId = topUp.UserId
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if userId > 0 {
+		if err := InvalidateUserCache(userId); err != nil {
+			common.SysLog("failed to invalidate user cache after provider topup reversal: " + err.Error())
+		}
+		if revoked > 0 {
+			RecordLog(userId, LogTypeTopup, fmt.Sprintf("支付退款撤销额度: %v", logger.FormatQuota(revoked)))
+		}
+	}
+	return nil
+}
+
+func reverseTopUp(paymentProvider string, lookupColumn string, lookupValue string, refundMoney float64, full bool) error {
+	if !full && (math.IsNaN(refundMoney) || math.IsInf(refundMoney, 0) || refundMoney <= 0) {
+		return errors.New("invalid partial refund amount")
+	}
+	var userId int
+	var revoked int
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var topUp TopUp
+		query := lockForUpdate(tx)
+		expectedProviderPaymentID := ""
+		expectedTradeNo := ""
+		switch lookupColumn {
+		case "provider_payment_id":
+			normalizedProvider, normalizedPaymentID, paymentHash, err :=
+				normalizeProviderPaymentIdentity(paymentProvider, lookupValue)
+			if err != nil {
+				return err
+			}
+			paymentProvider = normalizedProvider
+			expectedProviderPaymentID = normalizedPaymentID
+			query = query.Where("provider_payment_hash = ?", paymentHash)
+		case "trade_no":
+			normalizedTradeNo, tradeNoHash, err := normalizeTradeNumberIdentity(lookupValue)
+			if err != nil {
+				return err
+			}
+			expectedTradeNo = normalizedTradeNo
+			query = query.Where("trade_no_hash = ?", tradeNoHash)
+		default:
+			return errors.New("invalid topup lookup")
+		}
+		if err := query.First(&topUp).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTopUpNotFound
+			}
+			return err
+		}
+		if topUp.PaymentProvider != paymentProvider {
+			return ErrPaymentMethodMismatch
+		}
+		if expectedProviderPaymentID != "" &&
+			topUp.ProviderPaymentId != expectedProviderPaymentID {
+			return errors.New("provider payment identity hash collision")
+		}
+		if expectedTradeNo != "" && topUp.TradeNo != expectedTradeNo {
+			return errors.New("trade number identity hash collision")
 		}
 		// Subscription purchases are mirrored into the top-up history with no
 		// wallet credit. Let the caller route those reversals to entitlement
@@ -825,15 +1148,23 @@ func reverseTopUp(paymentProvider string, lookupColumn string, lookupValue strin
 		}
 		desiredRefundedQuota := quota
 		if !full {
-			if refundMoney <= 0 || topUp.Money <= 0 {
+			expectedMinor, err := topUpPaidAmountMinor(&topUp)
+			if err != nil || expectedMinor <= 0 {
+				return errors.New("invalid partial refund amount")
+			}
+			refundMinor := decimal.NewFromFloat(refundMoney).
+				Mul(decimal.NewFromInt(100))
+			if !refundMinor.IsPositive() ||
+				refundMinor.GreaterThan(decimal.NewFromInt(expectedMinor)) {
 				return errors.New("invalid partial refund amount")
 			}
 			desired := decimal.NewFromInt(int64(quota)).
-				Mul(decimal.NewFromFloat(refundMoney)).
-				Div(decimal.NewFromFloat(topUp.Money))
-			desiredRefundedQuota, _ = common.QuotaFromDecimalChecked(desired)
-			if desiredRefundedQuota > quota {
-				desiredRefundedQuota = quota
+				Mul(refundMinor).
+				Div(decimal.NewFromInt(expectedMinor))
+			var clamp *common.QuotaClamp
+			desiredRefundedQuota, clamp = common.QuotaFromDecimalChecked(desired)
+			if clamp != nil {
+				return clamp
 			}
 		}
 		if desiredRefundedQuota <= topUp.RefundedQuota {
@@ -845,7 +1176,10 @@ func reverseTopUp(paymentProvider string, lookupColumn string, lookupValue strin
 		if err := lockForUpdate(tx).Where("id = ?", topUp.UserId).First(&user).Error; err != nil {
 			return err
 		}
-		newQuota, _ := common.QuotaFromFloatChecked(float64(user.Quota) - float64(revoked))
+		newQuota, err := checkedQuotaBalanceDelta(user.Quota, -revoked)
+		if err != nil {
+			return err
+		}
 		if err := tx.Model(&User{}).Where("id = ?", topUp.UserId).Update("quota", newQuota).Error; err != nil {
 			return err
 		}

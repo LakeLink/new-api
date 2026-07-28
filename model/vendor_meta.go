@@ -14,17 +14,49 @@ import (
 
 type Vendor struct {
 	Id          int            `json:"id"`
-	Name        string         `json:"name" gorm:"size:128;not null;uniqueIndex:uk_vendor_name_delete_at,priority:1"`
+	Name        string         `json:"name" gorm:"size:128;not null;index"`
+	NameHash    *string        `json:"-" gorm:"type:char(64);uniqueIndex:ux_vendors_active_name_hash"`
 	Description string         `json:"description,omitempty" gorm:"type:text"`
 	Icon        string         `json:"icon,omitempty" gorm:"type:varchar(128)"`
 	Status      int            `json:"status" gorm:"default:1"`
 	CreatedTime int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime int64          `json:"updated_time" gorm:"bigint"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index;uniqueIndex:uk_vendor_name_delete_at,priority:2"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+func (v *Vendor) BeforeCreate(_ *gorm.DB) error {
+	name, nameHash, err := normalizeNamedResourceIdentity(v.Name, 128)
+	if err != nil {
+		return err
+	}
+	v.Name = name
+	v.NameHash = &nameHash
+	return nil
+}
+
+func (v *Vendor) BeforeUpdate(tx *gorm.DB) error {
+	if v.Id <= 0 {
+		return nil
+	}
+	name, nameHash, err := normalizeNamedResourceIdentity(v.Name, 128)
+	if err != nil {
+		return err
+	}
+	v.Name = name
+	v.NameHash = &nameHash
+	tx.Statement.SetColumn("name", name)
+	tx.Statement.SetColumn("name_hash", nameHash)
+	return nil
 }
 
 // Insert 创建新的供应商记录
 func (v *Vendor) Insert() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(v.Name, 128)
+	if err != nil {
+		return err
+	}
+	v.Name = name
+	v.NameHash = &nameHash
 	now := common.GetTimestamp()
 	v.CreatedTime = now
 	v.UpdatedTime = now
@@ -33,23 +65,47 @@ func (v *Vendor) Insert() error {
 
 // IsVendorNameDuplicated 检查供应商名称是否重复（排除自身 ID）
 func IsVendorNameDuplicated(id int, name string) (bool, error) {
-	if name == "" {
-		return false, nil
+	_, nameHash, err := normalizeNamedResourceIdentity(name, 128)
+	if err != nil {
+		return false, err
 	}
 	var cnt int64
-	err := DB.Model(&Vendor{}).Where("name = ? AND id <> ?", name, id).Count(&cnt).Error
+	err = DB.Model(&Vendor{}).Where("name_hash = ? AND id <> ?", nameHash, id).Count(&cnt).Error
 	return cnt > 0, err
 }
 
 // Update 更新供应商记录
 func (v *Vendor) Update() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(v.Name, 128)
+	if err != nil {
+		return err
+	}
+	v.Name = name
+	v.NameHash = &nameHash
 	v.UpdatedTime = common.GetTimestamp()
 	return DB.Save(v).Error
 }
 
 // Delete 软删除供应商
 func (v *Vendor) Delete() error {
-	return DB.Delete(v).Error
+	return DeleteVendorByID(v.Id)
+}
+
+func DeleteVendorByID(id int) error {
+	if id <= 0 {
+		return gorm.ErrMissingWhereClause
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var vendor Vendor
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&vendor).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&vendor).UpdateColumn("name_hash", nil).Error; err != nil {
+			return err
+		}
+		vendor.NameHash = nil
+		return tx.Delete(&vendor).Error
+	})
 }
 
 // GetVendorByID 根据 ID 获取供应商

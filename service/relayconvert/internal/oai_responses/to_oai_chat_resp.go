@@ -111,10 +111,11 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 	}
 
 	out := &dto.OpenAITextResponse{
-		Id:      id,
-		Object:  "chat.completion",
-		Created: created,
-		Model:   resp.Model,
+		Id:          id,
+		Object:      "chat.completion",
+		Created:     created,
+		Model:       resp.Model,
+		ServiceTier: resp.ServiceTier,
 		Choices: []dto.OpenAITextResponseChoice{
 			{
 				Index:        0,
@@ -140,6 +141,8 @@ func UsageFromResponsesUsage(src *dto.Usage) *dto.Usage {
 		usage.BillingUsage = dto.NewOpenAIResponsesBillingUsage(src)
 	}
 	usage.Cost = src.Cost
+	usage.CostInUSDTicks = src.CostInUSDTicks
+	usage.ActualServiceTier = src.ActualServiceTier
 	if src.InputTokens != 0 {
 		usage.PromptTokens = src.InputTokens
 		usage.InputTokens = src.InputTokens

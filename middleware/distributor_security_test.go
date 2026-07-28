@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,30 @@ func TestForcedChannelStillEnforcesTokenModelLimit(t *testing.T) {
 
 	assert.False(t, handlerCalled)
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
+}
+
+func TestForcedChannelRejectsStaleContextTypeWithoutPanicking(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, appI18n.Init())
+	handlerCalled := false
+	router := gin.New()
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyTokenSpecificChannelId, 42)
+		c.Next()
+	}, Distribute(), func(c *gin.Context) {
+		handlerCalled = true
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test"}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	require.NotPanics(t, func() {
+		router.ServeHTTP(recorder, request)
+	})
+	assert.False(t, handlerCalled)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 }
 
 func TestForcedChannelStillEnforcesTokenGroupAbility(t *testing.T) {
@@ -84,4 +109,60 @@ func TestForcedChannelStillEnforcesTokenGroupAbility(t *testing.T) {
 
 	assert.False(t, handlerCalled)
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
+}
+
+func TestForcedChannelDoesNotTreatAbilityQueryFailureAsAccessDenial(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, appI18n.Init())
+	oldDB := model.DB
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		model.DB = oldDB
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+	})
+	require.NoError(t, db.Create(&model.Channel{
+		Id: 42, Name: "forced", Key: "provider-key", Status: common.ChannelStatusEnabled,
+		Models: "gpt-test", Group: "default",
+	}).Error)
+
+	injectedErr := errors.New("injected ability query failure")
+	const callbackName = "test:fail_forced_channel_ability_query"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(
+		callbackName,
+		func(tx *gorm.DB) {
+			if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "abilities" {
+				_ = tx.AddError(injectedErr)
+			}
+		},
+	))
+	t.Cleanup(func() {
+		require.NoError(t, db.Callback().Query().Remove(callbackName))
+	})
+
+	handlerCalled := false
+	router := gin.New()
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyTokenSpecificChannelId, "42")
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		c.Next()
+	}, Distribute(), func(c *gin.Context) {
+		handlerCalled = true
+		c.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	assert.False(t, handlerCalled)
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 }

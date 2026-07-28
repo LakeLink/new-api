@@ -4,9 +4,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -16,12 +18,12 @@ type turnstileCheckResponse struct {
 
 var (
 	turnstileVerifyURL  = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-	turnstileHTTPClient = &http.Client{Timeout: 10 * time.Second}
+	turnstileHTTPClient = service.GetHttpClientWithTimeout(10 * time.Second)
 )
 
 func TurnstileCheck() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if common.TurnstileCheckEnabled {
+		if common.GetLegacyOptionBool("TurnstileCheckEnabled", &common.TurnstileCheckEnabled) {
 			response := c.Query("turnstile")
 			if response == "" {
 				c.JSON(http.StatusOK, gin.H{
@@ -31,16 +33,29 @@ func TurnstileCheck() gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			rawRes, err := turnstileHTTPClient.PostForm(turnstileVerifyURL, url.Values{
-				"secret":   {common.TurnstileSecretKey},
+			form := url.Values{
+				"secret":   {common.GetLegacyOptionString("TurnstileSecretKey", &common.TurnstileSecretKey)},
 				"response": {response},
 				"remoteip": {c.ClientIP()},
-			})
+			}
+			request, err := http.NewRequestWithContext(
+				c.Request.Context(),
+				http.MethodPost,
+				turnstileVerifyURL,
+				strings.NewReader(form.Encode()),
+			)
+			if err == nil {
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			var rawRes *http.Response
+			if err == nil {
+				rawRes, err = service.DoUpstreamRequest(turnstileHTTPClient, request)
+			}
 			if err != nil {
-				common.SysLog(err.Error())
+				common.SysLog("Turnstile verification request failed: " + common.MaskSensitiveInfo(err.Error()))
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": "Turnstile 校验服务异常，请稍后重试！",
 				})
 				c.Abort()
 				return
@@ -57,10 +72,10 @@ func TurnstileCheck() gin.HandlerFunc {
 			var res turnstileCheckResponse
 			err = common.DecodeJson(io.LimitReader(rawRes.Body, 64*1024), &res)
 			if err != nil {
-				common.SysLog(err.Error())
+				common.SysLog("Turnstile verification response decode failed: " + err.Error())
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": "Turnstile 校验服务异常，请稍后重试！",
 				})
 				c.Abort()
 				return

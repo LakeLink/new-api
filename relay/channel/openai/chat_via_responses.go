@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -39,11 +38,12 @@ func responsesBufferedContext(c *gin.Context, info *relaycommon.RelayInfo) conte
 }
 
 func responsesBufferedIdleTimeout() time.Duration {
-	timeout := time.Duration(constant.StreamingTimeout) * time.Second
-	if timeout <= 0 {
-		return 300 * time.Second
-	}
-	return timeout
+	return common.SafeIntervalDuration(
+		constant.StreamingTimeout,
+		time.Second,
+		300*time.Second,
+		"responses buffered stream timeout",
+	)
 }
 
 func responsesResponseHasContent(resp *dto.OpenAIResponsesResponse) bool {
@@ -71,7 +71,7 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	defer service.CloseResponseBodyGracefully(resp)
 
 	var responsesResp dto.OpenAIResponsesResponse
-	body, err := io.ReadAll(resp.Body)
+	body, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
@@ -98,10 +98,13 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	usage := chatResult.Usage
 
 	if usage == nil || usage.TotalTokens == 0 {
+		upstreamUsage := usage
 		text := service.ExtractOutputTextFromResponses(&responsesResp)
 		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
+		preserveProviderUsageMetadata(usage, upstreamUsage)
 		chatResp.Usage = *usage
 	}
+	applyOpenAIUsagePricing(info, usage, responsesResp.ServiceTier)
 
 	responseValue := any(chatResp)
 	if info.RelayFormat != types.RelayFormatOpenAI {
@@ -248,10 +251,13 @@ streamLoop:
 	}
 	usage := chatResult.Usage
 	if usage == nil || usage.TotalTokens == 0 {
+		upstreamUsage := usage
 		text := service.ExtractOutputTextFromResponses(finalResponse)
 		usage = service.ResponseText2Usage(c, text, info.UpstreamModelName, info.GetEstimatePromptTokens())
+		preserveProviderUsageMetadata(usage, upstreamUsage)
 		chatResp.Usage = *usage
 	}
+	applyOpenAIUsagePricing(info, usage, finalResponse.ServiceTier)
 
 	responseValue := any(chatResp)
 	if info.RelayFormat != types.RelayFormatOpenAI {
@@ -398,9 +404,12 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 	usage := state.Usage()
 	if usage == nil || usage.TotalTokens == 0 {
+		upstreamUsage := usage
 		usage = service.ResponseText2Usage(c, state.UsageText(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+		preserveProviderUsageMetadata(usage, upstreamUsage)
 		state.SetUsage(usage)
 	}
+	applyOpenAIUsagePricing(info, usage, usage.ActualServiceTier)
 
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 		info.ClaudeConvertInfo.Usage = usage

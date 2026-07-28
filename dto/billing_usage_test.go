@@ -35,6 +35,27 @@ func TestNewClaudeMessagesBillingUsageRequiresTokenContent(t *testing.T) {
 		CacheCreation: &ClaudeCacheCreationUsage{Ephemeral5mInputTokens: 4},
 	})
 	require.NotNil(t, cacheOnly)
+
+	toolOnly := NewClaudeMessagesBillingUsage(&ClaudeUsage{
+		ServerToolUse: &ClaudeServerToolUse{WebSearchRequests: 1},
+	})
+	require.NotNil(t, toolOnly)
+	require.NotNil(t, toolOnly.ClaudeUsage.ServerToolUse)
+	assert.Equal(t, 1, toolOnly.ClaudeUsage.ServerToolUse.WebSearchRequests)
+}
+
+func TestVerifiedZeroBillingUsageIsInternalOnly(t *testing.T) {
+	usage := &BillingUsage{
+		Source:       BillingUsageSourceClaudeMessages,
+		Semantic:     BillingUsageSemanticAnthropic,
+		VerifiedZero: true,
+		ClaudeUsage:  &ClaudeUsage{},
+	}
+
+	encoded, err := common.Marshal(usage)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "verified")
+	assert.True(t, CloneBillingUsage(usage).VerifiedZero)
 }
 
 func TestNewOpenAIChatBillingUsageRequiresTokenContent(t *testing.T) {
@@ -61,6 +82,23 @@ func TestNewEstimatedGeminiChatBillingUsage(t *testing.T) {
 	assert.Equal(t, 11, billingUsage.GeminiUsageMetadata.PromptTokenCount)
 	assert.Equal(t, 7, billingUsage.GeminiUsageMetadata.CandidatesTokenCount)
 	assert.Equal(t, 18, billingUsage.GeminiUsageMetadata.TotalTokenCount)
+}
+
+func TestCloneGeminiBillingUsagePreservesCacheModalityDetails(t *testing.T) {
+	original := NewGeminiChatBillingUsage(&GeminiUsageMetadata{
+		CachedContentTokenCount: 2,
+		CacheTokensDetails: []GeminiPromptTokensDetails{
+			{Modality: "AUDIO", TokenCount: 2},
+		},
+	})
+
+	clone := CloneBillingUsage(original)
+
+	require.NotNil(t, clone)
+	require.NotNil(t, clone.GeminiUsageMetadata)
+	require.Equal(t, []GeminiPromptTokensDetails{{Modality: "AUDIO", TokenCount: 2}}, clone.GeminiUsageMetadata.CacheTokensDetails)
+	original.GeminiUsageMetadata.CacheTokensDetails[0].TokenCount = 9
+	assert.Equal(t, 2, clone.GeminiUsageMetadata.CacheTokensDetails[0].TokenCount)
 }
 
 func TestBillingUsageJSONUsesProtocolNamedFields(t *testing.T) {

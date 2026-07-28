@@ -20,7 +20,7 @@ const (
 type openRouterRequestReasoning struct {
 	Enabled   bool   `json:"enabled"`
 	Effort    string `json:"effort,omitempty"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
+	MaxTokens *int   `json:"max_tokens,omitempty"`
 	Exclude   bool   `json:"exclude,omitempty"`
 }
 
@@ -29,8 +29,9 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 		Model:       claudeRequest.Model,
 		Temperature: claudeRequest.Temperature,
 	}
-	if claudeRequest.MaxTokens != nil {
-		openAIRequest.MaxTokens = common.GetPointer(*claudeRequest.MaxTokens)
+	if maxTokens := claudeRequest.GetMaxTokensPointer(); maxTokens != nil {
+		value := *maxTokens
+		openAIRequest.MaxTokens = &value
 	}
 	if claudeRequest.TopP != nil {
 		openAIRequest.TopP = common.GetPointer(*claudeRequest.TopP)
@@ -40,6 +41,36 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 	}
 	if claudeRequest.Stream != nil {
 		openAIRequest.Stream = common.GetPointer(*claudeRequest.Stream)
+	}
+	if claudeRequest.ToolChoice != nil {
+		toolChoice, err := common.Any2Type[dto.ClaudeToolChoice](claudeRequest.ToolChoice)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Claude tool_choice: %w", err)
+		}
+		switch toolChoice.Type {
+		case "auto":
+			openAIRequest.ToolChoice = "auto"
+		case "any":
+			openAIRequest.ToolChoice = "required"
+		case "none":
+			openAIRequest.ToolChoice = "none"
+		case "tool":
+			if toolChoice.Name == "" {
+				return nil, fmt.Errorf("invalid Claude tool_choice: name is required for type tool")
+			}
+			openAIRequest.ToolChoice = map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": toolChoice.Name,
+				},
+			}
+		default:
+			return nil, fmt.Errorf("invalid Claude tool_choice type %q", toolChoice.Type)
+		}
+		if toolChoice.DisableParallelToolUse != nil && toolChoice.Type != "none" {
+			parallelToolCalls := !*toolChoice.DisableParallelToolUse
+			openAIRequest.ParallelTooCalls = &parallelToolCalls
+		}
 	}
 
 	isOpenRouter := relaymeta.RelayInfoChannelType(info) == constant.ChannelTypeOpenRouter
@@ -53,7 +84,7 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 			if claudeRequest.Thinking.Type == "enabled" {
 				reasoningConfig = openRouterRequestReasoning{
 					Enabled:   true,
-					MaxTokens: claudeRequest.Thinking.GetBudgetTokens(),
+					MaxTokens: claudeRequest.Thinking.BudgetTokens,
 				}
 			} else if claudeRequest.Thinking.Type == "adaptive" {
 				reasoningConfig = openRouterRequestReasoning{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	passkeysvc "github.com/QuantumNous/new-api/service/passkey"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -323,15 +324,12 @@ func PasskeyLoginFinish(c *gin.Context) {
 		return
 	}
 
-	// 更新凭证信息
-	updatedCredential := model.NewPasskeyCredentialFromWebAuthn(modelUser.Id, credential)
-	if updatedCredential == nil {
-		common.ApiErrorMsg(c, "Passkey 凭证更新失败")
-		return
-	}
 	now := time.Now()
-	updatedCredential.LastUsedAt = &now
-	if err := model.UpsertPasskeyCredential(updatedCredential); err != nil {
+	if err := model.UpdatePasskeyCredentialAfterAssertion(
+		modelUser.Id,
+		credential,
+		now,
+	); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -404,10 +402,14 @@ func PasskeyVerifyBegin(c *gin.Context) {
 
 	credential, err := model.GetPasskeyByUserID(user.Id)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "该用户尚未绑定 Passkey",
-		})
+		if errors.Is(err, model.ErrPasskeyNotFound) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "该用户尚未绑定 Passkey",
+			})
+			return
+		}
+		common.ApiError(c, err)
 		return
 	}
 
@@ -464,10 +466,14 @@ func PasskeyVerifyFinish(c *gin.Context) {
 
 	credential, err := model.GetPasskeyByUserID(user.Id)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "该用户尚未绑定 Passkey",
-		})
+		if errors.Is(err, model.ErrPasskeyNotFound) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "该用户尚未绑定 Passkey",
+			})
+			return
+		}
+		common.ApiError(c, err)
 		return
 	}
 
@@ -478,25 +484,42 @@ func PasskeyVerifyFinish(c *gin.Context) {
 	}
 
 	waUser := passkeysvc.NewWebAuthnUser(user, credential)
-	_, err = wa.FinishLogin(waUser, *sessionData, c.Request)
+	validatedCredential, err := wa.FinishLogin(
+		waUser,
+		*sessionData,
+		c.Request,
+	)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	// 更新凭证的最后使用时间
 	now := time.Now()
-	credential.LastUsedAt = &now
-	if err := model.UpsertPasskeyCredential(credential); err != nil {
+	if err := model.UpdatePasskeyCredentialAfterAssertion(
+		user.Id,
+		validatedCredential,
+		now,
+	); err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
 	session := sessions.Default(c)
+	browserSessionID, ok := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	if !ok || browserSessionID == "" {
+		common.ApiError(c, errSessionInvalid)
+		return
+	}
 	// Mark passkey as ready; /api/verify will convert this into the final secure verification session.
 	session.Set(PasskeyReadySessionKey, time.Now().Unix())
+	session.Set(passkeyReadyUserIDSessionKey, user.Id)
+	session.Set(passkeyReadyBrowserSessionKey, browserSessionID)
 	session.Delete(SecureVerificationSessionKey)
 	session.Delete(secureVerificationMethodSessionKey)
+	session.Delete(secureVerificationUserIDSessionKey)
+	session.Delete(secureVerificationBrowserSessionKey)
 	if err := session.Save(); err != nil {
 		common.ApiError(c, fmt.Errorf("保存验证状态失败: %v", err))
 		return
@@ -540,32 +563,75 @@ func requirePasskeyDeleteVerification(c *gin.Context, userID int) bool {
 func requireAnySecureVerification(c *gin.Context) bool {
 	session := sessions.Default(c)
 	verifiedAt, ok := session.Get(SecureVerificationSessionKey).(int64)
-	if !ok || time.Now().Unix()-verifiedAt >= SecureVerificationTimeout {
-		session.Delete(SecureVerificationSessionKey)
-		session.Delete(secureVerificationMethodSessionKey)
-		_ = session.Save()
-		common.ApiErrorMsg(c, "请先完成安全验证")
+	if !ok {
+		rejectSecureVerification(c, "VERIFICATION_REQUIRED", "请先完成安全验证")
+		return false
+	}
+	elapsed := time.Now().Unix() - verifiedAt
+	if elapsed < -30 {
+		clearControllerSecureVerificationSession(session)
+		rejectSecureVerification(c, "VERIFICATION_INVALID", "验证状态异常，请重新验证")
+		return false
+	}
+	if elapsed >= SecureVerificationTimeout {
+		clearControllerSecureVerificationSession(session)
+		rejectSecureVerification(c, "VERIFICATION_EXPIRED", "验证已过期，请重新验证")
 		return false
 	}
 	method, ok := session.Get(secureVerificationMethodSessionKey).(string)
 	if !ok || (method != secureVerificationMethod2FA && method != secureVerificationMethodPasskey && method != secureVerificationMethodPassword) {
-		common.ApiErrorMsg(c, "请先完成安全验证")
+		clearControllerSecureVerificationSession(session)
+		rejectSecureVerification(c, "VERIFICATION_INVALID", "验证状态异常，请重新验证")
+		return false
+	}
+	verifiedUserID, userIDOK := session.Get(
+		secureVerificationUserIDSessionKey,
+	).(int)
+	verifiedBrowserSessionID, browserSessionIDOK := session.Get(
+		secureVerificationBrowserSessionKey,
+	).(string)
+	currentBrowserSessionID, currentBrowserSessionIDOK := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	if !userIDOK ||
+		verifiedUserID <= 0 ||
+		verifiedUserID != c.GetInt("id") ||
+		!browserSessionIDOK ||
+		verifiedBrowserSessionID == "" ||
+		!currentBrowserSessionIDOK ||
+		verifiedBrowserSessionID != currentBrowserSessionID {
+		clearControllerSecureVerificationSession(session)
+		rejectSecureVerification(c, "VERIFICATION_INVALID", "验证状态异常，请重新验证")
 		return false
 	}
 	return true
 }
 
+func clearControllerSecureVerificationSession(session sessions.Session) {
+	session.Delete(SecureVerificationSessionKey)
+	session.Delete(secureVerificationMethodSessionKey)
+	session.Delete(secureVerificationUserIDSessionKey)
+	session.Delete(secureVerificationBrowserSessionKey)
+	session.Delete(PasskeyReadySessionKey)
+	session.Delete(passkeyReadyUserIDSessionKey)
+	session.Delete(passkeyReadyBrowserSessionKey)
+	_ = session.Save()
+}
+
+func rejectSecureVerification(c *gin.Context, code string, message string) {
+	c.JSON(http.StatusForbidden, gin.H{
+		"success": false,
+		"message": message,
+		"code":    code,
+	})
+}
+
 func requireSecureVerificationMethod(c *gin.Context, method string) bool {
-	session := sessions.Default(c)
-	verifiedAt, ok := session.Get(SecureVerificationSessionKey).(int64)
-	if !ok || time.Now().Unix()-verifiedAt >= SecureVerificationTimeout {
-		session.Delete(SecureVerificationSessionKey)
-		session.Delete(secureVerificationMethodSessionKey)
-		_ = session.Save()
-		common.ApiErrorMsg(c, "请先完成安全验证")
+	if !requireAnySecureVerification(c) {
 		return false
 	}
 
+	session := sessions.Default(c)
 	if verifiedMethod, ok := session.Get(secureVerificationMethodSessionKey).(string); !ok || verifiedMethod != method {
 		common.ApiErrorMsg(c, "请先完成对应的安全验证")
 		return false

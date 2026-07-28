@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -67,9 +68,16 @@ func currentSessionUser(session sessions.Session) (*model.User, error) {
 	if model.DB == nil {
 		return nil, model.ErrDatabase
 	}
-	user, err := model.GetUserById(id, false)
+	sessionID, ok := session.Get(constant.SessionKeyBrowserSessionID).(string)
+	if !ok || sessionID == "" {
+		return nil, nil
+	}
+	user, err := model.GetUserByBrowserSession(id, sessionID, time.Now().Unix())
 	if err != nil {
 		return nil, err
+	}
+	if user == nil {
+		return nil, nil
 	}
 	version, ok := parseSessionVersion(session.Get("session_version"))
 	if !ok || version != user.SessionVersion {
@@ -180,12 +188,37 @@ func authHelper(c *gin.Context, minRole int) {
 			c.Abort()
 			return
 		}
-		currentUser, currentErr := model.GetUserById(apiUserId, false)
+		sessionID, sessionIDOK := session.Get(
+			constant.SessionKeyBrowserSessionID,
+		).(string)
+		if !sessionIDOK || sessionID == "" {
+			clearAuthSession(session)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+			})
+			c.Abort()
+			return
+		}
+		currentUser, currentErr := model.GetUserByBrowserSession(
+			apiUserId,
+			sessionID,
+			time.Now().Unix(),
+		)
 		if currentErr != nil {
 			common.SysLog(fmt.Sprintf("failed to refresh session for user %d: %v", apiUserId, currentErr))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+			})
+			c.Abort()
+			return
+		}
+		if currentUser == nil {
+			clearAuthSession(session)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
 			})
 			c.Abort()
 			return

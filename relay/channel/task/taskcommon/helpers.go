@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -18,8 +19,13 @@ func UnmarshalMetadata(metadata map[string]any, target any) error {
 		return nil
 	}
 	// Prevent metadata from overriding model fields to avoid billing bypass.
-	delete(metadata, "model")
-	metaBytes, err := common.Marshal(metadata)
+	filteredMetadata := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		if key != "model" {
+			filteredMetadata[key] = value
+		}
+	}
+	metaBytes, err := common.Marshal(filteredMetadata)
 	if err != nil {
 		return fmt.Errorf("marshal metadata failed: %w", err)
 	}
@@ -63,7 +69,7 @@ func DecodeLocalTaskID(id string) (string, error) {
 // BuildProxyURL constructs the video proxy URL using the public task ID.
 // e.g., "https://your-server.com/v1/videos/task_xxxx/content"
 func BuildProxyURL(taskID string) string {
-	return fmt.Sprintf("%s/v1/videos/%s/content", system_setting.ServerAddress, taskID)
+	return fmt.Sprintf("%s/v1/videos/%s/content", system_setting.GetServerAddress(), taskID)
 }
 
 // Status-to-progress mapping constants for polling updates.
@@ -80,6 +86,11 @@ const (
 // ---------------------------------------------------------------------------
 
 type BaseBilling struct{}
+
+// ValidateFinalRequest accepts the mapped request without provider-specific validation.
+func (BaseBilling) ValidateFinalRequest(_ *gin.Context, _ *relaycommon.RelayInfo) *dto.TaskError {
+	return nil
+}
 
 // EstimateBilling returns nil (no extra ratios; use base model price).
 func (BaseBilling) EstimateBilling(_ *gin.Context, _ *relaycommon.RelayInfo) map[string]float64 {

@@ -55,7 +55,7 @@ func GetAllLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -105,7 +105,7 @@ func GetUserLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -332,7 +332,8 @@ func GetLogExprSchema(c *gin.Context) {
 }
 
 func checkLogExportPermission(c *gin.Context) bool {
-	if c.GetInt("role") < common.LogExportPermission {
+	logExportPermission := common.GetLegacyOptionInt("LogExportPermission", &common.LogExportPermission)
+	if c.GetInt("role") < logExportPermission {
 		common.ApiError(c, errors.New("无权导出日志"))
 		return false
 	}

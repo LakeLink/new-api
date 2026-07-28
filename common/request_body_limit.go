@@ -9,5 +9,5 @@ func GetAnonymousRequestBodyLimitBytes() int64 {
 	if limitKB < 0 {
 		limitKB = defaultAnonymousRequestBodyLimitKB
 	}
-	return int64(limitKB) << 10
+	return BytesFromKilobytes(limitKB)
 }

@@ -1,6 +1,7 @@
 package setting
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -53,18 +54,60 @@ func GetGroupFallback(group string) (GroupFallbackRule, bool) {
 }
 
 func UpdateGroupFallbackByJsonString(jsonStr string) error {
-	if strings.TrimSpace(jsonStr) == "" {
-		jsonStr = "{}"
-	}
-
 	var parsed map[string]GroupFallbackRule
-	if err := common.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	if err := validateGroupFallbackJSONString(jsonStr, &parsed); err != nil {
 		return err
 	}
 
 	groupFallbackMutex.Lock()
 	defer groupFallbackMutex.Unlock()
 	groupFallback = parsed
+	return nil
+}
+
+func ValidateGroupFallbackJSONString(jsonStr string) error {
+	return validateGroupFallbackJSONString(jsonStr, nil)
+}
+
+func validateGroupFallbackJSONString(jsonStr string, destination *map[string]GroupFallbackRule) error {
+	if strings.TrimSpace(jsonStr) == "" {
+		jsonStr = "{}"
+	}
+	var parsed map[string]GroupFallbackRule
+	if err := common.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return err
+	}
+	if parsed == nil {
+		return fmt.Errorf("group fallback configuration must be a JSON object")
+	}
+	for group, rule := range parsed {
+		if strings.TrimSpace(group) == "" {
+			return fmt.Errorf("group fallback source name must not be empty")
+		}
+		switch rule.PricingMode {
+		case "", GroupFallbackPricingModeOrigin, GroupFallbackPricingModeTarget:
+		default:
+			return fmt.Errorf("group fallback pricing mode for %q must be origin or target", group)
+		}
+		switch rule.TargetPricingRatioMode {
+		case "",
+			GroupFallbackTargetRatioModeOriginSpecial,
+			GroupFallbackTargetRatioModeTargetSpecial,
+			GroupFallbackTargetRatioModeNormalOnly,
+			GroupFallbackTargetRatioModePreferOriginSpecial,
+			GroupFallbackTargetRatioModePreferTargetSpecial:
+		default:
+			return fmt.Errorf("group fallback target ratio mode for %q is invalid", group)
+		}
+		for _, fallback := range rule.Fallback {
+			if strings.TrimSpace(fallback) == "" {
+				return fmt.Errorf("group fallback target for %q must not be empty", group)
+			}
+		}
+	}
+	if destination != nil {
+		*destination = parsed
+	}
 	return nil
 }
 

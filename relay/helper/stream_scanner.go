@@ -36,7 +36,12 @@ const (
 
 func getScannerBufferSize() int {
 	if constant.StreamScannerMaxBufferMB > 0 {
-		return constant.StreamScannerMaxBufferMB << 20
+		maxBytes := common.BytesFromMegabytes(constant.StreamScannerMaxBufferMB)
+		maxInt := int64(^uint(0) >> 1)
+		if maxBytes > maxInt {
+			return int(maxInt)
+		}
+		return int(maxBytes)
 	}
 	return DefaultMaxScannerBufferSize
 }
@@ -93,10 +98,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
-	if streamingTimeout <= 0 {
-		streamingTimeout = DefaultStreamingTimeout
-	}
+	streamingTimeout := common.SafeIntervalDuration(
+		constant.StreamingTimeout,
+		time.Second,
+		DefaultStreamingTimeout,
+		"streaming idle timeout",
+	)
 
 	var (
 		stopChan    = make(chan bool, 3) // 增加缓冲区避免阻塞
@@ -117,10 +124,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	generalSettings := operation_setting.GetGeneralSetting()
 	pingEnabled := generalSettings.PingIntervalEnabled && !info.DisablePing
-	pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
-	if pingInterval <= 0 {
-		pingInterval = DefaultPingInterval
-	}
+	pingInterval := common.SafeIntervalDuration(
+		generalSettings.PingIntervalSeconds,
+		time.Second,
+		DefaultPingInterval,
+		"stream ping interval",
+	)
 
 	if pingEnabled {
 		pingTicker = time.NewTicker(pingInterval)
@@ -260,7 +269,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 			ticker.Reset(streamingTimeout)
 			data := scanner.Text()
-			logger.LogDebug(c, "stream scanner data: %s", data)
+			logger.LogDebug(c, "stream scanner data received: bytes=%d", len(data))
 
 			if len(data) < 6 {
 				continue

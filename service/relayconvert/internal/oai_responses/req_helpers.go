@@ -107,13 +107,14 @@ func responsesRequestFunctionDeclarations(raw []byte) ([]dto.FunctionRequest, er
 	}
 
 	functions := make([]dto.FunctionRequest, 0, len(tools))
-	for _, tool := range tools {
-		if strings.TrimSpace(common.Interface2String(tool["type"])) != "function" {
-			continue
+	for index, tool := range tools {
+		toolType := strings.TrimSpace(common.Interface2String(tool["type"]))
+		if toolType != "function" {
+			return nil, fmt.Errorf("tools[%d] type %q cannot be converted to a function declaration", index, toolType)
 		}
 		name := strings.TrimSpace(common.Interface2String(tool["name"]))
 		if name == "" {
-			continue
+			return nil, fmt.Errorf("tools[%d] function name is required", index)
 		}
 		functions = append(functions, dto.FunctionRequest{
 			Name:        name,
@@ -126,6 +127,40 @@ func responsesRequestFunctionDeclarations(raw []byte) ([]dto.FunctionRequest, er
 
 func RequestFunctionDeclarations(raw []byte) ([]dto.FunctionRequest, error) {
 	return responsesRequestFunctionDeclarations(raw)
+}
+
+// ValidateToolsForConversion prevents Responses tools from being silently
+// discarded while converting to another provider. Only ordinary function
+// declarations have a protocol-equivalent representation in both targets.
+func ValidateToolsForConversion(raw []byte, target string) error {
+	if !rawJSONPresent(raw) {
+		return nil
+	}
+	if common.GetJsonType(raw) != "array" {
+		return fmt.Errorf("invalid tools: expected an array")
+	}
+
+	var tools []map[string]any
+	if err := common.Unmarshal(raw, &tools); err != nil {
+		return fmt.Errorf("invalid tools: %w", err)
+	}
+	for index, tool := range tools {
+		toolType := strings.TrimSpace(common.Interface2String(tool["type"]))
+		if toolType == "function" {
+			name := strings.TrimSpace(common.Interface2String(tool["name"]))
+			if name == "" {
+				return fmt.Errorf("Responses function tool at tools[%d] has no name and cannot be converted to %s", index, target)
+			}
+			continue
+		}
+		return fmt.Errorf(
+			"Responses tool type %q at tools[%d] cannot be converted to %s without changing protocol semantics",
+			toolType,
+			index,
+			target,
+		)
+	}
+	return nil
 }
 
 func responsesReasoningEffort(req *dto.OpenAIResponsesRequest) string {

@@ -1,6 +1,13 @@
 package system_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+	"net"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 type FetchSetting struct {
 	EnableSSRFProtection   bool     `json:"enable_ssrf_protection"` // 是否启用SSRF防护
@@ -24,11 +31,68 @@ var defaultFetchSetting = FetchSetting{
 	ApplyIPFilterForDomain: true,
 }
 
+func (s FetchSetting) Validate() error {
+	if len(s.DomainList) > 4_096 || len(s.IpList) > 4_096 || len(s.AllowedPorts) > 4_096 {
+		return fmt.Errorf("fetch protection lists cannot contain more than 4096 entries")
+	}
+	for _, pattern := range s.DomainList {
+		if !validFetchDomainPattern(pattern) {
+			return fmt.Errorf("invalid fetch domain pattern %q", pattern)
+		}
+	}
+	for _, entry := range s.IpList {
+		if entry == "" || entry != strings.TrimSpace(entry) {
+			return fmt.Errorf("invalid fetch IP or CIDR %q", entry)
+		}
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return fmt.Errorf("invalid fetch IP or CIDR %q", entry)
+			}
+		}
+	}
+	if _, err := common.NewSSRFProtectionFromFetchSetting(
+		s.AllowPrivateIp,
+		s.DomainFilterMode,
+		s.IpFilterMode,
+		s.DomainList,
+		s.IpList,
+		s.AllowedPorts,
+		s.ApplyIPFilterForDomain,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validFetchDomainPattern(pattern string) bool {
+	if pattern == "" || pattern != strings.TrimSpace(pattern) {
+		return false
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		pattern = strings.TrimPrefix(pattern, "*.")
+	}
+	if len(pattern) == 0 || len(pattern) > 253 || strings.HasSuffix(pattern, ".") || net.ParseIP(pattern) != nil {
+		return false
+	}
+	for _, label := range strings.Split(pattern, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+				(char < '0' || char > '9') && char != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func init() {
 	// 注册到全局配置管理器
 	config.GlobalConfig.Register("fetch_setting", &defaultFetchSetting)
 }
 
 func GetFetchSetting() *FetchSetting {
-	return &defaultFetchSetting
+	return config.Snapshot[FetchSetting]("fetch_setting")
 }

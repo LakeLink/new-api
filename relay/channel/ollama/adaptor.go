@@ -2,10 +2,12 @@ package ollama
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -29,11 +31,15 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err != nil {
 		return nil, err
 	}
-	openaiRequest.(*dto.GeneralOpenAIRequest).StreamOptions = &dto.StreamOptions{
-		IncludeUsage: true,
+	converted, ok := openaiRequest.(*dto.GeneralOpenAIRequest)
+	if !ok || converted == nil {
+		return nil, errors.New("OpenAI adaptor returned an invalid Claude conversion")
+	}
+	converted.StreamOptions = &dto.StreamOptions{
+		IncludeUsage: common.GetPointer(true),
 	}
 	// map to ollama chat request (Claude -> OpenAI -> Ollama chat)
-	return openAIChatToOllamaChat(c, openaiRequest.(*dto.GeneralOpenAIRequest))
+	return openAIChatToOllamaChat(c, converted)
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -75,10 +81,13 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, nil
+	return nil, errors.New("not implemented")
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
+	if request.EncodingFormat != "" && !strings.EqualFold(request.EncodingFormat, "float") {
+		return nil, fmt.Errorf("ollama native embeddings do not support encoding format %q", request.EncodingFormat)
+	}
 	return requestOpenAI2Embeddings(request), nil
 }
 

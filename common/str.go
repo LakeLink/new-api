@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -13,11 +14,17 @@ import (
 )
 
 var (
-	maskURLPattern    = regexp.MustCompile(`(http|https)://[^\s/$.?#].[^\s]*`)
+	maskURLPattern    = regexp.MustCompile(`(?:https?|wss?)://[^\s/$.?#].[^\s]*`)
 	maskDomainPattern = regexp.MustCompile(`\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b`)
 	maskIPPattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
-	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+	maskApiKeyPattern        = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+	maskAuthorizationPattern = regexp.MustCompile(
+		`(?i)\b(bearer|basic)\s+[a-z0-9._~+/=-]+`,
+	)
+	maskCredentialValuePattern = regexp.MustCompile(
+		`(?i)(["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization|cookie)["']?\s*[:=]\s*)(["']?)([^\s'",;}]+)(["']?)`,
+	)
 )
 
 const LocalLogContentLimit = 2048
@@ -200,7 +207,11 @@ func MaskSensitiveInfo(str string) string {
 	str = maskURLPattern.ReplaceAllStringFunc(str, func(urlStr string) string {
 		u, err := url.Parse(urlStr)
 		if err != nil {
-			return urlStr
+			scheme, _, found := strings.Cut(urlStr, "://")
+			if found {
+				return scheme + "://***"
+			}
+			return "***"
 		}
 
 		host := u.Host
@@ -241,6 +252,7 @@ func MaskSensitiveInfo(str string) string {
 					maskedParams = append(maskedParams, key+"=***")
 				}
 				if len(maskedParams) > 0 {
+					sort.Strings(maskedParams)
 					result += "?" + strings.Join(maskedParams, "&")
 				}
 			}
@@ -259,6 +271,8 @@ func MaskSensitiveInfo(str string) string {
 
 	// Mask API keys (e.g., "api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70" -> "api_key:***")
 	str = maskApiKeyPattern.ReplaceAllString(str, "${1}api_key:***${3}")
+	str = maskAuthorizationPattern.ReplaceAllString(str, "${1} ***")
+	str = maskCredentialValuePattern.ReplaceAllString(str, "${1}${2}***${4}")
 
 	return str
 }

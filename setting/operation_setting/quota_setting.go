@@ -17,5 +17,5 @@ func init() {
 }
 
 func GetQuotaSetting() *QuotaSetting {
-	return &quotaSetting
+	return config.Snapshot[QuotaSetting]("quota_setting")
 }

@@ -1,9 +1,7 @@
 package controller
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -23,15 +21,7 @@ type SubscriptionCreemPayRequest struct {
 func SubscriptionRequestCreemPay(c *gin.Context) {
 	var req SubscriptionCreemPayRequest
 
-	// Keep body for debugging consistency (like RequestCreemPay)
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 订阅支付请求读取失败 error=%q", err.Error()))
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "read query error"})
-		return
-	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 	if err := c.ShouldBindJSON(&req); err != nil || req.PlanId <= 0 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
 		return
@@ -54,7 +44,7 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		common.ApiErrorMsg(c, "该套餐未配置 CreemProductId")
 		return
 	}
-	if setting.CreemWebhookSecret == "" && !setting.CreemTestMode {
+	if setting.GetCreemSettings().WebhookSecret == "" {
 		common.ApiErrorMsg(c, "Creem Webhook 未配置")
 		return
 	}
@@ -95,6 +85,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		PaymentProvider: model.PaymentProviderCreem,
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
+	}
+	if err := order.SetPlanSnapshot(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
 	}
 	if err := order.Insert(); err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})

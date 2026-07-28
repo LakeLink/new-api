@@ -40,17 +40,36 @@ func SetApiRouter(router *gin.Engine) {
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)
-		apiRouter.GET("/verification", middleware.EmailVerificationRateLimit(), middleware.TurnstileCheck(), controller.SendEmailVerification)
-		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
+		apiRouter.POST("/verification", middleware.EmailVerificationRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.SendEmailVerification)
+		apiRouter.POST("/reset_password", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
 		// OAuth routes - specific routes must come before :provider wildcard
-		apiRouter.GET("/oauth/state", middleware.CriticalRateLimit(), controller.GenerateOAuthCode)
+		apiRouter.POST("/oauth/state", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
 		apiRouter.POST("/oauth/email/bind", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.EmailBind)
 		// Non-standard OAuth (WeChat, Telegram) - keep original routes
-		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), controller.WeChatAuth)
-		apiRouter.POST("/oauth/wechat/bind", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.WeChatBind)
-		apiRouter.GET("/oauth/telegram/login", middleware.CriticalRateLimit(), controller.TelegramLogin)
-		apiRouter.GET("/oauth/telegram/bind", middleware.CriticalRateLimit(), controller.TelegramBind)
+		apiRouter.POST("/oauth/wechat", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.WeChatAuth)
+		apiRouter.POST(
+			"/oauth/wechat/bind",
+			middleware.CriticalRateLimit(),
+			anonymousRequestBodyLimit,
+			middleware.TryUserAuth(),
+			middleware.SecureVerificationRequired(),
+			controller.WeChatBind,
+		)
+		apiRouter.POST(
+			"/oauth/telegram/login",
+			middleware.CriticalRateLimit(),
+			anonymousRequestBodyLimit,
+			controller.TelegramLogin,
+		)
+		apiRouter.POST(
+			"/oauth/telegram/bind",
+			middleware.CriticalRateLimit(),
+			anonymousRequestBodyLimit,
+			middleware.TryUserAuth(),
+			middleware.SecureVerificationRequired(),
+			controller.TelegramBind,
+		)
 		// Standard OAuth providers (GitHub, Discord, OIDC, LinuxDO) - unified route
 		apiRouter.GET("/oauth/:provider", middleware.CriticalRateLimit(), controller.HandleOAuth)
 		apiRouter.GET("/ratio_config", middleware.CriticalRateLimit(), controller.GetRatioConfig)
@@ -73,7 +92,7 @@ func SetApiRouter(router *gin.Engine) {
 			userRoute.POST("/passkey/login/begin", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.PasskeyLoginBegin)
 			userRoute.POST("/passkey/login/finish", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.PasskeyLoginFinish)
 			//userRoute.POST("/tokenlog", middleware.CriticalRateLimit(), controller.TokenLog)
-			userRoute.GET("/logout", controller.Logout)
+			userRoute.POST("/logout", controller.Logout)
 			userRoute.POST("/epay/notify", anonymousRequestBodyLimit, controller.EpayNotify)
 			userRoute.GET("/epay/notify", controller.EpayNotify)
 			userRoute.GET("/groups", controller.GetUserGroups)
@@ -86,15 +105,19 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.POST("/logout_all", middleware.CriticalRateLimit(), controller.LogoutAll)
 				selfRoute.GET("/models", controller.GetUserModels)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), controller.UpdateSelf)
-				selfRoute.DELETE("/self", controller.DeleteSelf)
-				selfRoute.GET("/token", controller.GenerateAccessToken)
+				selfRoute.DELETE("/self", middleware.SecureVerificationRequired(), controller.DeleteSelf)
+				selfRoute.POST(
+					"/token",
+					middleware.SecureVerificationRequired(),
+					controller.GenerateAccessToken,
+				)
 				selfRoute.GET("/passkey", controller.PasskeyStatus)
 				selfRoute.POST("/passkey/register/begin", middleware.SecureVerificationRequired(), controller.PasskeyRegisterBegin)
 				selfRoute.POST("/passkey/register/finish", middleware.SecureVerificationRequired(), controller.PasskeyRegisterFinish)
 				selfRoute.POST("/passkey/verify/begin", controller.PasskeyVerifyBegin)
 				selfRoute.POST("/passkey/verify/finish", controller.PasskeyVerifyFinish)
 				selfRoute.DELETE("/passkey", controller.PasskeyDelete)
-				selfRoute.GET("/aff", controller.GetAffCode)
+				selfRoute.POST("/aff", controller.GetAffCode)
 				selfRoute.GET("/topup/info", controller.GetTopUpInfo)
 				selfRoute.GET("/topup/self", controller.GetUserTopUps)
 				selfRoute.POST("/topup", middleware.CriticalRateLimit(), controller.TopUp)
@@ -123,7 +146,11 @@ func SetApiRouter(router *gin.Engine) {
 
 				// Custom OAuth bindings
 				selfRoute.GET("/oauth/bindings", controller.GetUserOAuthBindings)
-				selfRoute.DELETE("/oauth/bindings/:provider_id", controller.UnbindCustomOAuth)
+				selfRoute.DELETE(
+					"/oauth/bindings/:provider_id",
+					middleware.SecureVerificationRequired(),
+					controller.UnbindCustomOAuth,
+				)
 			}
 
 			adminRoute := userRoute.Group("/")
@@ -195,7 +222,6 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.POST("/rest_model_ratio", controller.ResetModelRatio)
 			optionRoute.POST("/migrate_console_setting", controller.MigrateConsoleSetting) // 用于迁移检测的旧键，下个版本会删除
 			optionRoute.POST("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)
-			optionRoute.GET("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)
 			optionRoute.POST("/waffo-pancake/pair", controller.CreateWaffoPancakePair)
 			optionRoute.POST("/waffo-pancake/save", controller.SaveWaffoPancake)
 			optionRoute.POST("/waffo-pancake/subscription-product", controller.CreateWaffoPancakeSubscriptionProduct)
@@ -241,14 +267,26 @@ func SetApiRouter(router *gin.Engine) {
 		tokenRoute.Use(middleware.UserAuth())
 		{
 			tokenRoute.GET("/", controller.GetAllTokens)
-			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
+			tokenRoute.POST("/search", middleware.SearchRateLimit(), controller.SearchTokens)
 			tokenRoute.GET("/:id", controller.GetToken)
-			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
+			tokenRoute.POST(
+				"/:id/key",
+				middleware.CriticalRateLimit(),
+				middleware.DisableCache(),
+				middleware.SecureVerificationRequired(),
+				controller.GetTokenKey,
+			)
 			tokenRoute.POST("/", controller.AddToken)
 			tokenRoute.PUT("/", controller.UpdateToken)
 			tokenRoute.DELETE("/:id", controller.DeleteToken)
 			tokenRoute.POST("/batch", controller.DeleteTokenBatch)
-			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
+			tokenRoute.POST(
+				"/batch/keys",
+				middleware.CriticalRateLimit(),
+				middleware.DisableCache(),
+				middleware.SecureVerificationRequired(),
+				controller.GetTokenKeysBatch,
+			)
 		}
 
 		usageRoute := apiRouter.Group("/usage")

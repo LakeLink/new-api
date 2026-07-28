@@ -2,6 +2,7 @@ package perfmetrics
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -13,7 +14,12 @@ import (
 func flushLoop() {
 	for {
 		interval := perf_metrics_setting.GetFlushIntervalMinutes()
-		time.Sleep(time.Duration(interval) * time.Minute)
+		time.Sleep(common.SafeIntervalDuration(
+			interval,
+			time.Minute,
+			5*time.Minute,
+			"performance metrics flush",
+		))
 		setting := perf_metrics_setting.GetSetting()
 		if !setting.Enabled {
 			continue
@@ -34,7 +40,7 @@ func flushCompletedBuckets() {
 		bucket := value.(*atomicBucket)
 		drained := bucket.drain()
 		if drained.requestCount == 0 {
-			deleteOldEmptyBucket(k, key)
+			deleteOldEmptyBucket(k, key, bucket)
 			return true
 		}
 
@@ -56,19 +62,31 @@ func flushCompletedBuckets() {
 			return true
 		}
 
-		deleteOldEmptyBucket(k, key)
+		deleteOldEmptyBucket(k, key, bucket)
 		return true
 	})
 }
 
-func deleteOldEmptyBucket(k bucketKey, rawKey any) {
-	if k.bucketTs < bucketStart(time.Now().Add(-24*time.Hour).Unix()) {
-		hotBuckets.Delete(rawKey)
+func deleteOldEmptyBucket(k bucketKey, rawKey any, bucket *atomicBucket) {
+	if bucket == nil || k.bucketTs >= bucketStart(time.Now().Add(-24*time.Hour).Unix()) {
+		return
+	}
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+	if bucket.values.requestCount == 0 {
+		// A recorder may already hold this pointer after loading it from the map.
+		// addHotBucketSample verifies the map identity under the same bucket lock,
+		// so a recorder that lost this deletion race retries on a new bucket.
+		hotBuckets.CompareAndDelete(rawKey, bucket)
 	}
 }
 
 func cleanupExpiredMetrics(retentionDays int) {
 	if retentionDays <= 0 {
+		return
+	}
+	if int64(retentionDays) > math.MaxInt64/int64(24*time.Hour) {
+		common.SysError(fmt.Sprintf("performance metrics retention is too large: %d days", retentionDays))
 		return
 	}
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()

@@ -2038,6 +2038,7 @@ func TestRemoveDisabledFieldsSkipWhenGlobalPassThroughEnabled(t *testing.T) {
 func TestRemoveDisabledFieldsDefaultFiltering(t *testing.T) {
 	input := `{
 		"service_tier":"flex",
+		"serviceTier":"priority",
 		"inference_geo":"eu",
 		"speed":"fast",
 		"cache_control":{"type":"ephemeral"},
@@ -2052,6 +2053,15 @@ func TestRemoveDisabledFieldsDefaultFiltering(t *testing.T) {
 		t.Fatalf("RemoveDisabledFields returned error: %v", err)
 	}
 	assertJSONEqual(t, `{"cache_control":{"type":"ephemeral"},"store":true}`, string(out))
+}
+
+func TestRemoveDisabledFieldsAllowGeminiServiceTier(t *testing.T) {
+	input := `{"serviceTier":"priority","store":false}`
+	settings := dto.ChannelOtherSettings{AllowServiceTier: true}
+
+	out, err := RemoveDisabledFields([]byte(input), settings, false)
+	require.NoError(t, err)
+	assertJSONEqual(t, input, string(out))
 }
 
 func TestRemoveDisabledFieldsNoControlledFieldsKeepsBody(t *testing.T) {

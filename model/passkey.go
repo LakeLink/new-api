@@ -17,27 +17,54 @@ import (
 var (
 	ErrPasskeyNotFound         = errors.New("passkey credential not found")
 	ErrFriendlyPasskeyNotFound = errors.New("Passkey 验证失败，请重试或联系管理员")
+	ErrPasskeyCounterConflict  = errors.New("Passkey 凭证计数器已被其他验证更新，请重试")
 )
 
 type PasskeyCredential struct {
-	ID              int            `json:"id" gorm:"primaryKey"`
-	UserID          int            `json:"user_id" gorm:"uniqueIndex;not null"`
-	CredentialID    string         `json:"credential_id" gorm:"type:varchar(512);uniqueIndex;not null"` // base64 encoded
-	PublicKey       string         `json:"public_key" gorm:"type:text;not null"`                        // base64 encoded
-	AttestationType string         `json:"attestation_type" gorm:"type:varchar(255)"`
-	AAGUID          string         `json:"aaguid" gorm:"type:varchar(512)"` // base64 encoded
-	SignCount       uint32         `json:"sign_count" gorm:"default:0"`
-	CloneWarning    bool           `json:"clone_warning"`
-	UserPresent     bool           `json:"user_present"`
-	UserVerified    bool           `json:"user_verified"`
-	BackupEligible  bool           `json:"backup_eligible"`
-	BackupState     bool           `json:"backup_state"`
-	Transports      string         `json:"transports" gorm:"type:text"`
-	Attachment      string         `json:"attachment" gorm:"type:varchar(32)"`
-	LastUsedAt      *time.Time     `json:"last_used_at"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`
+	ID               int            `json:"id" gorm:"primaryKey"`
+	UserID           int            `json:"user_id" gorm:"uniqueIndex;not null"`
+	CredentialID     string         `json:"credential_id" gorm:"type:varchar(512);not null"` // base64 encoded
+	CredentialIDHash *string        `json:"-" gorm:"type:char(64);uniqueIndex:ux_passkeys_credential_hash"`
+	PublicKey        string         `json:"public_key" gorm:"type:text;not null"` // base64 encoded
+	AttestationType  string         `json:"attestation_type" gorm:"type:varchar(255)"`
+	AAGUID           string         `json:"aaguid" gorm:"type:varchar(512)"` // base64 encoded
+	SignCount        uint32         `json:"sign_count" gorm:"default:0"`
+	CloneWarning     bool           `json:"clone_warning"`
+	UserPresent      bool           `json:"user_present"`
+	UserVerified     bool           `json:"user_verified"`
+	BackupEligible   bool           `json:"backup_eligible"`
+	BackupState      bool           `json:"backup_state"`
+	Transports       string         `json:"transports" gorm:"type:text"`
+	Attachment       string         `json:"attachment" gorm:"type:varchar(32)"`
+	LastUsedAt       *time.Time     `json:"last_used_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+func normalizePasskeyCredentialID(credentialID string) (string, string, error) {
+	if credentialID == "" || len(credentialID) > 512 {
+		return "", "", errors.New("passkey credential ID is invalid")
+	}
+	rawID, err := base64.StdEncoding.DecodeString(credentialID)
+	if err != nil || len(rawID) == 0 ||
+		base64.StdEncoding.EncodeToString(rawID) != credentialID {
+		return "", "", errors.New("passkey credential ID is invalid")
+	}
+	return credentialID, crossDatabaseIdentityHash(string(rawID)), nil
+}
+
+func (p *PasskeyCredential) BeforeCreate(_ *gorm.DB) error {
+	if p.UserID <= 0 {
+		return errors.New("passkey user ID is invalid")
+	}
+	credentialID, credentialIDHash, err := normalizePasskeyCredentialID(p.CredentialID)
+	if err != nil {
+		return err
+	}
+	p.CredentialID = credentialID
+	p.CredentialIDHash = &credentialIDHash
+	return nil
 }
 
 func (p *PasskeyCredential) TransportList() []protocol.AuthenticatorTransport {
@@ -164,12 +191,17 @@ func GetPasskeyByCredentialID(credentialID []byte) (*PasskeyCredential, error) {
 
 	credIDStr := base64.StdEncoding.EncodeToString(credentialID)
 	var credential PasskeyCredential
-	if err := DB.Where("credential_id = ?", credIDStr).First(&credential).Error; err != nil {
+	credentialIDHash := crossDatabaseIdentityHash(string(credentialID))
+	if err := DB.Where("credential_id_hash = ?", credentialIDHash).First(&credential).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			common.SysLog(fmt.Sprintf("GetPasskeyByCredentialID: passkey not found for credential ID length %d", len(credentialID)))
 			return nil, ErrFriendlyPasskeyNotFound
 		}
 		common.SysLog(fmt.Sprintf("GetPasskeyByCredentialID: database error for credential ID: %v", err))
+		return nil, ErrFriendlyPasskeyNotFound
+	}
+	if credential.CredentialID != credIDStr {
+		common.SysLog("GetPasskeyByCredentialID: credential ID hash collision")
 		return nil, ErrFriendlyPasskeyNotFound
 	}
 
@@ -181,7 +213,22 @@ func UpsertPasskeyCredential(credential *PasskeyCredential) error {
 		common.SysLog("UpsertPasskeyCredential: nil credential provided")
 		return fmt.Errorf("Passkey 保存失败，请重试")
 	}
+	credentialID, credentialIDHash, err := normalizePasskeyCredentialID(credential.CredentialID)
+	if err != nil || credential.UserID <= 0 {
+		common.SysLog("UpsertPasskeyCredential: invalid credential identity")
+		return fmt.Errorf("Passkey 保存失败，请重试")
+	}
+	credential.CredentialID = credentialID
+	credential.CredentialIDHash = &credentialIDHash
 	return DB.Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := lockForUpdate(tx).
+			Select("id").
+			Where("id = ?", credential.UserID).
+			First(&user).Error; err != nil {
+			common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to lock user %d: %v", credential.UserID, err))
+			return fmt.Errorf("Passkey 保存失败，请重试")
+		}
 		// 使用Unscoped()进行硬删除，避免唯一索引冲突
 		if err := tx.Unscoped().Where("user_id = ?", credential.UserID).Delete(&PasskeyCredential{}).Error; err != nil {
 			common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to delete existing credential for user %d: %v", credential.UserID, err))
@@ -193,6 +240,95 @@ func UpsertPasskeyCredential(credential *PasskeyCredential) error {
 		}
 		return nil
 	})
+}
+
+// UpdatePasskeyCredentialAfterAssertion persists the mutable state returned by
+// a successful WebAuthn assertion without replacing the credential row. The
+// row lock closes the window where two assertions can both validate against
+// the same stored signature counter and then overwrite each other.
+func UpdatePasskeyCredentialAfterAssertion(
+	userID int,
+	validated *webauthn.Credential,
+	lastUsedAt time.Time,
+) error {
+	if userID <= 0 || validated == nil || lastUsedAt.IsZero() {
+		return errors.New("Passkey 验证结果无效")
+	}
+	incoming := NewPasskeyCredentialFromWebAuthn(userID, validated)
+	if incoming == nil {
+		return errors.New("Passkey 验证结果无效")
+	}
+	credentialID, credentialIDHash, err := normalizePasskeyCredentialID(
+		incoming.CredentialID,
+	)
+	if err != nil {
+		return errors.New("Passkey 验证结果无效")
+	}
+	incoming.CredentialID = credentialID
+	incoming.CredentialIDHash = &credentialIDHash
+
+	counterConflict := false
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var current PasskeyCredential
+		if err := lockForUpdate(tx).
+			Where("user_id = ?", userID).
+			First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrPasskeyNotFound
+			}
+			return err
+		}
+		if current.CredentialID != incoming.CredentialID ||
+			current.CredentialIDHash == nil ||
+			*current.CredentialIDHash != credentialIDHash ||
+			current.PublicKey != incoming.PublicKey {
+			return errors.New("Passkey 凭证与验证结果不匹配")
+		}
+
+		// A library-reported clone warning is already based on the exact
+		// counter used for this assertion and remains sticky. A non-warning
+		// result that is no longer ahead of the locked row means another
+		// request advanced the counter after this request loaded its snapshot.
+		if !incoming.CloneWarning &&
+			(incoming.SignCount != 0 || current.SignCount != 0) &&
+			incoming.SignCount <= current.SignCount {
+			counterConflict = true
+			result := tx.Model(&current).Update("clone_warning", true)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("Passkey 凭证在验证期间发生变化")
+			}
+			return nil
+		}
+
+		result := tx.Model(&current).Updates(map[string]any{
+			"sign_count":      incoming.SignCount,
+			"clone_warning":   current.CloneWarning || incoming.CloneWarning,
+			"user_present":    incoming.UserPresent,
+			"user_verified":   incoming.UserVerified,
+			"backup_eligible": incoming.BackupEligible,
+			"backup_state":    incoming.BackupState,
+			"transports":      incoming.Transports,
+			"attachment":      incoming.Attachment,
+			"last_used_at":    &lastUsedAt,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("Passkey 凭证在验证期间发生变化")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if counterConflict {
+		return ErrPasskeyCounterConflict
+	}
+	return nil
 }
 
 func DeletePasskeyByUserID(userID int) error {

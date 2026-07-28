@@ -189,12 +189,12 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	if resp == nil {
 		return nil, types.NewError(errors.New("replicate adaptor: empty response"), types.ErrorCodeBadResponse)
 	}
+	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeReadResponseBodyFailed)
 	}
-	_ = resp.Body.Close()
 
 	var prediction PredictionResponse
 	if err := common.Unmarshal(responseBody, &prediction); err != nil {
@@ -361,7 +361,7 @@ func pollPrediction(c *gin.Context, info *relaycommon.RelayInfo, createResp *htt
 	for {
 		req, err := http.NewRequestWithContext(pollCtx, http.MethodGet, pollURL.String(), nil)
 		if err != nil {
-			return prediction, fmt.Errorf("replicate adaptor: create prediction poll request failed: %w", err)
+			return prediction, fmt.Errorf("replicate adaptor: create prediction poll request failed: %w", service.SanitizeNetworkError(err))
 		}
 		if info != nil && info.ApiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+info.ApiKey)
@@ -371,7 +371,7 @@ func pollPrediction(c *gin.Context, info *relaycommon.RelayInfo, createResp *htt
 			req.Header.Set(key, value)
 		}
 
-		pollResp, err := httpClient.Do(req)
+		pollResp, err := service.DoUpstreamRequest(httpClient, req)
 		if err != nil {
 			return prediction, fmt.Errorf("replicate adaptor: prediction poll failed: %w", err)
 		}
@@ -379,8 +379,8 @@ func pollPrediction(c *gin.Context, info *relaycommon.RelayInfo, createResp *htt
 		if maxMB <= 0 {
 			maxMB = 128
 		}
-		maxBytes := int64(maxMB) << 20
-		pollBody, readErr := io.ReadAll(io.LimitReader(pollResp.Body, maxBytes+1))
+		maxBytes := common.BytesFromMegabytes(maxMB)
+		pollBody, readErr := io.ReadAll(io.LimitReader(pollResp.Body, common.ReadLimitWithOverrunByte(maxBytes)))
 		_ = pollResp.Body.Close()
 		if readErr != nil {
 			return prediction, fmt.Errorf("replicate adaptor: read prediction poll response failed: %w", readErr)
@@ -389,7 +389,11 @@ func pollPrediction(c *gin.Context, info *relaycommon.RelayInfo, createResp *htt
 			return prediction, fmt.Errorf("replicate adaptor: prediction poll response exceeds %d MB", maxMB)
 		}
 		if pollResp.StatusCode < http.StatusOK || pollResp.StatusCode >= http.StatusMultipleChoices {
-			return prediction, fmt.Errorf("replicate adaptor: prediction poll returned status %d: %s", pollResp.StatusCode, strings.TrimSpace(string(pollBody)))
+			return prediction, fmt.Errorf(
+				"replicate adaptor: prediction poll returned status %d: %s",
+				pollResp.StatusCode,
+				common.LocalLogPreview(strings.TrimSpace(string(pollBody))),
+			)
 		}
 		if err := common.Unmarshal(pollBody, &prediction); err != nil {
 			return prediction, fmt.Errorf("replicate adaptor: decode prediction poll response failed: %w", err)
@@ -458,7 +462,7 @@ func downloadImagesToBase64(urls []string) ([]string, error) {
 		}
 		_, data, err := service.GetImageFromUrl(url)
 		if err != nil {
-			return nil, fmt.Errorf("replicate adaptor: failed to download image from %s: %w", url, err)
+			return nil, fmt.Errorf("replicate adaptor: failed to download image from %s: %w", common.MaskSensitiveInfo(url), err)
 		}
 		results = append(results, data)
 	}
@@ -624,23 +628,27 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 
 	req, err := http.NewRequestWithContext(info.GetRelayContext(nil), http.MethodPost, uploadURL, &body)
 	if err != nil {
-		return "", fmt.Errorf("replicate adaptor: create upload request failed: %w", err)
+		return "", fmt.Errorf("replicate adaptor: create upload request failed: %w", service.SanitizeNetworkError(err))
 	}
 	req.Header.Set("Content-Type", formContentType)
 	req.Header.Set("Authorization", "Bearer "+info.ApiKey)
 
-	resp, err := service.GetHttpClient().Do(req)
+	client, err := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy)
+	if err != nil {
+		return "", fmt.Errorf("replicate adaptor: create upload proxy client failed: %w", err)
+	}
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
 		return "", fmt.Errorf("replicate adaptor: upload image failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
 	if err != nil {
 		return "", fmt.Errorf("replicate adaptor: read upload response failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("replicate adaptor: upload image failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return "", fmt.Errorf("replicate adaptor: upload image failed with status %d", resp.StatusCode)
 	}
 
 	var uploadResp FileUploadResponse

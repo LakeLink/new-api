@@ -61,7 +61,7 @@ func TestIsResponsesEventStream(t *testing.T) {
 	}
 }
 
-func TestRecalcQuotaFromRatiosIgnoresInvalidMultipliers(t *testing.T) {
+func TestRecalcQuotaFromRatiosRejectsMixedInvalidMultipliers(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		PriceData: types.PriceData{
 			Quota: 100,
@@ -77,8 +77,8 @@ func TestRecalcQuotaFromRatiosIgnoresInvalidMultipliers(t *testing.T) {
 		"inf":      math.Inf(1),
 	})
 
-	require.True(t, ok)
-	assert.Equal(t, 150, quota)
+	require.False(t, ok)
+	assert.Zero(t, quota)
 	assert.True(t, info.PriceData.HasOtherRatio("duration"))
 }
 

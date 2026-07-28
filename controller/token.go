@@ -40,24 +40,38 @@ func GetAllTokens(c *gin.Context) {
 		return
 	}
 	total, _ := model.CountUserTokens(userId)
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
 	common.ApiSuccess(c, pageInfo)
 }
 
+type tokenSearchRequest struct {
+	Keyword string `json:"keyword"`
+	Token   string `json:"token"`
+}
+
 func SearchTokens(c *gin.Context) {
 	userId := c.GetInt("id")
-	keyword := c.Query("keyword")
-	token := c.Query("token")
+	var req tokenSearchRequest
+	if err := common.DecodeJson(c.Request.Body, &req); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
 
 	pageInfo := common.GetPageQuery(c)
 
-	tokens, total, err := model.SearchUserTokens(userId, keyword, token, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	tokens, total, err := model.SearchUserTokens(
+		userId,
+		req.Keyword,
+		req.Token,
+		pageInfo.GetStartIdx(),
+		pageInfo.GetPageSize(),
+	)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
 	common.ApiSuccess(c, pageInfo)
 }
@@ -194,7 +208,7 @@ func AddToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if int(count) >= maxTokens {
+	if count >= int64(maxTokens) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": fmt.Sprintf("已达到最大令牌数量限制 (%d)", maxTokens),

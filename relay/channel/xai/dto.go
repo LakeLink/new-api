@@ -8,6 +8,7 @@ type ChatCompletionResponse struct {
 	Object            string                         `json:"object"`
 	Created           int64                          `json:"created"`
 	Model             string                         `json:"model"`
+	ServiceTier       string                         `json:"service_tier,omitempty"`
 	Choices           []dto.OpenAITextResponseChoice `json:"choices"`
 	Usage             *dto.Usage                     `json:"usage"`
 	SystemFingerprint string                         `json:"system_fingerprint"`

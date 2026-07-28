@@ -5,9 +5,43 @@ import (
 )
 
 var defaultCacheRatio = map[string]float64{
+	"grok-4.5":                            0.15,
+	"grok-4.5-latest":                     0.15,
+	"grok-4.3":                            0.16,
+	"grok-4.3-latest":                     0.16,
+	"grok-latest":                         0.16,
+	"grok-4.20-0309-reasoning":            0.16,
+	"grok-4.20-0309":                      0.16,
+	"grok-4.20-reasoning":                 0.16,
+	"grok-4.20-reasoning-latest":          0.16,
+	"grok-4.20":                           0.16,
+	"grok-4.20-0309-non-reasoning":        0.16,
+	"grok-4.20-non-reasoning":             0.16,
+	"grok-4.20-non-reasoning-latest":      0.16,
+	"grok-4.20-multi-agent-0309":          0.16,
+	"grok-4.20-multi-agent":               0.16,
+	"grok-4.20-multi-agent-latest":        0.16,
+	"grok-build-0.1":                      0.2,
+	"grok-build-latest":                   0.2,
+	"grok-code-fast-1":                    0.2,
+	"grok-code-fast":                      0.2,
+	"grok-code-fast-1-0825":               0.2,
+	"claude-fable-5":                      0.1,
+	"claude-mythos-5":                     0.1,
+	"claude-sonnet-5":                     0.1,
+	"gemini-3.6-flash":                    0.1,
+	"gemini-3.5-flash":                    0.1,
+	"gemini-3.5-flash-lite":               0.1,
+	"gemini-3.1-flash-lite":               0.1,
 	"gemini-3-flash-preview":              0.1,
-	"gemini-3-pro-preview":                0.1,
+	"gemini-flash-latest":                 0.1,
+	"gemini-flash-lite-latest":            0.1,
+	"gemini-pro-latest":                   0.1,
+	"gemini-2.5-pro":                      0.1,
+	"gemini-2.5-flash":                    0.1,
+	"gemini-2.5-flash-lite":               0.1,
 	"gemini-3.1-pro-preview":              0.1,
+	"gemini-3.1-pro-preview-customtools":  0.1,
 	"gpt-4":                               0.5,
 	"o1":                                  0.5,
 	"o1-2024-12-17":                       0.5,
@@ -66,9 +100,11 @@ var defaultCacheRatio = map[string]float64{
 	"chatgpt-image-latest":                0.25,
 	"gpt-image-2":                         0.25,
 	"gpt-image-2-2026-04-21":              0.25,
-	"deepseek-chat":                       0.25,
-	"deepseek-reasoner":                   0.25,
+	"deepseek-chat":                       0.0028 / 0.14,
+	"deepseek-reasoner":                   0.0028 / 0.14,
 	"deepseek-coder":                      0.25,
+	"deepseek-v4-flash":                   0.0028 / 0.14,
+	"deepseek-v4-pro":                     0.003625 / 0.435,
 	"claude-3-sonnet-20240229":            0.1,
 	"claude-3-opus-20240229":              0.1,
 	"claude-3-haiku-20240307":             0.1,
@@ -86,6 +122,7 @@ var defaultCacheRatio = map[string]float64{
 	"claude-opus-4-1-20250805-thinking":   0.1,
 	"claude-sonnet-4-5-20250929":          0.1,
 	"claude-sonnet-4-5-20250929-thinking": 0.1,
+	"claude-sonnet-4-6":                   0.1,
 	"claude-opus-4-5-20251101":            0.1,
 	"claude-opus-4-5-20251101-thinking":   0.1,
 	"claude-opus-4-6":                     0.1,
@@ -108,6 +145,13 @@ var defaultCacheRatio = map[string]float64{
 	"claude-opus-4-8-high":                0.1,
 	"claude-opus-4-8-medium":              0.1,
 	"claude-opus-4-8-low":                 0.1,
+	"claude-opus-5":                       0.1,
+	"claude-opus-5-thinking":              0.1,
+	"claude-opus-5-max":                   0.1,
+	"claude-opus-5-xhigh":                 0.1,
+	"claude-opus-5-high":                  0.1,
+	"claude-opus-5-medium":                0.1,
+	"claude-opus-5-low":                   0.1,
 }
 
 var defaultCreateCacheRatio = map[string]float64{
@@ -115,6 +159,9 @@ var defaultCreateCacheRatio = map[string]float64{
 	"gpt-5.6-sol":                         1.25,
 	"gpt-5.6-terra":                       1.25,
 	"gpt-5.6-luna":                        1.25,
+	"claude-fable-5":                      1.25,
+	"claude-mythos-5":                     1.25,
+	"claude-sonnet-5":                     1.25,
 	"claude-3-sonnet-20240229":            1.25,
 	"claude-3-opus-20240229":              1.25,
 	"claude-3-haiku-20240307":             1.25,
@@ -132,6 +179,7 @@ var defaultCreateCacheRatio = map[string]float64{
 	"claude-opus-4-1-20250805-thinking":   1.25,
 	"claude-sonnet-4-5-20250929":          1.25,
 	"claude-sonnet-4-5-20250929-thinking": 1.25,
+	"claude-sonnet-4-6":                   1.25,
 	"claude-opus-4-5-20251101":            1.25,
 	"claude-opus-4-5-20251101-thinking":   1.25,
 	"claude-opus-4-6":                     1.25,
@@ -154,6 +202,13 @@ var defaultCreateCacheRatio = map[string]float64{
 	"claude-opus-4-8-high":                1.25,
 	"claude-opus-4-8-medium":              1.25,
 	"claude-opus-4-8-low":                 1.25,
+	"claude-opus-5":                       1.25,
+	"claude-opus-5-thinking":              1.25,
+	"claude-opus-5-max":                   1.25,
+	"claude-opus-5-xhigh":                 1.25,
+	"claude-opus-5-high":                  1.25,
+	"claude-opus-5-medium":                1.25,
+	"claude-opus-5-low":                   1.25,
 }
 
 //var defaultCreateCacheRatio = map[string]float64{}
@@ -178,16 +233,23 @@ func CreateCacheRatio2JSONString() string {
 
 // UpdateCacheRatioByJSONString updates the cache ratio map from a JSON string
 func UpdateCacheRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(cacheRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
 // UpdateCreateCacheRatioByJSONString updates the create cache ratio map from a JSON string
 func UpdateCreateCacheRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(createCacheRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
 // GetCacheRatio returns the cache ratio for a model
 func GetCacheRatio(name string) (float64, bool) {
+	name = FormatMatchingModelName(name)
 	ratio, ok := cacheRatioMap.Get(name)
 	if !ok {
 		return 1, false // Default to 1 if not found
@@ -204,6 +266,7 @@ func GetCreateCacheRatio(name string) (float64, bool) {
 }
 
 func GetDefaultCacheRatio(name string) float64 {
+	name = FormatMatchingModelName(name)
 	if ratio, ok := defaultCacheRatio[name]; ok {
 		return ratio
 	}

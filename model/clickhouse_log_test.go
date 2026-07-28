@@ -86,11 +86,22 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
 	assert.Contains(t, withoutTTL, "INDEX idx_logs_user_id user_id TYPE bloom_filter(0.01) GRANULARITY 1")
 	assert.Contains(t, withoutTTL, "INDEX idx_logs_type type TYPE set(16) GRANULARITY 1")
 	assert.Contains(t, withoutTTL, "INDEX idx_logs_request_id request_id TYPE bloom_filter(0.01) GRANULARITY 1")
+	assert.Contains(t, withoutTTL, "billing_event_id Nullable(String)")
+	assert.Contains(t, withoutTTL, "billing_event_claim Nullable(String)")
 	assert.NotContains(t, withoutTTL, "TTL ")
 
 	withTTL := clickHouseLogCreateTableSQL(30)
 	assert.Contains(t, withTTL, "ORDER BY (created_at, request_id)")
 	assert.Contains(t, withTTL, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
+}
+
+func TestClickHouseLogColumnMigrationStatementsAreIdempotent(t *testing.T) {
+	statements := clickHouseLogColumnMigrationStatements()
+
+	require.Len(t, statements, 2)
+	assert.Contains(t, statements[0], "ALTER TABLE logs ADD COLUMN IF NOT EXISTS")
+	assert.Contains(t, statements[0], "billing_event_id Nullable(String)")
+	assert.Contains(t, statements[1], "billing_event_claim Nullable(String)")
 }
 
 func TestClickHouseLogIndexMigrationStatementsAreIdempotent(t *testing.T) {

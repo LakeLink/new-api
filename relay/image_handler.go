@@ -51,6 +51,23 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
+		jsonData, err := storage.Bytes()
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		finalImageCount, err := refreshFinalImagenRequest(info, jsonData)
+		if err != nil {
+			return finalRequestBillingAPIError(err, false)
+		}
+		if finalImageCount > 0 {
+			request.N = common.GetPointer(uint(finalImageCount))
+		} else {
+			finalRequest, err := refreshFinalOpenAIImageBilling(c, info, jsonData)
+			if err != nil {
+				return finalRequestBillingAPIError(err, false)
+			}
+			request = finalRequest
+		}
 		requestBody = common.ReaderOnly(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertImageRequest(c, info, *request)
@@ -58,6 +75,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+		finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 
 		switch convertedRequest.(type) {
 		case *bytes.Buffer:
@@ -75,8 +93,28 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 					return newAPIErrorFromParamOverride(err)
 				}
 			}
+			if finalRequestFormat == types.RelayFormatOpenAIImage {
+				finalRequest, err := refreshFinalOpenAIImageBilling(c, info, jsonData)
+				if err != nil {
+					return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+				}
+				request = finalRequest
+			} else if err := refreshUnknownFinalBilling(c, info, jsonData); err != nil {
+				return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+			}
+			finalImageCount, err := refreshFinalImagenRequest(info, jsonData)
+			if err != nil {
+				errorCode := types.ErrorCodeConvertRequestFailed
+				if len(info.ParamOverride) > 0 {
+					errorCode = types.ErrorCodeChannelParamOverrideInvalid
+				}
+				return types.NewErrorWithStatusCode(err, errorCode, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			}
+			if finalImageCount > 0 {
+				request.N = common.GetPointer(uint(finalImageCount))
+			}
 
-			logger.LogDebug(c, "image request body: %s", jsonData)
+			logger.LogDebug(c, "image upstream request prepared: bytes=%d", len(jsonData))
 			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 			if err != nil {
 				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())

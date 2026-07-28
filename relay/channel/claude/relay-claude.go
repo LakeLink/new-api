@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"io"
 	"net/http"
 	"strings"
 
@@ -191,6 +190,8 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
+	applyClaudeRefusalBilling(c, claudeInfo.Model, claudeInfo.Usage)
+	applyClaudeUsagePricing(info, claudeInfo.Usage)
 	return claudeInfo.Usage, nil
 }
 
@@ -202,6 +203,9 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+	}
+	if claudeResponse.Model != "" {
+		claudeInfo.Model = claudeResponse.Model
 	}
 	maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
 	if claudeInfo.Usage == nil {
@@ -217,6 +221,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Usage.CacheCreationInputTokens
 		claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Usage.GetCacheCreation5mTokens()
 		claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Usage.GetCacheCreation1hTokens()
+		claudeInfo.Usage.ClaudeSpeed = claudeResponse.Usage.Speed
 	}
 	var responseData []byte
 	switch info.RelayFormat {
@@ -249,14 +254,21 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 		ResponseText: strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	logger.LogDebug(c, "responseBody: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"Claude response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, resp, responseBody)
 	if handleErr != nil {
 		return nil, handleErr
 	}
+	applyClaudeRefusalBilling(c, claudeInfo.Model, claudeInfo.Usage)
+	applyClaudeUsagePricing(info, claudeInfo.Usage)
 	return claudeInfo.Usage, nil
 }

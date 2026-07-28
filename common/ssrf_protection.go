@@ -3,7 +3,6 @@ package common
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -288,9 +287,27 @@ func (p *SSRFProtection) ipAccessError(host string, ip net.IP) error {
 
 // ValidateNetworkTarget validates the host and port before dialing.
 func (p *SSRFProtection) ValidateNetworkTarget(host string, port int) error {
-	host = strings.TrimSpace(host)
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
 	if host == "" {
 		return fmt.Errorf("invalid host")
+	}
+	// RFC 6874 scoped IPv6 literals (for example, fe80::1%eth0) are only
+	// meaningful on the local machine. net.ParseIP deliberately does not parse
+	// the zone suffix, so treating one as a domain would bypass the literal-IP
+	// private-address check when resolved-IP filtering is disabled.
+	if strings.Contains(host, "%") {
+		return fmt.Errorf("scoped IP addresses are not allowed")
+	}
+	lowerHost := strings.ToLower(host)
+	numericOrDot := true
+	for _, r := range lowerHost {
+		if (r < '0' || r > '9') && r != '.' {
+			numericOrDot = false
+			break
+		}
+	}
+	if net.ParseIP(host) == nil && (numericOrDot || strings.HasPrefix(lowerHost, "0x")) {
+		return fmt.Errorf("non-canonical IP address is not allowed")
 	}
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("invalid port: %d", port)
@@ -326,14 +343,9 @@ func (p *SSRFProtection) ValidateResolvedIP(host string, ip net.IP) error {
 // ValidateURL 验证URL是否安全
 func (p *SSRFProtection) ValidateURL(urlStr string) error {
 	// 解析URL
-	u, err := url.Parse(urlStr)
+	u, err := ParseAbsoluteHTTPURL(urlStr)
 	if err != nil {
-		return fmt.Errorf("invalid URL format: %v", err)
-	}
-
-	// 只允许HTTP/HTTPS协议
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("unsupported protocol: %s (only http/https allowed)", u.Scheme)
+		return err
 	}
 
 	// 解析主机和端口
@@ -378,7 +390,11 @@ func (p *SSRFProtection) ValidateURL(urlStr string) error {
 
 // ValidateURLWithFetchSetting 使用FetchSetting配置验证URL
 func ValidateURLWithFetchSetting(urlStr string, enableSSRFProtection, allowPrivateIp bool, domainFilterMode bool, ipFilterMode bool, domainList, ipList, allowedPorts []string, applyIPFilterForDomain bool) error {
-	// 如果SSRF防护被禁用，直接返回成功
+	// URL syntax and credential rules are invariants even when the operator
+	// deliberately disables domain/IP filtering.
+	if _, err := ParseAbsoluteHTTPURL(urlStr); err != nil {
+		return err
+	}
 	if !enableSSRFProtection {
 		return nil
 	}

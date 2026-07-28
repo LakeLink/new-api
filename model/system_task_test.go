@@ -1,12 +1,14 @@
 package model
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 type testSystemTaskPayload struct {
@@ -111,6 +113,37 @@ func TestSystemTaskLockPreventsConcurrentClaim(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, reloadedSecond)
 	assert.Equal(t, SystemTaskStatusPending, reloadedSecond.Status)
+}
+
+func TestSystemTaskClaimPreservesLockInsertFailure(t *testing.T) {
+	truncateTables(t)
+
+	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, nil, nil)
+	require.NoError(t, err)
+	injectedErr := errors.New("injected system task lock insert failure")
+	const callbackName = "test:fail_system_task_lock_insert"
+	require.NoError(t, DB.Callback().Create().Before("gorm:create").Register(
+		callbackName,
+		func(tx *gorm.DB) {
+			if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "system_task_locks" {
+				_ = tx.AddError(injectedErr)
+			}
+		},
+	))
+	t.Cleanup(func() {
+		require.NoError(t, DB.Callback().Create().Remove(callbackName))
+	})
+
+	claimedTask, claimed, err := ClaimSystemTask(
+		task.ID,
+		SystemTaskTypeLogCleanup,
+		"runner-a",
+		common.GetTimestamp()+60,
+	)
+
+	require.ErrorIs(t, err, injectedErr)
+	assert.False(t, claimed)
+	assert.Nil(t, claimedTask)
 }
 
 func TestExpiredSystemTaskLockFailsOldRunAndClaimsLegacyPendingRun(t *testing.T) {
@@ -349,4 +382,63 @@ func TestSystemTaskUpdatesRequireUnexpiredLock(t *testing.T) {
 	require.NotNil(t, reloaded)
 	assert.Equal(t, SystemTaskStatusRunning, reloaded.Status)
 	assert.Empty(t, reloaded.State)
+}
+
+func TestCleanupTerminalSystemTasksPreservesFinancialAndSchedulerState(t *testing.T) {
+	db := setupBillingAdjustmentTestDB(t, &SystemTask{}, &SystemTaskLock{})
+	cutoffAge := int64(10)
+	oldTimestamp := GetDBTimestamp() - cutoffAge - 1
+
+	oldOperational := SystemTask{
+		TaskID: "cleanup-old-operational",
+		Type:   SystemTaskTypeLogCleanup,
+		Status: SystemTaskStatusSucceeded,
+	}
+	latestOperational := SystemTask{
+		TaskID: "cleanup-latest-operational",
+		Type:   SystemTaskTypeLogCleanup,
+		Status: SystemTaskStatusFailed,
+	}
+	billingLedger := SystemTask{
+		TaskID: "cleanup-billing-ledger",
+		Type:   SystemTaskTypeBillingAdjustment,
+		Status: SystemTaskStatusSucceeded,
+	}
+	pendingOperational := SystemTask{
+		TaskID: "cleanup-pending-operational",
+		Type:   SystemTaskTypeModelUpdate,
+		Status: SystemTaskStatusPending,
+	}
+	require.NoError(t, db.Create(&oldOperational).Error)
+	require.NoError(t, db.Create(&latestOperational).Error)
+	require.NoError(t, db.Create(&billingLedger).Error)
+	require.NoError(t, db.Create(&pendingOperational).Error)
+	require.NoError(t, db.Model(&SystemTask{}).
+		Where("id IN ?", []int64{oldOperational.ID, latestOperational.ID, billingLedger.ID, pendingOperational.ID}).
+		Update("updated_at", oldTimestamp).Error)
+	require.NoError(t, db.Create(&SystemTaskLock{
+		Type:     "cleanup-terminal-lock",
+		TaskID:   oldOperational.TaskID,
+		LockedBy: "stale-runner",
+	}).Error)
+
+	deleted, err := CleanupTerminalSystemTasks(cutoffAge)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+
+	var oldCount, lockCount int64
+	require.NoError(t, db.Model(&SystemTask{}).Where("id = ?", oldOperational.ID).Count(&oldCount).Error)
+	require.NoError(t, db.Model(&SystemTaskLock{}).Where("task_id = ?", oldOperational.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, oldCount)
+	assert.Zero(t, lockCount)
+
+	for _, taskID := range []string{
+		latestOperational.TaskID,
+		billingLedger.TaskID,
+		pendingOperational.TaskID,
+	} {
+		var count int64
+		require.NoError(t, db.Model(&SystemTask{}).Where("task_id = ?", taskID).Count(&count).Error)
+		assert.Equal(t, int64(1), count, taskID)
+	}
 }

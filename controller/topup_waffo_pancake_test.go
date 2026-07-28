@@ -1,11 +1,16 @@
 package controller
 
 import (
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +35,7 @@ func TestFormatWaffoPancakeAmount_UsesDisplayPriceString(t *testing.T) {
 func TestGetWaffoPancakePayMoney(t *testing.T) {
 	originalUnitPrice := setting.WaffoPancakeUnitPrice
 	originalQuotaDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType
+	originalQuotaPerUnit := common.QuotaPerUnit
 	originalDiscounts := make(map[int]float64, len(operation_setting.GetPaymentSetting().AmountDiscount))
 	for k, v := range operation_setting.GetPaymentSetting().AmountDiscount {
 		originalDiscounts[k] = v
@@ -39,6 +45,7 @@ func TestGetWaffoPancakePayMoney(t *testing.T) {
 	t.Cleanup(func() {
 		setting.WaffoPancakeUnitPrice = originalUnitPrice
 		operation_setting.GetGeneralSetting().QuotaDisplayType = originalQuotaDisplayType
+		common.QuotaPerUnit = originalQuotaPerUnit
 		operation_setting.GetPaymentSetting().AmountDiscount = originalDiscounts
 		require.NoError(t, common.UpdateTopupGroupRatioByJSONString(originalTopupGroupRatio))
 	})
@@ -88,4 +95,34 @@ func TestGetWaffoPancakePayMoney(t *testing.T) {
 			require.InDelta(t, tc.expected, actual, 0.000001)
 		})
 	}
+
+	t.Run("rejects an overflowing provider charge", func(t *testing.T) {
+		operation_setting.GetGeneralSetting().QuotaDisplayType = operation_setting.QuotaDisplayTypeUSD
+		setting.WaffoPancakeUnitPrice = math.MaxFloat64
+		require.Zero(t, getWaffoPancakePayMoney(10, "default"))
+	})
+
+	t.Run("rejects an invalid token conversion unit", func(t *testing.T) {
+		operation_setting.GetGeneralSetting().QuotaDisplayType = operation_setting.QuotaDisplayTypeTokens
+		setting.WaffoPancakeUnitPrice = 1
+		common.QuotaPerUnit = 0
+		require.Zero(t, getWaffoPancakePayMoney(10, "default"))
+	})
+}
+
+func TestListWaffoPancakeCatalogRejectsQueryCredentials(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/api/option/waffo-pancake/catalog?merchant_id=merchant&private_key=secret",
+		nil,
+	)
+
+	ListWaffoPancakeCatalog(c)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "凭证必须通过请求体提交")
+	assert.NotContains(t, recorder.Body.String(), "secret")
 }

@@ -14,16 +14,20 @@ func GetSubscription(c *gin.Context) {
 	var err error
 	var token *model.Token
 	var expiredTime int64
-	if common.DisplayTokenStatEnabled {
+	if common.GetLegacyOptionBool("DisplayTokenStatEnabled", &common.DisplayTokenStatEnabled) {
 		tokenId := c.GetInt("token_id")
 		token, err = model.GetTokenById(tokenId)
-		expiredTime = token.ExpiredTime
-		remainQuota = token.RemainQuota
-		usedQuota = token.UsedQuota
+		if err == nil {
+			expiredTime = token.ExpiredTime
+			remainQuota = token.RemainQuota
+			usedQuota = token.UsedQuota
+		}
 	} else {
 		userId := c.GetInt("id")
 		remainQuota, err = model.GetUserQuota(userId, false)
-		usedQuota, err = model.GetUserUsedQuota(userId)
+		if err == nil {
+			usedQuota, err = model.GetUserUsedQuota(userId)
+		}
 	}
 	if expiredTime <= 0 {
 		expiredTime = 0
@@ -38,8 +42,8 @@ func GetSubscription(c *gin.Context) {
 		})
 		return
 	}
-	quota := remainQuota + usedQuota
-	amount := float64(quota)
+	amount := float64(remainQuota) + float64(usedQuota)
+	quotaPerUnit := common.GetLegacyOptionFloat64("QuotaPerUnit", &common.QuotaPerUnit)
 	// OpenAI 兼容接口中的 *_USD 字段含义保持“额度单位”对应值：
 	// 我们将其解释为以“站点展示类型”为准：
 	// - USD: 直接除以 QuotaPerUnit
@@ -47,11 +51,11 @@ func GetSubscription(c *gin.Context) {
 	// - TOKENS: 直接使用 tokens 数量
 	switch operation_setting.GetQuotaDisplayType() {
 	case operation_setting.QuotaDisplayTypeCNY:
-		amount = amount / common.QuotaPerUnit * operation_setting.USDExchangeRate
+		amount = amount / quotaPerUnit * operation_setting.GetLegacyPaymentSetting().USDExchangeRate
 	case operation_setting.QuotaDisplayTypeTokens:
 		// amount 保持 tokens 数值
 	default:
-		amount = amount / common.QuotaPerUnit
+		amount = amount / quotaPerUnit
 	}
 	if token != nil && token.UnlimitedQuota {
 		amount = 100000000
@@ -72,10 +76,12 @@ func GetUsage(c *gin.Context) {
 	var quota int
 	var err error
 	var token *model.Token
-	if common.DisplayTokenStatEnabled {
+	if common.GetLegacyOptionBool("DisplayTokenStatEnabled", &common.DisplayTokenStatEnabled) {
 		tokenId := c.GetInt("token_id")
 		token, err = model.GetTokenById(tokenId)
-		quota = token.UsedQuota
+		if err == nil {
+			quota = token.UsedQuota
+		}
 	} else {
 		userId := c.GetInt("id")
 		quota, err = model.GetUserUsedQuota(userId)
@@ -91,13 +97,14 @@ func GetUsage(c *gin.Context) {
 		return
 	}
 	amount := float64(quota)
+	quotaPerUnit := common.GetLegacyOptionFloat64("QuotaPerUnit", &common.QuotaPerUnit)
 	switch operation_setting.GetQuotaDisplayType() {
 	case operation_setting.QuotaDisplayTypeCNY:
-		amount = amount / common.QuotaPerUnit * operation_setting.USDExchangeRate
+		amount = amount / quotaPerUnit * operation_setting.GetLegacyPaymentSetting().USDExchangeRate
 	case operation_setting.QuotaDisplayTypeTokens:
 		// tokens 保持原值
 	default:
-		amount = amount / common.QuotaPerUnit
+		amount = amount / quotaPerUnit
 	}
 	usage := OpenAIUsageResponse{
 		Object:     "list",

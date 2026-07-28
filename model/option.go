@@ -3,8 +3,10 @@ package model
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,6 +23,8 @@ type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
 }
+
+var optionUpdateMutex sync.Mutex
 
 func AllOption() ([]*Option, error) {
 	var options []*Option
@@ -191,24 +195,99 @@ func InitOptionMap() {
 }
 
 func loadOptionsFromDatabase() {
-	options, _ := AllOption()
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+
+	options, err := AllOption()
+	if err != nil {
+		common.SysError("failed to load options from database: " + err.Error())
+		return
+	}
+
+	type registeredConfigUpdate struct {
+		config interface{}
+		fields map[string]string
+		values map[string]string
+	}
+	configUpdates := make(map[string]*registeredConfigUpdate)
+	legacyValues := make(map[string]string)
 	for _, option := range options {
-		err := updateOptionMap(option.Key, option.Value)
-		if err != nil {
+		if parts := strings.SplitN(option.Key, ".", 2); len(parts) == 2 {
+			if cfg := config.GlobalConfig.Get(parts[0]); cfg != nil {
+				update := configUpdates[parts[0]]
+				if update == nil {
+					update = &registeredConfigUpdate{
+						config: cfg,
+						fields: make(map[string]string),
+						values: make(map[string]string),
+					}
+					configUpdates[parts[0]] = update
+				}
+				update.fields[parts[1]] = option.Value
+				update.values[option.Key] = option.Value
+				continue
+			}
+		}
+		if err := validateOptionValue(option.Key, option.Value); err != nil {
+			common.SysLog("failed to update option map: " + err.Error())
+			continue
+		}
+		legacyValues[option.Key] = option.Value
+	}
+
+	common.OptionMapRWMutex.Lock()
+	defer common.OptionMapRWMutex.Unlock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+
+	configNames := make([]string, 0, len(configUpdates))
+	for name := range configUpdates {
+		configNames = append(configNames, name)
+	}
+	sort.Strings(configNames)
+	for _, name := range configNames {
+		update := configUpdates[name]
+		if err := config.ValidateConfigFromMap(update.config, update.fields); err != nil {
+			common.SysLog("failed to update option map: invalid " + name + " configuration: " + err.Error())
+			continue
+		}
+		if err := config.UpdateConfigFromMap(update.config, update.fields); err != nil {
+			common.SysLog("failed to update option map: " + err.Error())
+			continue
+		}
+		afterConfigUpdate(name)
+		for key, value := range update.values {
+			common.OptionMap[key] = value
+		}
+	}
+
+	legacyKeys := make([]string, 0, len(legacyValues))
+	for key := range legacyValues {
+		legacyKeys = append(legacyKeys, key)
+	}
+	sort.Strings(legacyKeys)
+	for _, key := range legacyKeys {
+		if err := updateOptionMapLocked(key, legacyValues[key]); err != nil {
 			common.SysLog("failed to update option map: " + err.Error())
 		}
 	}
 }
 
 func SyncOptions(frequency int) {
-	for {
-		time.Sleep(time.Duration(frequency) * time.Second)
+	interval := common.SafeIntervalDuration(frequency, time.Second, 60*time.Second, "option sync")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
 		common.SysLog("syncing options from database")
 		loadOptionsFromDatabase()
 	}
 }
 
 func UpdateOption(key string, value string) error {
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
@@ -228,21 +307,52 @@ func UpdateOption(key string, value string) error {
 		return err
 	}
 	// Update OptionMap
-	return updateOptionMap(key, value)
+	return updateOptionMapWithoutSequenceLock(key, value)
 }
 
-// UpdateOptionsBulk persists multiple key/value pairs in a single database
-// transaction, then dispatches them through updateOptionMap in one pass. If
-// any DB write fails the whole transaction rolls back and no in-memory state
-// is touched — safe for callers that must commit a set of related options
-// atomically (e.g. payment gateway binding).
+// UpdateOptionsBulk validates related registered-config fields as one
+// candidate, persists every value in a database transaction, then publishes
+// each config generation and the legacy option generation under the shared
+// option lock.
 func UpdateOptionsBulk(values map[string]string) error {
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+
 	if len(values) == 0 {
 		return nil
 	}
+	type registeredConfigUpdate struct {
+		config interface{}
+		fields map[string]string
+		values map[string]string
+	}
+	configUpdates := make(map[string]*registeredConfigUpdate)
+	legacyValues := make(map[string]string)
 	for key, value := range values {
+		if parts := strings.SplitN(key, ".", 2); len(parts) == 2 {
+			if cfg := config.GlobalConfig.Get(parts[0]); cfg != nil {
+				update := configUpdates[parts[0]]
+				if update == nil {
+					update = &registeredConfigUpdate{
+						config: cfg,
+						fields: make(map[string]string),
+						values: make(map[string]string),
+					}
+					configUpdates[parts[0]] = update
+				}
+				update.fields[parts[1]] = value
+				update.values[key] = value
+				continue
+			}
+		}
 		if err := validateOptionValue(key, value); err != nil {
 			return err
+		}
+		legacyValues[key] = value
+	}
+	for name, update := range configUpdates {
+		if err := config.ValidateConfigFromMap(update.config, update.fields); err != nil {
+			return fmt.Errorf("invalid %s configuration: %w", name, err)
 		}
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -261,8 +371,36 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for k, v := range values {
-		if err := updateOptionMap(k, v); err != nil {
+	common.OptionMapRWMutex.Lock()
+	defer common.OptionMapRWMutex.Unlock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+
+	configNames := make([]string, 0, len(configUpdates))
+	for name := range configUpdates {
+		configNames = append(configNames, name)
+	}
+	sort.Strings(configNames)
+	for _, name := range configNames {
+		update := configUpdates[name]
+		if err := config.UpdateConfigFromMap(update.config, update.fields); err != nil {
+			return err
+		}
+		afterConfigUpdate(name)
+		for key, value := range update.values {
+			common.OptionMap[key] = value
+		}
+	}
+
+	legacyKeys := make([]string, 0, len(legacyValues))
+	for key := range legacyValues {
+		legacyKeys = append(legacyKeys, key)
+	}
+	sort.Strings(legacyKeys)
+	for _, k := range legacyKeys {
+		v := legacyValues[k]
+		if err := updateOptionMapLocked(k, v); err != nil {
 			return err
 		}
 	}
@@ -270,15 +408,34 @@ func UpdateOptionsBulk(values map[string]string) error {
 }
 
 func updateOptionMap(key string, value string) (err error) {
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+	return updateOptionMapWithoutSequenceLock(key, value)
+}
+
+func updateOptionMapWithoutSequenceLock(key string, value string) (err error) {
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
-	common.OptionMap[key] = value
+	return updateOptionMapLocked(key, value)
+}
 
+// updateOptionMapLocked publishes one already-validated option while the
+// caller holds OptionMapRWMutex for writing. Keeping the lock at the batch
+// boundary prevents readers from observing mixed generations of related
+// credentials and prices during database sync or UpdateOptionsBulk.
+func updateOptionMapLocked(key string, value string) (err error) {
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
 	// 检查是否是模型配置 - 使用更规范的方式处理
-	if handleConfigUpdate(key, value) {
+	if handled, configErr := handleConfigUpdate(key, value); handled {
+		if configErr != nil {
+			return configErr
+		}
+		common.OptionMap[key] = value
 		return nil // 已由配置系统处理
 	}
 
@@ -297,7 +454,7 @@ func updateOptionMap(key string, value string) (err error) {
 		case "LogExportPermission":
 			if intValue != common.RoleAdminUser && intValue != common.RoleRootUser {
 				intValue = common.RoleAdminUser
-				common.OptionMap[key] = strconv.Itoa(intValue)
+				value = strconv.Itoa(intValue)
 			}
 			common.LogExportPermission = intValue
 		}
@@ -341,7 +498,7 @@ func updateOptionMap(key string, value string) (err error) {
 				newVal = "TOKENS"
 			}
 			if cfg := config.GlobalConfig.Get("general_setting"); cfg != nil {
-				_ = config.UpdateConfigFromMap(cfg, map[string]string{"quota_display_type": newVal})
+				err = config.UpdateConfigFromMap(cfg, map[string]string{"quota_display_type": newVal})
 			}
 		case "DisplayTokenStatEnabled":
 			common.DisplayTokenStatEnabled = boolValue
@@ -597,28 +754,211 @@ func updateOptionMap(key string, value string) (err error) {
 		err = operation_setting.UpdatePayMethodsByJsonString(value)
 	case "WaffoPayMethods":
 		// WaffoPayMethods is read directly from OptionMap via setting.GetWaffoPayMethods().
-		// The value is already stored in OptionMap at the top of this function (line: common.OptionMap[key] = value).
-		// No additional in-memory variable to update.
+		// No additional in-memory variable is required.
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	common.OptionMap[key] = value
+	return nil
 }
 
 func validateOptionValue(key string, value string) error {
-	if key != "QuotaPerUnit" {
-		return nil
+	if parts := strings.SplitN(key, ".", 2); len(parts) == 2 {
+		if cfg := config.GlobalConfig.Get(parts[0]); cfg != nil {
+			if err := config.ValidateConfigFromMap(cfg, map[string]string{parts[1]: value}); err != nil {
+				return fmt.Errorf("invalid %s: %w", key, err)
+			}
+		}
 	}
-	quotaPerUnit, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) || quotaPerUnit <= 0 || quotaPerUnit > float64(common.MaxQuota) {
-		return fmt.Errorf("QuotaPerUnit must be finite and in the range (0, %d]", common.MaxQuota)
+
+	if strings.HasSuffix(key, "Enabled") ||
+		key == "DefaultCollapseSidebar" ||
+		key == "DefaultUseAutoGroup" ||
+		key == "SMTPForceAuthLogin" ||
+		key == "SMTPInsecureSkipVerify" ||
+		key == "CreemTestMode" ||
+		key == "WaffoSandbox" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return fmt.Errorf("%s must be a boolean", key)
+		}
+	}
+
+	switch key {
+	case "FileUploadPermission", "FileDownloadPermission", "ImageUploadPermission", "ImageDownloadPermission":
+		role, err := strconv.Atoi(value)
+		if err != nil || !common.IsValidateRole(role) {
+			return fmt.Errorf("%s must be a valid role value", key)
+		}
+	case "LogExportPermission":
+		role, err := strconv.Atoi(value)
+		if err != nil || (role != common.RoleAdminUser && role != common.RoleRootUser) {
+			return fmt.Errorf("LogExportPermission must be admin or root")
+		}
+	case "SMTPPort":
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("SMTPPort must be an integer in the range [1, 65535]")
+		}
+	case "Price", "StripeUnitPrice", "WaffoUnitPrice", "WaffoPancakeUnitPrice":
+		price, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(price) || math.IsInf(price, 0) || price < 0 || price > float64(common.MaxQuota) {
+			return fmt.Errorf("%s must be finite and in the range [0, %d]", key, common.MaxQuota)
+		}
+	case "USDExchangeRate":
+		rate, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(rate) || math.IsInf(rate, 0) || rate <= 0 || rate > float64(common.MaxQuota) {
+			return fmt.Errorf("USDExchangeRate must be finite and in the range (0, %d]", common.MaxQuota)
+		}
+	case "MinTopUp", "StripeMinTopUp", "WaffoMinTopUp", "WaffoPancakeMinTopUp":
+		minimum, err := strconv.ParseInt(value, 10, strconv.IntSize)
+		if err != nil || minimum < 1 || minimum > int64(common.MaxQuota) {
+			return fmt.Errorf("%s must be an integer in the range [1, %d]", key, common.MaxQuota)
+		}
+	case "LinuxDOMinimumTrustLevel":
+		level, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || level < 0 {
+			return fmt.Errorf("LinuxDOMinimumTrustLevel must be an integer in the range [0, %d]", int64(math.MaxInt32))
+		}
+	case "ModelRequestRateLimitCount", "ModelRequestRateLimitSuccessCount":
+		count, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || count < 0 {
+			return fmt.Errorf("%s must be an integer in the range [0, %d]", key, int64(math.MaxInt32))
+		}
+	case "ModelRequestRateLimitDurationMinutes":
+		duration, err := strconv.ParseInt(value, 10, 64)
+		maxMinutes := int64(math.MaxInt64) / (60 * int64(math.MaxInt32))
+		if err != nil || duration < 1 || duration > maxMinutes {
+			return fmt.Errorf("ModelRequestRateLimitDurationMinutes must be an integer in the range [1, %d]", maxMinutes)
+		}
+	case "RetryTimes":
+		retries, err := strconv.Atoi(value)
+		if err != nil || retries < 0 || retries > 100 {
+			return fmt.Errorf("RetryTimes must be an integer in the range [0, 100]")
+		}
+	case "ChannelDisableThreshold":
+		threshold, err := strconv.ParseFloat(value, 64)
+		maxSeconds := float64(math.MaxInt64 / 1000)
+		if err != nil || math.IsNaN(threshold) || math.IsInf(threshold, 0) || threshold < 0 || threshold > maxSeconds {
+			return fmt.Errorf("ChannelDisableThreshold must be finite and in the range [0, %.0f]", maxSeconds)
+		}
+	case "StreamCacheQueueLength":
+		length, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || length < 0 {
+			return fmt.Errorf("StreamCacheQueueLength must be an integer in the range [0, %d]", int64(math.MaxInt32))
+		}
+	case "QuotaPerUnit":
+		quotaPerUnit, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) || quotaPerUnit <= 0 || quotaPerUnit > float64(common.MaxQuota) {
+			return fmt.Errorf("QuotaPerUnit must be finite and in the range (0, %d]", common.MaxQuota)
+		}
+	case "DataExportInterval":
+		interval, err := strconv.ParseInt(value, 10, strconv.IntSize)
+		maxMinutes := int64(math.MaxInt64 / int64(time.Minute))
+		if err != nil || interval <= 0 || interval > maxMinutes {
+			return fmt.Errorf("DataExportInterval must be an integer in the range [1, %d]", maxMinutes)
+		}
+	case "DataExportDefaultTime":
+		switch value {
+		case "hour", "day", "week":
+		default:
+			return fmt.Errorf("DataExportDefaultTime must be hour, day, or week")
+		}
+	case "QuotaForNewUser", "QuotaForInviter", "QuotaForInvitee", "QuotaRemindThreshold", "PreConsumedQuota":
+		quota, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || quota < 0 || quota > int64(common.MaxQuota) {
+			return fmt.Errorf("%s must be an integer in the range [0, %d]", key, common.MaxQuota)
+		}
+	case "ModelPrice", "ModelRatio", "CompletionRatio", "CacheRatio", "CreateCacheRatio", "ImageRatio", "AudioRatio", "AudioCompletionRatio":
+		if err := ratio_setting.CheckRatioMap(value); err != nil {
+			return fmt.Errorf("invalid %s: %w", key, err)
+		}
+	case "GroupRatio":
+		if err := ratio_setting.CheckGroupRatio(value); err != nil {
+			return err
+		}
+	case "GroupGroupRatio":
+		if err := ratio_setting.CheckGroupGroupRatio(value); err != nil {
+			return err
+		}
+	case "TopupGroupRatio":
+		if err := common.ValidateTopupGroupRatioJSONString(value); err != nil {
+			return err
+		}
+	case "Chats":
+		var chats []map[string]string
+		if err := common.UnmarshalJsonStr(value, &chats); err != nil || chats == nil {
+			return fmt.Errorf("Chats must be a JSON array")
+		}
+	case "AutoGroups":
+		var groups []string
+		if err := common.UnmarshalJsonStr(value, &groups); err != nil || groups == nil {
+			return fmt.Errorf("AutoGroups must be a JSON array")
+		}
+	case "GroupFallback":
+		if err := setting.ValidateGroupFallbackJSONString(value); err != nil {
+			return err
+		}
+	case "UserUsableGroups":
+		var groups map[string]string
+		if err := common.UnmarshalJsonStr(value, &groups); err != nil || groups == nil {
+			return fmt.Errorf("UserUsableGroups must be a JSON object")
+		}
+	case "ModelRequestRateLimitGroup":
+		if err := setting.CheckModelRequestRateLimitGroup(value); err != nil {
+			return err
+		}
+	case "AutomaticDisableStatusCodes", "AutomaticRetryStatusCodes":
+		if _, err := operation_setting.ParseHTTPStatusCodeRanges(value); err != nil {
+			return err
+		}
+	case "PayMethods":
+		var methods []map[string]string
+		if err := common.UnmarshalJsonStr(value, &methods); err != nil || methods == nil {
+			return fmt.Errorf("PayMethods must be a JSON array")
+		}
+	case "CreemProducts":
+		var products []map[string]interface{}
+		if err := common.UnmarshalJsonStr(value, &products); err != nil || products == nil {
+			return fmt.Errorf("CreemProducts must be a JSON array")
+		}
+	case "claude.thinking_adapter_budget_tokens_percentage":
+		percentage, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(percentage) || math.IsInf(percentage, 0) || percentage < 0.1 || percentage > 1 {
+			return fmt.Errorf("Claude thinking budget percentage must be finite and in the range [0.1, 1]")
+		}
+	case "gemini.thinking_adapter_budget_tokens_percentage":
+		percentage, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsNaN(percentage) || math.IsInf(percentage, 0) || percentage < 0.002 || percentage > 1 {
+			return fmt.Errorf("Gemini thinking budget percentage must be finite and in the range [0.002, 1]")
+		}
+	case "claude.default_max_tokens":
+		var limits map[string]int
+		if err := common.UnmarshalJsonStr(value, &limits); err != nil || limits == nil {
+			return fmt.Errorf("Claude default max tokens must be a JSON object of integers")
+		}
+		for modelName, limit := range limits {
+			if limit <= 0 || limit > common.MaxTokensLimit {
+				return fmt.Errorf("Claude default max tokens for %s must be in the range [1, %d]", modelName, common.MaxTokensLimit)
+			}
+		}
+	case "tool_price_setting.prices":
+		var prices map[string]float64
+		if err := common.UnmarshalJsonStr(value, &prices); err != nil {
+			return fmt.Errorf("tool prices must be a JSON object: %w", err)
+		}
+		if err := operation_setting.ValidateToolPriceMap(prices); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // handleConfigUpdate 处理分层配置更新，返回是否已处理
-func handleConfigUpdate(key, value string) bool {
+func handleConfigUpdate(key, value string) (bool, error) {
 	parts := strings.SplitN(key, ".", 2)
 	if len(parts) != 2 {
-		return false // 不是分层配置
+		return false, nil // 不是分层配置
 	}
 
 	configName := parts[0]
@@ -627,16 +967,23 @@ func handleConfigUpdate(key, value string) bool {
 	// 获取配置对象
 	cfg := config.GlobalConfig.Get(configName)
 	if cfg == nil {
-		return false // 未注册的配置
+		return false, nil // 未注册的配置
 	}
 
 	// 更新配置
 	configMap := map[string]string{
 		configKey: value,
 	}
-	config.UpdateConfigFromMap(cfg, configMap)
+	if err := config.UpdateConfigFromMap(cfg, configMap); err != nil {
+		return true, err
+	}
 
-	// 特定配置的后处理
+	afterConfigUpdate(configName)
+
+	return true, nil // 已处理
+}
+
+func afterConfigUpdate(configName string) {
 	if configName == "performance_setting" {
 		performance_setting.UpdateAndSync()
 	} else if configName == "tool_price_setting" {
@@ -647,6 +994,4 @@ func handleConfigUpdate(key, value string) bool {
 	} else if configName == "theme" {
 		system_setting.UpdateAndSyncTheme()
 	}
-
-	return true // 已处理
 }

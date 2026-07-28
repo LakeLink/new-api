@@ -84,7 +84,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
 	}
 	if info.SupportStreamOptions && info.IsStream {
-		oaiReq.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
+		oaiReq.StreamOptions = &dto.StreamOptions{IncludeUsage: common.GetPointer(true)}
 	}
 	return a.ConvertOpenAIRequest(c, info, oaiReq)
 }

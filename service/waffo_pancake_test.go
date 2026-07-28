@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,8 +18,12 @@ import (
 func setupWaffoPancakeTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
+	oldDB := model.DB
+	oldLogDB := model.LOG_DB
 	oldMainDatabaseType := common.MainDatabaseType()
 	oldLogDatabaseType := common.LogDatabaseType()
+	oldRedisEnabled := common.RedisEnabled
+	oldRedisClient := common.RDB
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
 
@@ -32,11 +37,14 @@ func setupWaffoPancakeTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.TopUp{}, &model.SubscriptionOrder{}))
 
 	t.Cleanup(func() {
+		model.DB = oldDB
+		model.LOG_DB = oldLogDB
 		common.SetDatabaseTypes(oldMainDatabaseType, oldLogDatabaseType)
+		common.RedisEnabled = oldRedisEnabled
+		common.RDB = oldRedisClient
 		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
 	})
 
 	return db
@@ -197,6 +205,7 @@ func TestResolveWaffoPancakeTradeNo_FailsWhenWebhookOrderIDIsUnknown(t *testing.
 		},
 	})
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWaffoPancakeWebhookRejected)
 	require.Empty(t, tradeNo)
 }
 
@@ -332,5 +341,45 @@ func TestResolveWaffoPancakeSubscriptionTradeNo_FailsWhenWebhookOrderIDIsUnknown
 		},
 	})
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWaffoPancakeWebhookRejected)
 	require.Empty(t, tradeNo)
+}
+
+func TestResolveWaffoPancakeTradeNumbersPreserveDatabaseFailures(t *testing.T) {
+	db := setupWaffoPancakeTestDB(t)
+	injectedErr := errors.New("injected payment order lookup failure")
+	const callbackName = "test:fail_waffo_pancake_order_lookup"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(
+		callbackName,
+		func(tx *gorm.DB) {
+			if tx.Statement.Schema == nil {
+				return
+			}
+			switch tx.Statement.Schema.Table {
+			case "top_ups", "subscription_orders":
+				_ = tx.AddError(injectedErr)
+			}
+		},
+	))
+	t.Cleanup(func() {
+		require.NoError(t, db.Callback().Query().Remove(callbackName))
+	})
+
+	_, err := ResolveWaffoPancakeTradeNo(&WaffoPancakeWebhookEvent{
+		Data: WaffoPancakeWebhookData{
+			OrderMerchantExternalID:       "WAFFO_PANCAKE-transient-topup",
+			MerchantProvidedBuyerIdentity: WaffoPancakeBuyerIdentityFromUserID(1),
+		},
+	})
+	require.ErrorIs(t, err, injectedErr)
+	require.NotErrorIs(t, err, ErrWaffoPancakeWebhookRejected)
+
+	_, err = ResolveWaffoPancakeSubscriptionTradeNo(&WaffoPancakeWebhookEvent{
+		Data: WaffoPancakeWebhookData{
+			OrderMerchantExternalID:       "WAFFO_PANCAKE_SUB-transient-subscription",
+			MerchantProvidedBuyerIdentity: WaffoPancakeBuyerIdentityFromUserID(1),
+		},
+	})
+	require.ErrorIs(t, err, injectedErr)
+	require.NotErrorIs(t, err, ErrWaffoPancakeWebhookRejected)
 }

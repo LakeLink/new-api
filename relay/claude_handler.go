@@ -47,24 +47,28 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 	adaptor.Init(info)
 
-	if request.MaxTokens == nil || *request.MaxTokens == 0 {
-		defaultMaxTokens := uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(request.Model))
-		request.MaxTokens = &defaultMaxTokens
+	if request.MaxTokens == nil {
+		if request.MaxTokensToSample != nil {
+			request.MaxTokens = request.MaxTokensToSample
+		} else {
+			defaultMaxTokens := uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(request.Model))
+			request.MaxTokens = &defaultMaxTokens
+		}
 	}
+	request.MaxTokensToSample = nil
 
-	if baseModel, effortLevel, ok := reasoning.TrimEffortSuffix(request.Model); ok && effortLevel != "" &&
-		(strings.HasPrefix(request.Model, "claude-opus-4-6") ||
-			strings.HasPrefix(request.Model, "claude-opus-4-7") ||
-			strings.HasPrefix(request.Model, "claude-opus-4-8")) {
+	if baseModel, effortLevel, ok := reasoning.ParseClaudeEffortSuffix(request.Model); ok &&
+		(strings.HasPrefix(baseModel, "claude-opus-4-6") ||
+			reasoning.IsClaudeAdaptiveThinkingOnlyModel(baseModel)) {
 		request.Model = baseModel
 		request.Thinking = &dto.Thinking{
 			Type: "adaptive",
 		}
 		request.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
-		if strings.HasPrefix(request.Model, "claude-opus-4-7") ||
-			strings.HasPrefix(request.Model, "claude-opus-4-8") {
-			// Opus 4.7/4.8 reject non-default temperature/top_p/top_k with 400
-			// and defaults display to "omitted"; restore the 4.6 visible summary.
+		if reasoning.IsClaudeSamplingRestrictedModel(request.Model) {
+			// Current adaptive-only models reject non-default sampling controls
+			// and omit thinking by default; preserve the alias's visible-thinking
+			// behavior without forwarding unsupported controls.
 			request.Thinking.Display = "summarized"
 			request.Temperature = nil
 			request.TopP = nil
@@ -77,9 +81,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		strings.HasSuffix(request.Model, "-thinking") {
 		if request.Thinking == nil {
 			baseModel := strings.TrimSuffix(request.Model, "-thinking")
-			if strings.HasPrefix(baseModel, "claude-opus-4-7") ||
-				strings.HasPrefix(baseModel, "claude-opus-4-8") {
-				// Opus 4.7/4.8 reject thinking.type="enabled"; use adaptive at high effort.
+			if reasoning.IsClaudeAdaptiveThinkingOnlyModel(baseModel) {
+				// Current models reject thinking.type="enabled"; use adaptive
+				// thinking at the documented default effort.
 				request.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
 				request.OutputConfig = json.RawMessage(`{"effort":"high"}`)
 				request.Temperature = nil
@@ -94,7 +98,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				// BudgetTokens 为 max_tokens 的 80%
 				request.Thinking = &dto.Thinking{
 					Type:         "enabled",
-					BudgetTokens: common.GetPointer[int](int(float64(*request.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)),
+					BudgetTokens: common.GetPointer(model_setting.GetClaudeSettings().GetThinkingBudgetTokens(*request.MaxTokens)),
 				}
 				// TODO: 临时处理
 				// https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
@@ -159,14 +163,31 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		info.UpstreamRequestBodySize = storage.Size()
-		requestBody = common.ReaderOnly(storage)
+		jsonData, err := storage.Bytes()
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		jsonData, err = refreshFinalRequestBilling(c, info, types.RelayFormatClaude, jsonData)
+		if err != nil {
+			return finalRequestBillingAPIError(err, false)
+		}
+		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		defer closer.Close()
+		info.UpstreamRequestBodySize = size
+		requestBody = body
 	} else {
 		convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, request)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		if err := validateConvertedRequest(convertedRequest); err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+		finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -185,8 +206,12 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
+		jsonData, err = refreshFinalRequestBilling(c, info, finalRequestFormat, jsonData)
+		if err != nil {
+			return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
+		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
+		logger.LogDebug(c, "Claude upstream request prepared: bytes=%d", len(jsonData))
 		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -205,7 +230,10 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		httpResp, newAPIError = adaptorHTTPResponse(resp)
+		if newAPIError != nil {
+			return newAPIError
+		}
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
 		if httpResp.StatusCode != http.StatusOK {
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
@@ -222,6 +250,6 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return newAPIError
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	service.PostTextConsumeQuota(c, info, adaptorTextUsage(usage), nil)
 	return nil
 }

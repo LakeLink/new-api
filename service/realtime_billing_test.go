@@ -3,6 +3,8 @@ package service
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -76,4 +78,9 @@ func TestPreWssConsumeQuotaExtendsCumulativeReservationWithoutDirectCharge(t *te
 	assert.Equal(t, 100_000, user.Quota)
 	assert.Equal(t, 100_000, token.RemainQuota)
 	assert.Equal(t, 100, token.UsedQuota)
+
+	common.SetContextKey(ctx, constant.ContextKeyAutoGroup, 42)
+	err := PreWssConsumeQuota(ctx, info, usage)
+	require.ErrorContains(t, err, "invalid automatic billing group")
+	assert.Len(t, billing.targets, 1)
 }

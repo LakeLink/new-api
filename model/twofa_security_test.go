@@ -13,11 +13,17 @@ import (
 
 func setupTwoFASecurityTest(t *testing.T) {
 	t.Helper()
-	require.NoError(t, DB.AutoMigrate(&TwoFA{}, &TwoFABackupCode{}))
+	require.NoError(t, DB.AutoMigrate(
+		&TwoFA{},
+		&TwoFABackupCode{},
+		&BrowserSession{},
+	))
+	require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&BrowserSession{}).Error)
 	require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&TwoFABackupCode{}).Error)
 	require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&TwoFA{}).Error)
 	require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&User{}).Error)
 	t.Cleanup(func() {
+		_ = DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&BrowserSession{}).Error
 		_ = DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&TwoFABackupCode{}).Error
 		_ = DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&TwoFA{}).Error
 		_ = DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&User{}).Error
@@ -80,16 +86,34 @@ func TestBackupCodeConsumptionAndFailureCounterAreAtomic(t *testing.T) {
 
 func TestPasswordUpdateAndResetRevokeExistingSessions(t *testing.T) {
 	setupTwoFASecurityTest(t)
-	user := User{Username: "session-user", Password: "OldPassword123", Status: common.UserStatusEnabled, Email: "session@example.com"}
+	accessToken := "dashboard-access-token"
+	user := User{
+		Username:    "session-user",
+		Password:    "OldPassword123",
+		Status:      common.UserStatusEnabled,
+		Email:       "session@example.com",
+		AccessToken: &accessToken,
+	}
 	require.NoError(t, user.Insert(0))
 	assert.Zero(t, user.SessionVersion)
 
 	user.Password = "NewPassword123"
 	require.NoError(t, user.Update(true))
 	assert.Equal(t, int64(1), user.SessionVersion)
+	assert.Empty(t, user.GetAccessToken())
+	browserSessionID, err := CreateBrowserSession(user.Id, time.Now().Unix())
+	require.NoError(t, err)
 
 	require.NoError(t, ResetUserPasswordByEmail(user.Email, "ResetPassword123"))
 	stored, err := GetUserById(user.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), stored.SessionVersion)
+	assert.Empty(t, stored.GetAccessToken())
+	resolved, err := GetUserByBrowserSession(
+		user.Id,
+		browserSessionID,
+		time.Now().Unix(),
+	)
+	require.NoError(t, err)
+	assert.Nil(t, resolved)
 }

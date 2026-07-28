@@ -64,10 +64,10 @@ func runCodexCredentialAutoRefreshOnce() {
 	var refreshed int
 	var scanned int
 
-	offset := 0
+	lastID := 0
 	for {
 		var channels []*model.Channel
-		err := model.DB.
+		query := model.DB.
 			Select("id", "name", "key", "status", "channel_info").
 			Where("type = ? AND (status = ? OR status = ?)",
 				constant.ChannelTypeCodex,
@@ -75,9 +75,11 @@ func runCodexCredentialAutoRefreshOnce() {
 				common.ChannelStatusAutoDisabled,
 			).
 			Order("id asc").
-			Limit(codexCredentialRefreshBatchSize).
-			Offset(offset).
-			Find(&channels).Error
+			Limit(codexCredentialRefreshBatchSize)
+		if lastID > 0 {
+			query = query.Where("id > ?", lastID)
+		}
+		err := query.Find(&channels).Error
 		if err != nil {
 			logger.LogError(ctx, fmt.Sprintf("codex credential auto-refresh: query channels failed: %v", err))
 			return
@@ -85,7 +87,7 @@ func runCodexCredentialAutoRefreshOnce() {
 		if len(channels) == 0 {
 			break
 		}
-		offset += codexCredentialRefreshBatchSize
+		lastID = channels[len(channels)-1].Id
 
 		for _, ch := range channels {
 			if ch == nil {

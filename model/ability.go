@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 
@@ -47,24 +48,30 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	return abilities, err
 }
 
-func GetGroupEnabledModels(group string) []string {
+func GetGroupEnabledModels(group string) ([]string, error) {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
-	return models
+	err := DB.Table("abilities").
+		Where(commonGroupCol+" = ? and enabled = ?", group, true).
+		Distinct("model").
+		Pluck("model", &models).Error
+	return models, err
 }
 
-func GetEnabledModels() []string {
+func GetEnabledModels() ([]string, error) {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Pluck("model", &models)
-	return models
+	err := DB.Table("abilities").
+		Where("enabled = ?", true).
+		Distinct("model").
+		Pluck("model", &models).Error
+	return models, err
 }
 
-func GetAllEnableAbilities() []Ability {
+func GetAllEnableAbilities() ([]Ability, error) {
 	var abilities []Ability
-	DB.Find(&abilities, "enabled = ?", true)
-	return abilities
+	err := DB.Find(&abilities, "enabled = ?", true).Error
+	return abilities, err
 }
 
 func getPriority(group string, model string, retry int) (int, error) {
@@ -132,18 +139,29 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 	if err != nil {
 		return nil, err
 	}
-	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
+	abilities, err = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
+	if err != nil {
+		return nil, err
+	}
 	channel := Channel{}
 	if len(abilities) > 0 {
 		// Randomly choose one
-		weightSum := uint(0)
+		var weightSum int64
 		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
+			effectiveWeight := ability_.Weight
+			if effectiveWeight > MaxChannelWeight {
+				effectiveWeight = MaxChannelWeight
+			}
+			weightSum += int64(effectiveWeight) + 10
 		}
 		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
+		weight := rand.Int63n(weightSum)
 		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
+			effectiveWeight := ability_.Weight
+			if effectiveWeight > MaxChannelWeight {
+				effectiveWeight = MaxChannelWeight
+			}
+			weight -= int64(effectiveWeight) + 10
 			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
 			if weight <= 0 {
 				channel.Id = ability_.ChannelId
@@ -162,9 +180,9 @@ func GetChannel(group string, model string, retry int, requestPath string) (*Cha
 // (type 58) channels are path-checked: kept only when one of their routes matches
 // requestPath and model; all other channel types always pass. When requestPath is
 // empty, filtering is skipped.
-func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
+func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) ([]Ability, error) {
 	if requestPath == "" || len(abilities) == 0 {
-		return abilities
+		return abilities, nil
 	}
 
 	channelIds := make([]int, 0, len(abilities))
@@ -179,8 +197,7 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
-		// On error, fall back to unfiltered candidates to avoid blocking selection
-		return abilities
+		return nil, fmt.Errorf("load channels for path-aware selection: %w", err)
 	}
 
 	advancedConfigs := make(map[int]*dto.AdvancedCustomConfig)
@@ -201,7 +218,7 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 			filtered = append(filtered, ability)
 		}
 	}
-	return filtered
+	return filtered, nil
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
@@ -397,6 +414,8 @@ func FixAbility() (int, int, error) {
 			}
 		}
 	}
-	InitChannelCache()
+	if err := InitChannelCache(); err != nil {
+		return successCount, failCount, err
+	}
 	return successCount, failCount, nil
 }

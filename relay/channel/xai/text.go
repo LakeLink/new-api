@@ -1,7 +1,6 @@
 package xai
 
 import (
-	"io"
 	"net/http"
 	"strings"
 
@@ -24,15 +23,35 @@ func streamResponseXAI2OpenAI(xAIResp *dto.ChatCompletionsStreamResponse, usage 
 		xAIResp.Usage.CompletionTokens = usage.CompletionTokens
 	}
 	openAIResp := &dto.ChatCompletionsStreamResponse{
-		Id:      xAIResp.Id,
-		Object:  xAIResp.Object,
-		Created: xAIResp.Created,
-		Model:   xAIResp.Model,
-		Choices: xAIResp.Choices,
-		Usage:   xAIResp.Usage,
+		Id:                xAIResp.Id,
+		Object:            xAIResp.Object,
+		Created:           xAIResp.Created,
+		Model:             xAIResp.Model,
+		ServiceTier:       xAIResp.ServiceTier,
+		SystemFingerprint: xAIResp.SystemFingerprint,
+		Choices:           xAIResp.Choices,
+		Usage:             xAIResp.Usage,
 	}
 
 	return openAIResp
+}
+
+func normalizeXAIUsage(usage *dto.Usage, serviceTier string) {
+	if usage == nil {
+		return
+	}
+	usage.ActualServiceTier = serviceTier
+	if usage.TotalTokens > 0 && usage.TotalTokens >= usage.PromptTokens {
+		usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+	}
+	reasoningTokens := usage.CompletionTokenDetails.ReasoningTokens
+	if reasoningTokens < 0 {
+		reasoningTokens = 0
+	}
+	usage.CompletionTokenDetails.TextTokens = usage.CompletionTokens - reasoningTokens
+	if usage.CompletionTokenDetails.TextTokens < 0 {
+		usage.CompletionTokenDetails.TextTokens = 0
+	}
 }
 
 func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -54,9 +73,8 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		// 把 xAI 的usage转换为 OpenAI 的usage
 		if xAIResp.Usage != nil {
 			containStreamUsage = true
-			usage.PromptTokens = xAIResp.Usage.PromptTokens
-			usage.TotalTokens = xAIResp.Usage.TotalTokens
-			usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+			normalizeXAIUsage(xAIResp.Usage, xAIResp.ServiceTier)
+			*usage = *xAIResp.Usage
 		}
 
 		openaiResponse := streamResponseXAI2OpenAI(xAIResp, usage)
@@ -80,7 +98,7 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 func xAIHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
@@ -90,8 +108,7 @@ func xAIHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if xaiResponse.Usage != nil {
-		xaiResponse.Usage.CompletionTokens = xaiResponse.Usage.TotalTokens - xaiResponse.Usage.PromptTokens
-		xaiResponse.Usage.CompletionTokenDetails.TextTokens = xaiResponse.Usage.CompletionTokens - xaiResponse.Usage.CompletionTokenDetails.ReasoningTokens
+		normalizeXAIUsage(xaiResponse.Usage, xaiResponse.ServiceTier)
 	}
 
 	// new body

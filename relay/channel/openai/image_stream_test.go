@@ -64,6 +64,18 @@ func TestOpenaiImageDoResponseUsesInfoIsStream(t *testing.T) {
 		require.Contains(t, recorder.Body.String(), `event: image_generation.completed`)
 		require.Contains(t, recorder.Body.String(), `data: [DONE]`)
 	})
+
+	t.Run("streamed edit uses image edit event type", func(t *testing.T) {
+		c, recorder, resp, info := newImageTestContext(t, body, "application/json", true)
+		info.RelayMode = relayconstant.RelayModeImagesEdits
+
+		usage, err := (&Adaptor{}).DoResponse(c, resp, info)
+
+		require.Nil(t, err)
+		require.NotNil(t, usage)
+		require.Contains(t, recorder.Body.String(), `event: image_edit.completed`)
+		require.NotContains(t, recorder.Body.String(), `event: image_generation.completed`)
+	})
 }
 
 // TestOpenaiImageStreamHandlerForwardsSSEAndUsage covers the core SSE path:

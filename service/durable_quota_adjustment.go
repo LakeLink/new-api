@@ -14,50 +14,30 @@ import (
 // request can safely have independent settlement, violation-fee, and legacy
 // per-call charges.
 func ApplyDurableQuotaAdjustment(relayInfo *relaycommon.RelayInfo, purpose string, quotaDelta int, notificationPreConsumedQuota int, sendNotify bool) (model.BillingAdjustmentResult, bool, error) {
-	if relayInfo == nil {
-		return model.BillingAdjustmentResult{}, false, errors.New("relay info is nil")
+	adjustmentRequestID, purpose, err := durableQuotaAdjustmentRequestID(relayInfo, purpose)
+	if err != nil {
+		return model.BillingAdjustmentResult{}, false, err
 	}
-	purpose = strings.TrimSpace(purpose)
-	if purpose == "" {
-		return model.BillingAdjustmentResult{}, false, errors.New("billing adjustment purpose is empty")
-	}
-	if relayInfo.RequestId == "" {
-		return model.BillingAdjustmentResult{}, false, errors.New("billing adjustment request id is empty")
-	}
-	fundingSource := model.BillingAdjustmentWallet
-	if relayInfo.BillingSource == BillingSourceSubscription {
-		fundingSource = model.BillingAdjustmentSubscription
-	}
+	fundingSource := durableQuotaAdjustmentFundingSource(relayInfo)
 	tokenDelta := quotaDelta
 	if relayInfo.IsPlayground {
 		tokenDelta = 0
 	}
 	adjustment := model.BillingAdjustment{
-		RequestID:      fmt.Sprintf("%s\x00purpose:%s", relayInfo.RequestId, purpose),
+		RequestID:      adjustmentRequestID,
 		Kind:           model.BillingAdjustmentSettle,
 		FundingSource:  fundingSource,
 		UserID:         relayInfo.UserId,
 		SubscriptionID: relayInfo.SubscriptionId,
 		TokenID:        relayInfo.TokenId,
+		TokenKeyHash:   model.BillingTokenKeyHash(relayInfo.TokenKey),
 		FundingDelta:   quotaDelta,
 		TokenDelta:     tokenDelta,
 	}
 
-	var taskID string
-	if err := retryBillingOperation(func() error {
-		var enqueueErr error
-		taskID, enqueueErr = model.EnqueueBillingAdjustment(adjustment)
-		return enqueueErr
-	}); err != nil {
-		return model.BillingAdjustmentResult{}, false, fmt.Errorf("persist %s billing adjustment: %w", purpose, err)
-	}
-	result, err := model.ProcessBillingAdjustmentWithResult(taskID)
-	if err != nil {
-		return model.BillingAdjustmentResult{}, false, fmt.Errorf("%s billing adjustment queued for retry: %w", purpose, err)
-	}
-	applied := !result.AlreadyProcessed
-	if !applied {
-		return result, false, nil
+	result, applied, err := persistAndProcessDurableQuotaAdjustment(adjustment, purpose)
+	if err != nil || !applied {
+		return result, applied, err
 	}
 
 	if fundingSource == model.BillingAdjustmentSubscription {
@@ -73,6 +53,96 @@ func ApplyDurableQuotaAdjustment(relayInfo *relaycommon.RelayInfo, purpose strin
 		} else {
 			checkAndSendQuotaNotify(relayInfo, quotaDelta, notificationPreConsumedQuota)
 		}
+	}
+	return result, true, nil
+}
+
+func durableQuotaAdjustmentRequestID(relayInfo *relaycommon.RelayInfo, purpose string) (string, string, error) {
+	if relayInfo == nil {
+		return "", "", errors.New("relay info is nil")
+	}
+	purpose = strings.TrimSpace(purpose)
+	if purpose == "" {
+		return "", "", errors.New("billing adjustment purpose is empty")
+	}
+	if relayInfo.RequestId == "" {
+		return "", "", errors.New("billing adjustment request id is empty")
+	}
+	return fmt.Sprintf("%s\x00purpose:%s", relayInfo.RequestId, purpose), purpose, nil
+}
+
+func durableQuotaAdjustmentFundingSource(relayInfo *relaycommon.RelayInfo) string {
+	if relayInfo.BillingSource == BillingSourceSubscription {
+		return model.BillingAdjustmentSubscription
+	}
+	return model.BillingAdjustmentWallet
+}
+
+// DurableQuotaAdjustmentTaskID returns the task ID used by a per-call durable
+// charge. It lets an asynchronous failure persist a reversal that waits for
+// the original charge to complete.
+func DurableQuotaAdjustmentTaskID(relayInfo *relaycommon.RelayInfo, purpose string) (string, error) {
+	requestID, _, err := durableQuotaAdjustmentRequestID(relayInfo, purpose)
+	if err != nil {
+		return "", err
+	}
+	return model.BillingAdjustmentTaskID(requestID, model.BillingAdjustmentSettle), nil
+}
+
+// ReverseDurableQuotaAdjustment reverses the exact persisted result of an
+// earlier per-call charge. This preserves subscription/wallet overflow splits
+// and token quota in one idempotent transaction. If the charge has not yet
+// completed, the reversal remains pending for the background worker.
+func ReverseDurableQuotaAdjustment(relayInfo *relaycommon.RelayInfo, originalPurpose string, reversalPurpose string) (model.BillingAdjustmentResult, bool, error) {
+	originalTaskID, err := DurableQuotaAdjustmentTaskID(relayInfo, originalPurpose)
+	if err != nil {
+		return model.BillingAdjustmentResult{}, false, err
+	}
+	_, reversalPurpose, err = durableQuotaAdjustmentRequestID(relayInfo, reversalPurpose)
+	if err != nil {
+		return model.BillingAdjustmentResult{}, false, err
+	}
+	fundingSource := durableQuotaAdjustmentFundingSource(relayInfo)
+	adjustment := model.BillingAdjustment{
+		// A settlement can be reversed exactly once. Canonicalizing the request ID
+		// makes retries with a different local reason resolve to the same payload;
+		// model.EnqueueBillingAdjustment independently keys every reversal by the
+		// original task ID to enforce the invariant atomically.
+		RequestID:        fmt.Sprintf("reversal-of:%s", originalTaskID),
+		Kind:             model.BillingAdjustmentRefund,
+		FundingSource:    fundingSource,
+		UserID:           relayInfo.UserId,
+		SubscriptionID:   relayInfo.SubscriptionId,
+		TokenID:          relayInfo.TokenId,
+		ReversalOfTaskID: originalTaskID,
+	}
+	result, applied, err := persistAndProcessDurableQuotaAdjustment(adjustment, reversalPurpose)
+	if err != nil || !applied {
+		return result, applied, err
+	}
+	if fundingSource == model.BillingAdjustmentSubscription {
+		relayInfo.SubscriptionPostDelta += int64(result.SubscriptionDelta)
+		relayInfo.SubscriptionWalletOverflow += result.WalletDelta
+	}
+	return result, true, nil
+}
+
+func persistAndProcessDurableQuotaAdjustment(adjustment model.BillingAdjustment, purpose string) (model.BillingAdjustmentResult, bool, error) {
+	var taskID string
+	if err := retryBillingOperation(func() error {
+		var enqueueErr error
+		taskID, enqueueErr = model.EnqueueBillingAdjustment(adjustment)
+		return enqueueErr
+	}); err != nil {
+		return model.BillingAdjustmentResult{}, false, fmt.Errorf("persist %s billing adjustment: %w", purpose, err)
+	}
+	result, err := model.ProcessBillingAdjustmentWithResult(taskID)
+	if err != nil {
+		return model.BillingAdjustmentResult{}, false, fmt.Errorf("%s billing adjustment queued for retry: %w", purpose, err)
+	}
+	applied := !result.AlreadyProcessed
+	if !applied {
+		return result, false, nil
 	}
 	return result, true, nil
 }

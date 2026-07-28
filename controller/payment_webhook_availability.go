@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"errors"
 	"math"
+	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/setting"
@@ -10,14 +12,20 @@ import (
 
 const paymentWebhookMaxBodyBytes int64 = 1 << 20
 
+func isPaymentWebhookBodyTooLarge(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
+
 func isStripeTopUpEnabled() bool {
-	return strings.TrimSpace(setting.StripeApiSecret) != "" &&
-		strings.TrimSpace(setting.StripeWebhookSecret) != "" &&
-		setting.StripeUnitPrice > 0 && !math.IsNaN(setting.StripeUnitPrice) && !math.IsInf(setting.StripeUnitPrice, 0)
+	stripeSetting := setting.GetStripeSettings()
+	return strings.TrimSpace(stripeSetting.APISecret) != "" &&
+		strings.TrimSpace(stripeSetting.WebhookSecret) != "" &&
+		stripeSetting.UnitPrice > 0 && !math.IsNaN(stripeSetting.UnitPrice) && !math.IsInf(stripeSetting.UnitPrice, 0)
 }
 
 func isStripeWebhookConfigured() bool {
-	return strings.TrimSpace(setting.StripeWebhookSecret) != ""
+	return strings.TrimSpace(setting.GetStripeSettings().WebhookSecret) != ""
 }
 
 func isStripeWebhookEnabled() bool {
@@ -25,22 +33,24 @@ func isStripeWebhookEnabled() bool {
 }
 
 func isCreemTopUpEnabled() bool {
-	products := strings.TrimSpace(setting.CreemProducts)
-	return strings.TrimSpace(setting.CreemApiKey) != "" &&
+	creemSetting := setting.GetCreemSettings()
+	products := strings.TrimSpace(creemSetting.Products)
+	return strings.TrimSpace(creemSetting.APIKey) != "" &&
+		isCreemWebhookConfigured() &&
 		products != "" &&
 		products != "[]"
 }
 
 func isCreemWebhookConfigured() bool {
-	return strings.TrimSpace(setting.CreemWebhookSecret) != ""
+	return strings.TrimSpace(setting.GetCreemSettings().WebhookSecret) != ""
 }
 
 func isCreemWebhookEnabled() bool {
-	return isCreemWebhookConfigured() || setting.CreemTestMode
+	return isCreemWebhookConfigured()
 }
 
 func isWaffoTopUpEnabled() bool {
-	if !setting.WaffoEnabled {
+	if !setting.GetWaffoSettings().Enabled {
 		return false
 	}
 
@@ -48,15 +58,19 @@ func isWaffoTopUpEnabled() bool {
 }
 
 func isWaffoWebhookConfigured() bool {
-	if setting.WaffoSandbox {
-		return strings.TrimSpace(setting.WaffoSandboxApiKey) != "" &&
-			strings.TrimSpace(setting.WaffoSandboxPrivateKey) != "" &&
-			strings.TrimSpace(setting.WaffoSandboxPublicCert) != ""
+	waffoSetting := setting.GetWaffoSettings()
+	if strings.TrimSpace(waffoSetting.MerchantID) == "" {
+		return false
+	}
+	if waffoSetting.Sandbox {
+		return strings.TrimSpace(waffoSetting.SandboxAPIKey) != "" &&
+			strings.TrimSpace(waffoSetting.SandboxPrivateKey) != "" &&
+			strings.TrimSpace(waffoSetting.SandboxPublicCert) != ""
 	}
 
-	return strings.TrimSpace(setting.WaffoApiKey) != "" &&
-		strings.TrimSpace(setting.WaffoPrivateKey) != "" &&
-		strings.TrimSpace(setting.WaffoPublicCert) != ""
+	return strings.TrimSpace(waffoSetting.APIKey) != "" &&
+		strings.TrimSpace(waffoSetting.PrivateKey) != "" &&
+		strings.TrimSpace(waffoSetting.PublicCert) != ""
 }
 
 func isWaffoWebhookEnabled() bool {
@@ -66,9 +80,11 @@ func isWaffoWebhookEnabled() bool {
 func isWaffoPancakeTopUpEnabled() bool {
 	// Presence-of-credentials = enabled. Webhook public keys ship inside
 	// the SDK; mode (test/prod) is read from each event.
-	return strings.TrimSpace(setting.WaffoPancakeMerchantID) != "" &&
-		strings.TrimSpace(setting.WaffoPancakePrivateKey) != "" &&
-		strings.TrimSpace(setting.WaffoPancakeProductID) != ""
+	waffoSetting := setting.GetWaffoSettings()
+	return strings.TrimSpace(waffoSetting.PancakeMerchantID) != "" &&
+		strings.TrimSpace(waffoSetting.PancakePrivateKey) != "" &&
+		strings.TrimSpace(waffoSetting.PancakeStoreID) != "" &&
+		strings.TrimSpace(waffoSetting.PancakeProductID) != ""
 }
 
 func isWaffoPancakeWebhookConfigured() bool {
@@ -82,13 +98,14 @@ func isWaffoPancakeWebhookEnabled() bool {
 }
 
 func isEpayTopUpEnabled() bool {
-	return isEpayWebhookConfigured() && len(operation_setting.PayMethods) > 0
+	return isEpayWebhookConfigured() && len(operation_setting.GetLegacyPaymentSetting().PayMethods) > 0
 }
 
 func isEpayWebhookConfigured() bool {
-	return strings.TrimSpace(operation_setting.PayAddress) != "" &&
-		strings.TrimSpace(operation_setting.EpayId) != "" &&
-		strings.TrimSpace(operation_setting.EpayKey) != ""
+	paymentSetting := operation_setting.GetLegacyPaymentSetting()
+	return strings.TrimSpace(paymentSetting.PayAddress) != "" &&
+		strings.TrimSpace(paymentSetting.EpayID) != "" &&
+		strings.TrimSpace(paymentSetting.EpayKey) != ""
 }
 
 func isEpayWebhookEnabled() bool {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,21 +23,24 @@ import (
 )
 
 func oaiImage2AliImageRequest(info *relaycommon.RelayInfo, request dto.ImageRequest, isSync bool) (*AliImageRequest, error) {
-	var imageRequest AliImageRequest
-	imageRequest.Model = request.Model
-	imageRequest.ResponseFormat = request.ResponseFormat
+	imageCount := int(lo.FromPtrOr(request.N, uint(1)))
+	imageRequest := AliImageRequest{
+		Model:          request.Model,
+		ResponseFormat: request.ResponseFormat,
+		Parameters: AliImageParameters{
+			Size:      strings.Replace(request.Size, "x", "*", -1),
+			N:         &imageCount,
+			Watermark: request.Watermark,
+		},
+	}
 	if request.Extra != nil {
 		if val, ok := request.Extra["parameters"]; ok {
 			err := common.Unmarshal(val, &imageRequest.Parameters)
 			if err != nil {
 				return nil, fmt.Errorf("invalid parameters field: %w", err)
 			}
-		} else {
-			// 兼容没有parameters字段的情况，从openai标准字段中提取参数
-			imageRequest.Parameters = AliImageParameters{
-				Size:      strings.Replace(request.Size, "x", "*", -1),
-				N:         int(lo.FromPtrOr(request.N, uint(1))),
-				Watermark: request.Watermark,
+			if imageRequest.Parameters.N == nil {
+				imageRequest.Parameters.N = &imageCount
 			}
 		}
 		if val, ok := request.Extra["input"]; ok {
@@ -57,12 +61,10 @@ func oaiImage2AliImageRequest(info *relaycommon.RelayInfo, request dto.ImageRequ
 	// Parameters may come from Extra["parameters"], bypassing the standard
 	// top-level n validation; enforce the same bound before it becomes a
 	// billing multiplier.
-	if imageRequest.Parameters.N < 0 || imageRequest.Parameters.N > dto.MaxImageN {
+	if imageRequest.Parameters.N == nil || *imageRequest.Parameters.N < 1 || *imageRequest.Parameters.N > dto.MaxImageN {
 		return nil, fmt.Errorf("parameters.n must be an integer between 1 and %d", dto.MaxImageN)
 	}
-	if imageRequest.Parameters.N != 0 {
-		info.PriceData.AddOtherRatio("n", float64(imageRequest.Parameters.N))
-	}
+	info.PriceData.AddOtherRatio("n", float64(*imageRequest.Parameters.N))
 
 	// 同步图片模型和异步图片模型请求格式不一样
 	if isSync {
@@ -139,9 +141,13 @@ func getImageBase64sFromForm(c *gin.Context, fieldName string) ([]string, error)
 		}
 
 		// 读取文件内容
-		imageData, err := io.ReadAll(image)
-		if err != nil {
+		imageData, readErr := io.ReadAll(image)
+		closeErr := image.Close()
+		if readErr != nil {
 			return nil, errors.New("failed to read image file")
+		}
+		if closeErr != nil {
+			return nil, errors.New("failed to close image file")
 		}
 
 		// 获取MIME类型
@@ -153,7 +159,6 @@ func getImageBase64sFromForm(c *gin.Context, fieldName string) ([]string, error)
 		// 构造data URL格式
 		dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, base64Data)
 		imageBase64s = append(imageBase64s, dataURL)
-		image.Close()
 	}
 	return imageBase64s, nil
 }
@@ -186,33 +191,46 @@ func oaiFormEdit2AliImageEdit(c *gin.Context, info *relaycommon.RelayInfo, reque
 		},
 	}
 	imageRequest.Parameters = AliImageParameters{
-		N:         int(lo.FromPtrOr(request.N, uint(1))),
+		N:         common.GetPointer(int(lo.FromPtrOr(request.N, uint(1)))),
 		Watermark: request.Watermark,
 	}
 	return &imageRequest, nil
 }
 
 func updateTask(info *relaycommon.RelayInfo, taskID string) (*AliResponse, error, []byte) {
-	url := fmt.Sprintf("%s/api/v1/tasks/%s", info.ChannelBaseUrl, taskID)
+	requestURL := fmt.Sprintf(
+		"%s/api/v1/tasks/%s",
+		strings.TrimRight(info.ChannelBaseUrl, "/"),
+		url.PathEscape(taskID),
+	)
 
 	var aliResponse AliResponse
 
-	req, err := http.NewRequestWithContext(info.GetRelayContext(nil), "GET", url, nil)
+	req, err := http.NewRequestWithContext(info.GetRelayContext(nil), "GET", requestURL, nil)
 	if err != nil {
-		return &aliResponse, err, nil
+		return &aliResponse, service.SanitizeNetworkError(err), nil
 	}
 
 	req.Header.Set("Authorization", "Bearer "+info.ApiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	client, err := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy)
+	if err != nil {
+		return &aliResponse, err, nil
+	}
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
 		common.SysLog("updateTask client.Do err: " + err.Error())
 		return &aliResponse, err, nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return &aliResponse, fmt.Errorf("Ali task endpoint returned status %d", resp.StatusCode), nil
+	}
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
+	if err != nil {
+		return &aliResponse, err, nil
+	}
 
 	var response AliResponse
 	err = common.Unmarshal(responseBody, &response)
@@ -301,14 +319,15 @@ func responseAli2OpenAIImage(c *gin.Context, response *AliResponse, originBody [
 }
 
 func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	responseFormat := c.GetString("response_format")
 
 	var aliTaskResponse AliResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &aliTaskResponse)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError), nil
@@ -344,9 +363,9 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
 	}
 
 	if a.IsSyncImageModel {
-		logger.LogDebug(c, "ali_sync_image_result: %s", originRespBody)
+		logger.LogDebug(c, "Ali sync image response received: bytes=%d", len(originRespBody))
 	} else {
-		logger.LogDebug(c, "ali_async_image_result: %s", originRespBody)
+		logger.LogDebug(c, "Ali async image response received: bytes=%d", len(originRespBody))
 	}
 
 	imageResponses := responseAli2OpenAIImage(c, aliResponse, originRespBody, info, responseFormat)

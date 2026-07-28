@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +73,7 @@ func InitEnv() {
 			log.Fatal(err)
 		}
 		if _, err := os.Stat(*LogDir); os.IsNotExist(err) {
-			err = os.Mkdir(*LogDir, 0777)
+			err = os.Mkdir(*LogDir, 0700)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -100,12 +99,24 @@ func InitEnv() {
 	SMTPInsecureSkipVerify = GetEnvOrDefaultBool("SMTP_INSECURE_SKIP_VERIFY", GetEnvOrDefaultBool("SMTP_TLS_INSECURE_SKIP_VERIFY", false))
 
 	// Parse requestInterval and set RequestInterval
-	requestInterval, _ = strconv.Atoi(os.Getenv("POLLING_INTERVAL"))
-	RequestInterval = time.Duration(requestInterval) * time.Second
+	requestInterval := GetEnvOrDefault("POLLING_INTERVAL", 0)
+	RequestInterval, _ = SafeOptionalDuration(requestInterval, time.Second, "POLLING_INTERVAL")
 
 	// Initialize variables with GetEnvOrDefault
 	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
+	SyncFrequency = int(SafeIntervalDuration(
+		SyncFrequency,
+		time.Second,
+		60*time.Second,
+		"SYNC_FREQUENCY",
+	) / time.Second)
+	BatchUpdateInterval = int(SafeIntervalDuration(
+		BatchUpdateInterval,
+		time.Second,
+		5*time.Second,
+		"BATCH_UPDATE_INTERVAL",
+	) / time.Second)
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)

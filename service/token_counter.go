@@ -153,8 +153,11 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	if maxSide > 2048 {
 		fitScale = maxSide / 2048.0
 	}
-	fitW := int(math.Round(float64(width) / fitScale))
-	fitH := int(math.Round(float64(height) / fitScale))
+	// An extremely narrow declared image can round one fitted side to zero.
+	// Treat both dimensions as at least one pixel so crafted metadata cannot
+	// collapse a high-detail image to the base-token charge.
+	fitW := max(1, int(math.Round(float64(width)/fitScale)))
+	fitH := max(1, int(math.Round(float64(height)/fitScale)))
 
 	// Step 2: scale so that shortest side is exactly 768
 	minSide := math.Min(float64(fitW), float64(fitH))
@@ -173,6 +176,59 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	logger.LogDebug(c, "image token scaled size: width=%d, height=%d, tiles=%d", finalW, finalH, tiles)
 
 	return tiles*tileTokens + baseTokens, nil
+}
+
+func getJinaMediaToken(c *gin.Context, fileMeta *types.FileMeta, model string) (int, bool, *common.QuotaClamp, error) {
+	if fileMeta == nil || fileMeta.Source == nil {
+		return 0, false, nil, nil
+	}
+
+	if fileMeta.FileType == types.FileTypeImage {
+		tileSize := 0
+		tokensPerTile := 0
+		switch model {
+		case "jina-embeddings-v4":
+			tileSize, tokensPerTile = 28, 10
+		case "jina-clip-v2":
+			tileSize, tokensPerTile = 512, 4000
+		case "jina-clip-v1":
+			tileSize, tokensPerTile = 224, 1000
+		case "jina-reranker-m0":
+			return 10240, true, nil, nil
+		case "jina-embeddings-v5-omni-nano":
+			return 8192, true, nil, nil
+		case "jina-embeddings-v5-omni-small":
+			return 32768, true, nil, nil
+		default:
+			return 0, false, nil, nil
+		}
+
+		config, _, err := GetImageConfig(c, fileMeta.Source)
+		if err != nil {
+			return 0, true, nil, err
+		}
+		if config.Width <= 0 || config.Height <= 0 {
+			return 0, true, nil, fmt.Errorf("fail to decode image config: %s", fileMeta.GetIdentifier())
+		}
+
+		tilesWide := math.Ceil(float64(config.Width) / float64(tileSize))
+		tilesHigh := math.Ceil(float64(config.Height) / float64(tileSize))
+		tokens, clamp := common.QuotaFromFloatChecked(tilesWide * tilesHigh * float64(tokensPerTile))
+		return tokens, true, clamp, nil
+	}
+
+	switch model {
+	case "jina-embeddings-v4":
+		if fileMeta.FileType == types.FileTypeFile {
+			return 32768, true, nil, nil
+		}
+	case "jina-embeddings-v5-omni-nano":
+		return 8192, true, nil, nil
+	case "jina-embeddings-v5-omni-small":
+		return 32768, true, nil, nil
+	}
+
+	return 0, false, nil, nil
 }
 
 func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relaycommon.RelayInfo) (int, error) {
@@ -213,7 +269,11 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 				duration = 0
 			}
 			// 一分钟 1000 token，与 $price / minute 对齐。
-			totalAudioToken += common.QuotaRound(math.Ceil(duration) / 60.0 * 1000)
+			durationTokens, durationClamp := common.QuotaRoundChecked(math.Ceil(duration) / 60.0 * 1000)
+			noteQuotaClamp(info, durationClamp)
+			total, totalClamp := common.QuotaFromFloatChecked(float64(totalAudioToken) + float64(durationTokens))
+			noteQuotaClamp(info, totalClamp)
+			totalAudioToken = total
 		}
 		return totalAudioToken, nil
 	}
@@ -273,6 +333,18 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 	}
 
 	for i, file := range meta.Files {
+		if token, handled, clamp, err := getJinaMediaToken(c, file, model); handled {
+			if err != nil {
+				return 0, fmt.Errorf("error counting jina media token, media index[%d], identifier[%s], err: %v", i, file.GetIdentifier(), err)
+			}
+			noteQuotaClamp(info, clamp)
+			total, totalClamp := common.QuotaFromFloatChecked(float64(tkm) + float64(token))
+			noteQuotaClamp(info, totalClamp)
+			tkm = total
+			continue
+		}
+
+		mediaTokens := 0
 		switch file.FileType {
 		case types.FileTypeImage:
 			if common.IsOpenAITextModel(model) {
@@ -280,19 +352,22 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 				if err != nil {
 					return 0, fmt.Errorf("error counting image token, media index[%d], identifier[%s], err: %v", i, file.GetIdentifier(), err)
 				}
-				tkm += token
+				mediaTokens = token
 			} else {
-				tkm += 520
+				mediaTokens = 520
 			}
 		case types.FileTypeAudio:
-			tkm += 256
+			mediaTokens = 256
 		case types.FileTypeVideo:
-			tkm += 4096 * 2
+			mediaTokens = 4096 * 2
 		case types.FileTypeFile:
-			tkm += 4096
+			mediaTokens = 4096
 		default:
-			tkm += 4096 // Default case for unknown file types
+			mediaTokens = 4096 // Default case for unknown file types
 		}
+		total, totalClamp := common.QuotaFromFloatChecked(float64(tkm) + float64(mediaTokens))
+		noteQuotaClamp(info, totalClamp)
+		tkm = total
 	}
 
 	common.SetContextKey(c, constant.ContextKeyPromptTokens, tkm)

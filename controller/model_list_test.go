@@ -49,7 +49,14 @@ func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	model.DB = db
 	model.LOG_DB = db
 
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Channel{}, &model.Ability{}, &model.Model{}, &model.Vendor{}))
+	require.NoError(t, db.AutoMigrate(
+		&model.User{},
+		&model.BrowserSession{},
+		&model.Channel{},
+		&model.Ability{},
+		&model.Model{},
+		&model.Vendor{},
+	))
 
 	t.Cleanup(func() {
 		sqlDB, err := db.DB()
@@ -396,6 +403,23 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 	require.NotContains(t, ids, "zz-token-tiered-empty-expr-model")
 	require.NotContains(t, ids, "zz-token-tiered-missing-expr-model")
 	require.NotContains(t, ids, "zz-token-unpriced-model")
+}
+
+func TestListModelsFailsClosedForStaleTokenLimitContextType(t *testing.T) {
+	withSelfUseModeEnabled(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	common.SetContextKey(ctx, constant.ContextKeyTokenModelLimitEnabled, true)
+	common.SetContextKey(ctx, constant.ContextKeyTokenModelLimit, "stale-cache-value")
+
+	require.NotPanics(t, func() {
+		ListModels(ctx, constant.ChannelTypeOpenAI)
+	})
+
+	payload := decodeListModelsPayload(t, recorder)
+	assert.Empty(t, payload.Data)
 }
 
 func TestCheckUpdatePasswordRequiresCurrentPassword(t *testing.T) {

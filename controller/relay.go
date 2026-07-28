@@ -137,10 +137,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer cancel()
 
 	// Auto-timeout: terminate request if it exceeds the configured limit
-	if timeoutSec := active_request_setting.GetActiveRequestSetting().TimeoutSeconds; timeoutSec > 0 {
+	if timeout, enabled := common.SafeOptionalDuration(
+		active_request_setting.GetActiveRequestSetting().TimeoutSeconds,
+		time.Second,
+		"active request timeout",
+	); enabled {
 		go func() {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
 			select {
-			case <-time.After(time.Duration(timeoutSec) * time.Second):
+			case <-timer.C:
 				service.GlobalActiveRequestTracker.Terminate(requestId)
 			case <-ctx.Done():
 			}
@@ -212,8 +218,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	retryTimes := common.GetLegacyOptionInt("RetryTimes", &common.RetryTimes)
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for ; retryParam.GetRetry() <= retryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -223,7 +230,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if _, ok := c.Get("specific_channel_id"); ok {
 				break
 			}
-			if shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+			if shouldRetry(c, newAPIError, retryTimes-retryParam.GetRetry()) {
 				continue
 			}
 			break
@@ -265,7 +272,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetry(c, newAPIError, retryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -276,9 +283,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		logger.LogInfo(c, retryLogStr)
 	}
 	if newAPIError != nil {
-		gopool.Go(func() {
-			perfmetrics.RecordRelaySample(relayInfo, false, 0)
-		})
+		perfmetrics.RecordRelaySampleAsync(relayInfo, false, 0)
 	}
 }
 
@@ -304,20 +309,13 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	}
 	switch r := request.(type) {
 	case *dto.GeneralOpenAIRequest:
-		maxCompletionTokens := lo.FromPtrOr(r.MaxCompletionTokens, uint(0))
-		maxTokens := lo.FromPtrOr(r.MaxTokens, uint(0))
-		if maxCompletionTokens > maxTokens {
-			meta.MaxTokens = int(maxCompletionTokens)
-		} else {
-			meta.MaxTokens = int(maxTokens)
-		}
-		if n := lo.FromPtrOr(r.N, 1); n > 1 {
-			meta.MaxTokens *= n
-		}
+		meta.MaxTokens = r.GetMaxTokenEstimate()
+	case *dto.GeminiChatRequest:
+		meta.MaxTokens = r.GetMaxTokenEstimate()
 	case *dto.OpenAIResponsesRequest:
 		meta.MaxTokens = int(lo.FromPtrOr(r.MaxOutputTokens, uint(0)))
 	case *dto.ClaudeRequest:
-		meta.MaxTokens = int(lo.FromPtr(r.MaxTokens))
+		meta.MaxTokens = r.GetMaxTokenEstimate()
 	case *dto.ImageRequest:
 		// Pricing for image requests depends on ImagePriceRatio; safe to compute even when CountToken is disabled.
 		return r.GetTokenCountMeta()
@@ -447,8 +445,9 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+		errorMessage := err.ErrorWithStatusCode()
 		gopool.Go(func() {
-			service.DisableChannel(channelError, err.ErrorWithStatusCode())
+			service.DisableChannel(channelError, errorMessage)
 		})
 	}
 
@@ -591,8 +590,18 @@ func RelayTask(c *gin.Context) {
 		return
 	}
 
+	originalWriter := c.Writer
+	taskResponseWriter := newDeferredTaskResponseWriter(originalWriter)
+	c.Writer = taskResponseWriter
+	defer func() {
+		if c.Writer == taskResponseWriter {
+			c.Writer = originalWriter
+		}
+	}()
+
 	var result *relay.TaskSubmitResult
 	var taskErr *dto.TaskError
+	var selectedChannel *model.Channel
 	defer func() {
 		if taskErr != nil && relayInfo.Billing != nil {
 			relayInfo.Billing.Refund(c)
@@ -606,17 +615,32 @@ func RelayTask(c *gin.Context) {
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	retryTimes := common.GetLegacyOptionInt("RetryTimes", &common.RetryTimes)
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for ; retryParam.GetRetry() <= retryTimes; retryParam.IncreaseRetry() {
 		var channel *model.Channel
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
-			if retryParam.GetRetry() > 0 {
+			// ResolveOriginTask may bind a remix to a different channel than the
+			// distributor selected. Initialize the complete channel context on
+			// that first attempt (settings, proxy, overrides, organization,
+			// lifecycle identity, and key), not just the route/key subset.
+			// When the distributor already selected the same channel, retain its
+			// first key; retries deliberately reinitialize to rotate multi-keys.
+			if retryParam.GetRetry() > 0 ||
+				common.GetContextKeyInt(c, constant.ContextKeyChannelId) != channel.Id {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
 					break
 				}
+			}
+			if relayInfo.LockedChannelKeyPinned {
+				// Provider task IDs are account-scoped. Keep every remix retry
+				// on the origin task's accepted key instead of rotating to a
+				// different account within the same multi-key channel.
+				common.SetContextKey(c, constant.ContextKeyChannelKey, relayInfo.LockedChannelKey)
+				common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, relayInfo.LockedChannelKeyIndex)
 			}
 		} else {
 			var channelErr *types.NewAPIError
@@ -641,6 +665,8 @@ func RelayTask(c *gin.Context) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 		relayInfo.UpstreamRequestBodySize = 0
 
+		taskResponseWriter.Reset()
+		selectedChannel = channel
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
 		if taskErr == nil {
 			break
@@ -653,7 +679,7 @@ func RelayTask(c *gin.Context) {
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
 		}
 
-		if !shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetryTaskRelay(c, channel.Id, taskErr, retryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -664,18 +690,21 @@ func RelayTask(c *gin.Context) {
 		logger.LogInfo(c, retryLogStr)
 	}
 
-	// ── 成功：结算 + 日志 + 插入任务 ──
+	// ── 成功：先持久化任务，再结算 + 日志 ──
 	if taskErr == nil {
-		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
-			common.SysError("settle task billing error: " + settleErr.Error())
-		}
-		service.LogTaskConsumption(c, relayInfo)
-
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
+		task.PrivateData.BillingRequestId = relayInfo.RequestId
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 		task.PrivateData.TokenId = relayInfo.TokenId
+		task.PrivateData.TokenKeyHash = model.BillingTokenKeyHash(relayInfo.TokenKey)
+		if relayInfo.ChannelMeta != nil {
+			task.PrivateData.ChannelCreatedTime = relayInfo.ChannelMeta.ChannelCreateTime
+			task.PrivateData.ChannelProxy = relayInfo.ChannelMeta.ChannelSetting.Proxy
+		} else if selectedChannel != nil {
+			task.PrivateData.ChannelProxy = selectedChannel.GetSetting().Proxy
+		}
 		task.PrivateData.NodeName = common.NodeName
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
 			ModelPrice:      relayInfo.PriceData.ModelPrice,
@@ -688,12 +717,36 @@ func RelayTask(c *gin.Context) {
 		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
-		if insertErr := task.Insert(); insertErr != nil {
-			common.SysError("insert task error: " + insertErr.Error())
+		if relayInfo.Billing != nil && result.Quota > relayInfo.Billing.GetPreConsumedQuota() {
+			if reserveErr := relayInfo.Billing.Reserve(result.Quota); reserveErr != nil {
+				common.SysError("extend task billing reservation error: " + reserveErr.Error())
+				failAcceptedTaskSubmission(c, relayInfo, originalWriter, reserveErr, "reserve_task_quota_failed")
+				return
+			}
 		}
+		billingFinalization, billingErr := service.BuildTaskSubmissionBillingFinalization(c, relayInfo, task, result.Quota)
+		if billingErr != nil {
+			common.SysError("build task billing finalization error: " + billingErr.Error())
+			failAcceptedTaskSubmission(c, relayInfo, originalWriter, billingErr, "build_task_billing_finalization_failed")
+			return
+		}
+		finalizationID, insertErr := service.PersistTaskSubmissionBillingFinalization(task, billingFinalization)
+		if insertErr != nil {
+			common.SysError("insert task error: " + insertErr.Error())
+			failAcceptedTaskSubmission(c, relayInfo, originalWriter, insertErr, "persist_task_failed")
+			return
+		}
+		if settleErr := service.ProcessPersistedBillingFinalization(c, relayInfo, result.Quota, finalizationID); settleErr != nil {
+			common.SysError("settle task billing error: " + settleErr.Error())
+		}
+		if commitErr := taskResponseWriter.Commit(); commitErr != nil {
+			logger.LogError(c, "write persisted task response: "+commitErr.Error())
+		}
+		c.Writer = originalWriter
 	}
 
 	if taskErr != nil {
+		c.Writer = originalWriter
 		respondTaskError(c, taskErr)
 	}
 }
@@ -708,6 +761,9 @@ func respondTaskError(c *gin.Context, taskErr *dto.TaskError) {
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *dto.TaskError, retryTimes int) bool {
 	if taskErr == nil {
+		return false
+	}
+	if taskErr.SkipRetry {
 		return false
 	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {

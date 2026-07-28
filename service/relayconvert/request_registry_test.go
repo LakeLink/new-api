@@ -136,6 +136,43 @@ func TestConvertRequestToTargetRecordsConversionChain(t *testing.T) {
 	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
 }
 
+func TestConvertRequestPreservesEffectiveClaudeWebSearchLimit(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		RelayFormat:            types.RelayFormatOpenAI,
+		RequestConversionChain: []types.RelayFormat{types.RelayFormatOpenAI},
+	}
+	req := &dto.GeneralOpenAIRequest{
+		Model: "gpt-test",
+		Messages: []dto.Message{
+			{Role: "user", Content: "search"},
+		},
+		WebSearchOptions: &dto.WebSearchOptions{SearchContextSize: "low"},
+	}
+
+	result, err := ConvertRequest(nil, info, types.RelayFormatClaude, req)
+
+	require.NoError(t, err)
+	require.IsType(t, &dto.ClaudeRequest{}, result.Value)
+	claudeRequest := result.Value.(*dto.ClaudeRequest)
+	outboundMaxUses, found, err := dto.ClaudeWebSearchMaxUses(claudeRequest.Tools)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, info.EffectiveClaudeWebSearchMaxUses)
+	assert.Equal(t, uint(1), outboundMaxUses)
+	assert.Equal(t, outboundMaxUses, *info.EffectiveClaudeWebSearchMaxUses)
+
+	result, err = ConvertRequest(nil, info, types.RelayFormatClaude, &dto.GeneralOpenAIRequest{
+		Model: "gpt-test",
+		Messages: []dto.Message{
+			{Role: "user", Content: "no search"},
+		},
+	})
+
+	require.NoError(t, err)
+	require.IsType(t, &dto.ClaudeRequest{}, result.Value)
+	assert.Nil(t, info.EffectiveClaudeWebSearchMaxUses)
+}
+
 func TestConvertRequestPlansMultiHopPath(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		RelayFormat:            types.RelayFormatClaude,
@@ -197,7 +234,7 @@ func TestConvertRequestViaExecutesExplicitPath(t *testing.T) {
 	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
 }
 
-func TestConvertRequestResponsesToGeminiAppliesResponsesPreprocess(t *testing.T) {
+func TestConvertRequestResponsesToGeminiRejectsUnrepresentableCustomHistory(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		RelayFormat:            types.RelayFormatOpenAIResponses,
 		RequestConversionChain: []types.RelayFormat{types.RelayFormatOpenAIResponses},
@@ -229,31 +266,15 @@ func TestConvertRequestResponsesToGeminiAppliesResponsesPreprocess(t *testing.T)
 				"output":  "legacy custom output",
 			},
 		}),
-		Tools: mustRawMessage(t, []map[string]any{
-			{"type": "custom", "name": "apply_patch"},
-		}),
 	}
 
 	result, err := ConvertRequest(nil, info, types.RelayFormatGemini, req)
 
-	require.NoError(t, err)
-	geminiReq, ok := result.Value.(*dto.GeminiChatRequest)
-	require.True(t, ok)
-	assert.Empty(t, geminiReq.GetTools())
-	require.Len(t, geminiReq.Contents, 1)
-	assert.Equal(t, "user", geminiReq.Contents[0].Role)
-	require.Len(t, geminiReq.Contents[0].Parts, 1)
-	assert.Equal(t, "next turn", geminiReq.Contents[0].Parts[0].Text)
-	assert.Equal(t, ConverterOpenAIResponsesToGemini, result.Converter)
-	assert.Equal(t, RequestConverterQualityFair, result.Quality)
-	assert.Equal(t, []RequestStep{
-		{
-			Converter: ConverterOpenAIResponsesToGemini,
-			From:      types.RelayFormatOpenAIResponses,
-			To:        types.RelayFormatGemini,
-		},
-	}, result.Steps)
-	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses, types.RelayFormatGemini}, info.RequestConversionChain)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "custom_tool_call")
+	assert.Contains(t, err.Error(), "cannot be converted")
+	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
 }
 
 func TestConvertRequestResponsesToGeminiUsesDirectConverter(t *testing.T) {
@@ -605,6 +626,89 @@ func TestConvertRequestResponsesToClaudeUsesDirectConverter(t *testing.T) {
 	assert.Equal(t, "tool_result", toolResultParts[0].Type)
 	assert.Equal(t, "call_1", toolResultParts[0].ToolUseId)
 	assert.Equal(t, map[string]any{"ok": true}, toolResultParts[0].Content)
+}
+
+func TestConvertRequestRejectsResponsesToolsThatCannotPreserveProviderSemantics(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolType string
+		target   types.RelayFormat
+	}{
+		{name: "Claude web search", toolType: dto.BuildInToolWebSearch, target: types.RelayFormatClaude},
+		{name: "Claude file search", toolType: dto.BuildInToolFileSearch, target: types.RelayFormatClaude},
+		{name: "Claude custom tool", toolType: "custom", target: types.RelayFormatClaude},
+		{name: "Gemini web search", toolType: dto.BuildInToolWebSearchPreview, target: types.RelayFormatGemini},
+		{name: "Gemini file search", toolType: dto.BuildInToolFileSearch, target: types.RelayFormatGemini},
+		{name: "Gemini code interpreter", toolType: "code_interpreter", target: types.RelayFormatGemini},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{
+				RelayFormat:            types.RelayFormatOpenAIResponses,
+				RequestConversionChain: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+				ChannelMeta:            &relaycommon.ChannelMeta{UpstreamModelName: "provider-model"},
+			}
+			request := &dto.OpenAIResponsesRequest{
+				Model: "provider-model",
+				Input: mustRawMessage(t, "hello"),
+				Tools: mustRawMessage(t, []map[string]any{{"type": tt.toolType}}),
+			}
+
+			result, err := ConvertRequest(nil, info, tt.target, request)
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "Responses tool type")
+			assert.Contains(t, err.Error(), tt.toolType)
+			assert.Contains(t, err.Error(), "cannot be converted")
+			assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
+		})
+	}
+}
+
+func TestConvertRequestRejectsMalformedResponsesFunctionInsteadOfDroppingIt(t *testing.T) {
+	for _, target := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatGemini} {
+		t.Run(string(target), func(t *testing.T) {
+			info := &relaycommon.RelayInfo{
+				RelayFormat:            types.RelayFormatOpenAIResponses,
+				RequestConversionChain: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+				ChannelMeta:            &relaycommon.ChannelMeta{UpstreamModelName: "provider-model"},
+			}
+			request := &dto.OpenAIResponsesRequest{
+				Model: "provider-model",
+				Input: mustRawMessage(t, "hello"),
+				Tools: mustRawMessage(t, []map[string]any{{"type": "function", "name": " "}}),
+			}
+
+			result, err := ConvertRequest(nil, info, target, request)
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "has no name")
+			assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
+		})
+	}
+}
+
+func TestConvertRequestViaRejectsBuiltInToolBeforeIntermediateChatDropsIt(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		RelayFormat:            types.RelayFormatOpenAIResponses,
+		RequestConversionChain: []types.RelayFormat{types.RelayFormatOpenAIResponses},
+		ChannelMeta:            &relaycommon.ChannelMeta{UpstreamModelName: "gemini-test"},
+	}
+	request := &dto.OpenAIResponsesRequest{
+		Model: "gemini-test",
+		Input: mustRawMessage(t, "hello"),
+		Tools: mustRawMessage(t, []map[string]any{{"type": dto.BuildInToolWebSearch}}),
+	}
+
+	result, err := ConvertRequestVia(nil, info, request, types.RelayFormatOpenAI, types.RelayFormatGemini)
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "Responses tool type")
+	assert.Equal(t, []types.RelayFormat{types.RelayFormatOpenAIResponses}, info.RequestConversionChain)
 }
 
 func TestConvertRequestViaResponsesToGeminiStillUsesDirectSteps(t *testing.T) {

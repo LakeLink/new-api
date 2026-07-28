@@ -1,15 +1,14 @@
 package aws
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/logger"
 )
 
 type AwsClaudeRequest struct {
@@ -19,6 +18,7 @@ type AwsClaudeRequest struct {
 	System            any                 `json:"system,omitempty"`
 	Messages          []dto.ClaudeMessage `json:"messages"`
 	MaxTokens         *uint               `json:"max_tokens,omitempty"`
+	MaxTokensToSample *uint               `json:"max_tokens_to_sample,omitempty"`
 	Temperature       *float64            `json:"temperature,omitempty"`
 	TopP              *float64            `json:"top_p,omitempty"`
 	TopK              *int                `json:"top_k,omitempty"`
@@ -37,6 +37,10 @@ func formatRequest(requestBody io.Reader, requestHeader http.Header) (*AwsClaude
 	if err != nil {
 		return nil, err
 	}
+	if awsClaudeRequest.MaxTokens == nil {
+		awsClaudeRequest.MaxTokens = awsClaudeRequest.MaxTokensToSample
+	}
+	awsClaudeRequest.MaxTokensToSample = nil
 	awsClaudeRequest.AnthropicVersion = "bedrock-2023-05-31"
 
 	// check header anthropic-beta
@@ -52,7 +56,6 @@ func formatRequest(requestBody io.Reader, requestHeader http.Header) (*AwsClaude
 			awsClaudeRequest.AnthropicBeta = betaJson
 		}
 	}
-	logger.LogJson(context.Background(), "json", awsClaudeRequest)
 	return &awsClaudeRequest, nil
 }
 
@@ -68,48 +71,112 @@ type NovaContent struct {
 
 type NovaRequest struct {
 	SchemaVersion   string               `json:"schemaVersion"`             // 请求版本，例如 "1.0"
+	System          []NovaContent        `json:"system,omitempty"`          // 系统提示
 	Messages        []NovaMessage        `json:"messages"`                  // 对话消息列表
 	InferenceConfig *NovaInferenceConfig `json:"inferenceConfig,omitempty"` // 推理配置，可选
 }
 
 type NovaInferenceConfig struct {
-	MaxTokens     int      `json:"maxTokens,omitempty"`     // 最大生成的 token 数
-	Temperature   float64  `json:"temperature,omitempty"`   // 随机性 (默认 0.7, 范围 0-1)
-	TopP          float64  `json:"topP,omitempty"`          // nucleus sampling (默认 0.9, 范围 0-1)
-	TopK          int      `json:"topK,omitempty"`          // 限制候选 token 数 (默认 50, 范围 0-128)
+	MaxTokens     *int     `json:"maxTokens,omitempty"`     // 最大生成的 token 数
+	Temperature   *float64 `json:"temperature,omitempty"`   // 随机性 (默认 0.7, 范围 0-1)
+	TopP          *float64 `json:"topP,omitempty"`          // nucleus sampling (默认 0.9, 范围 0-1)
+	TopK          *int     `json:"topK,omitempty"`          // 限制候选 token 数 (默认 50, 范围 0-128)
 	StopSequences []string `json:"stopSequences,omitempty"` // 停止生成的序列
 }
 
+type NovaUsage struct {
+	InputTokens  int `json:"inputTokens"`
+	OutputTokens int `json:"outputTokens"`
+	TotalTokens  int `json:"totalTokens"`
+}
+
+type NovaResponseContent struct {
+	Text string `json:"text,omitempty"`
+}
+
+type NovaResponse struct {
+	Output struct {
+		Message struct {
+			Content []NovaResponseContent `json:"content"`
+		} `json:"message"`
+	} `json:"output"`
+	StopReason string    `json:"stopReason"`
+	Usage      NovaUsage `json:"usage"`
+}
+
+type NovaStreamEvent struct {
+	ContentBlockDelta *struct {
+		Delta struct {
+			Text string `json:"text,omitempty"`
+		} `json:"delta"`
+	} `json:"contentBlockDelta,omitempty"`
+	MessageStop *struct {
+		StopReason string `json:"stopReason"`
+	} `json:"messageStop,omitempty"`
+	Metadata *struct {
+		Usage NovaUsage `json:"usage"`
+	} `json:"metadata,omitempty"`
+}
+
 // 转换OpenAI请求为Nova格式
-func convertToNovaRequest(req *dto.GeneralOpenAIRequest) *NovaRequest {
-	novaMessages := make([]NovaMessage, len(req.Messages))
-	for i, msg := range req.Messages {
-		novaMessages[i] = NovaMessage{
-			Role:    msg.Role,
-			Content: []NovaContent{{Text: msg.StringContent()}},
+func convertToNovaRequest(req *dto.GeneralOpenAIRequest) (*NovaRequest, error) {
+	if len(req.Tools) > 0 {
+		return nil, fmt.Errorf("AWS Nova tool calling is not supported by this adapter")
+	}
+
+	novaMessages := make([]NovaMessage, 0, len(req.Messages))
+	system := make([]NovaContent, 0, 1)
+	for _, msg := range req.Messages {
+		if len(msg.ToolCalls) > 0 || msg.ToolCallId != "" {
+			return nil, fmt.Errorf("AWS Nova tool messages are not supported by this adapter")
+		}
+		text := msg.StringContent()
+		if !msg.IsStringContent() {
+			var textBuilder strings.Builder
+			for _, part := range msg.ParseContent() {
+				if part.Type != dto.ContentTypeText {
+					return nil, fmt.Errorf("AWS Nova %s content is not supported by this adapter", part.Type)
+				}
+				textBuilder.WriteString(part.Text)
+			}
+			text = textBuilder.String()
+		}
+
+		content := NovaContent{Text: text}
+		switch strings.ToLower(msg.Role) {
+		case "system", "developer":
+			system = append(system, content)
+		case "user", "assistant":
+			novaMessages = append(novaMessages, NovaMessage{
+				Role:    strings.ToLower(msg.Role),
+				Content: []NovaContent{content},
+			})
+		default:
+			return nil, fmt.Errorf("AWS Nova message role %q is not supported", msg.Role)
 		}
 	}
 
 	novaReq := &NovaRequest{
 		SchemaVersion: "messages-v1",
+		System:        system,
 		Messages:      novaMessages,
 	}
 
-	// 设置推理配置
-	if (req.MaxTokens != nil && *req.MaxTokens != 0) || (req.Temperature != nil && *req.Temperature != 0) || (req.TopP != nil && *req.TopP != 0) || (req.TopK != nil && *req.TopK != 0) || req.Stop != nil {
+	// 设置推理配置。指针字段保留客户端显式提供的 0；省略字段才使用
+	// Bedrock 的默认值。
+	if req.MaxCompletionTokens != nil || req.MaxTokens != nil || req.Temperature != nil || req.TopP != nil || req.TopK != nil || req.Stop != nil {
 		novaReq.InferenceConfig = &NovaInferenceConfig{}
-		if req.MaxTokens != nil && *req.MaxTokens != 0 {
-			novaReq.InferenceConfig.MaxTokens = int(*req.MaxTokens)
+		maxTokens := req.MaxCompletionTokens
+		if maxTokens == nil {
+			maxTokens = req.MaxTokens
 		}
-		if req.Temperature != nil && *req.Temperature != 0 {
-			novaReq.InferenceConfig.Temperature = *req.Temperature
+		if maxTokens != nil {
+			value := int(*maxTokens)
+			novaReq.InferenceConfig.MaxTokens = &value
 		}
-		if req.TopP != nil && *req.TopP != 0 {
-			novaReq.InferenceConfig.TopP = *req.TopP
-		}
-		if req.TopK != nil && *req.TopK != 0 {
-			novaReq.InferenceConfig.TopK = *req.TopK
-		}
+		novaReq.InferenceConfig.Temperature = req.Temperature
+		novaReq.InferenceConfig.TopP = req.TopP
+		novaReq.InferenceConfig.TopK = req.TopK
 		if req.Stop != nil {
 			if stopSequences := parseStopSequences(req.Stop); len(stopSequences) > 0 {
 				novaReq.InferenceConfig.StopSequences = stopSequences
@@ -117,7 +184,7 @@ func convertToNovaRequest(req *dto.GeneralOpenAIRequest) *NovaRequest {
 		}
 	}
 
-	return novaReq
+	return novaReq, nil
 }
 
 // parseStopSequences 解析停止序列，支持字符串或字符串数组

@@ -20,6 +20,27 @@ type GeminiChatRequest struct {
 	ToolConfig         *ToolConfig                `json:"toolConfig,omitempty"`
 	SystemInstructions *GeminiChatContent         `json:"systemInstruction,omitempty"`
 	CachedContent      string                     `json:"cachedContent,omitempty"`
+	ServiceTier        *string                    `json:"serviceTier,omitempty"`
+	Store              *bool                      `json:"store,omitempty"`
+}
+
+const (
+	GeminiServiceTierUnspecified = "unspecified"
+	GeminiServiceTierStandard    = "standard"
+	GeminiServiceTierFlex        = "flex"
+	GeminiServiceTierPriority    = "priority"
+)
+
+// NormalizeGeminiServiceTier returns the lowercase spelling accepted by the
+// GenerateContent API.
+func NormalizeGeminiServiceTier(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case GeminiServiceTierUnspecified, GeminiServiceTierStandard, GeminiServiceTierFlex, GeminiServiceTierPriority:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 // UnmarshalJSON allows GeminiChatRequest to accept both snake_case and camelCase fields.
@@ -28,6 +49,7 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 	var aux struct {
 		Alias
 		SystemInstructionSnake *GeminiChatContent `json:"system_instruction,omitempty"`
+		ServiceTierSnake       *string            `json:"service_tier,omitempty"`
 	}
 
 	if err := common.Unmarshal(data, &aux); err != nil {
@@ -38,6 +60,9 @@ func (r *GeminiChatRequest) UnmarshalJSON(data []byte) error {
 
 	if aux.SystemInstructionSnake != nil {
 		r.SystemInstructions = aux.SystemInstructionSnake
+	}
+	if r.ServiceTier == nil && aux.ServiceTierSnake != nil {
+		r.ServiceTier = aux.ServiceTierSnake
 	}
 
 	return nil
@@ -67,12 +92,6 @@ type LatLng struct {
 
 func (r *GeminiChatRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	var files []*types.FileMeta = make([]*types.FileMeta, 0)
-
-	var maxTokens int
-
-	if r.GenerationConfig.MaxOutputTokens != nil && *r.GenerationConfig.MaxOutputTokens > 0 {
-		maxTokens = int(*r.GenerationConfig.MaxOutputTokens)
-	}
 
 	var inputTexts []string
 	for _, content := range r.Contents {
@@ -104,8 +123,22 @@ func (r *GeminiChatRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	return &types.TokenCountMeta{
 		CombineText: inputText,
 		Files:       files,
-		MaxTokens:   maxTokens,
+		MaxTokens:   r.GetMaxTokenEstimate(),
 	}
+}
+
+// GetMaxTokenEstimate returns the bounded completion-token reservation,
+// including Gemini's candidate-count multiplier.
+func (r *GeminiChatRequest) GetMaxTokenEstimate() int {
+	maxTokens := uint(0)
+	if r.GenerationConfig.MaxOutputTokens != nil {
+		maxTokens = *r.GenerationConfig.MaxOutputTokens
+	}
+	candidateCount := 1
+	if r.GenerationConfig.CandidateCount != nil {
+		candidateCount = *r.GenerationConfig.CandidateCount
+	}
+	return boundedMaxTokenProduct(maxTokens, candidateCount)
 }
 
 func (r *GeminiChatRequest) IsStream(c *gin.Context) bool {
@@ -160,11 +193,16 @@ func (r *GeminiChatRequest) SetTools(tools []GeminiChatTool) {
 }
 
 type GeminiThinkingConfig struct {
-	IncludeThoughts bool `json:"includeThoughts,omitempty"`
-	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
+	IncludeThoughts *bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *int  `json:"thinkingBudget,omitempty"`
 	// TODO Conflict with thinkingbudget.
 	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }
+
+// MaxGeminiThinkingBudget is the largest thinking-token budget currently
+// accepted by Gemini's budget-based thinking models. A budget of -1 selects
+// dynamic thinking and zero disables thinking on models that support it.
+const MaxGeminiThinkingBudget = 32768
 
 // UnmarshalJSON allows GeminiThinkingConfig to accept both snake_case and camelCase fields.
 func (c *GeminiThinkingConfig) UnmarshalJSON(data []byte) error {
@@ -183,7 +221,7 @@ func (c *GeminiThinkingConfig) UnmarshalJSON(data []byte) error {
 	*c = GeminiThinkingConfig(aux.Alias)
 
 	if aux.IncludeThoughtsSnake != nil {
-		c.IncludeThoughts = *aux.IncludeThoughtsSnake
+		c.IncludeThoughts = aux.IncludeThoughtsSnake
 	}
 
 	if aux.ThinkingBudgetSnake != nil {
@@ -268,7 +306,7 @@ type GeminiFileData struct {
 
 type GeminiPart struct {
 	Text             string                  `json:"text,omitempty"`
-	Thought          bool                    `json:"thought,omitempty"`
+	Thought          *bool                   `json:"thought,omitempty"`
 	InlineData       *GeminiInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *FunctionCall           `json:"functionCall,omitempty"`
 	ThoughtSignature json.RawMessage         `json:"thoughtSignature,omitempty"`
@@ -321,6 +359,7 @@ type GeminiChatSafetySettings struct {
 type GeminiChatTool struct {
 	GoogleSearch          any `json:"googleSearch,omitempty"`
 	GoogleSearchRetrieval any `json:"googleSearchRetrieval,omitempty"`
+	GoogleMaps            any `json:"googleMaps,omitempty"`
 	CodeExecution         any `json:"codeExecution,omitempty"`
 	FunctionDeclarations  any `json:"functionDeclarations,omitempty"`
 	URLContext            any `json:"urlContext,omitempty"`
@@ -329,15 +368,15 @@ type GeminiChatTool struct {
 type GeminiChatGenerationConfig struct {
 	Temperature                *float64              `json:"temperature,omitempty"`
 	TopP                       *float64              `json:"topP,omitempty"`
-	TopK                       *float64              `json:"topK,omitempty"`
+	TopK                       *int                  `json:"topK,omitempty"`
 	MaxOutputTokens            *uint                 `json:"maxOutputTokens,omitempty"`
 	CandidateCount             *int                  `json:"candidateCount,omitempty"`
 	StopSequences              []string              `json:"stopSequences,omitempty"`
 	ResponseMimeType           string                `json:"responseMimeType,omitempty"`
 	ResponseSchema             any                   `json:"responseSchema,omitempty"`
 	ResponseJsonSchema         json.RawMessage       `json:"responseJsonSchema,omitempty"`
-	PresencePenalty            *float32              `json:"presencePenalty,omitempty"`
-	FrequencyPenalty           *float32              `json:"frequencyPenalty,omitempty"`
+	PresencePenalty            *float64              `json:"presencePenalty,omitempty"`
+	FrequencyPenalty           *float64              `json:"frequencyPenalty,omitempty"`
 	ResponseLogprobs           *bool                 `json:"responseLogprobs,omitempty"`
 	Logprobs                   *int32                `json:"logprobs,omitempty"`
 	EnableEnhancedCivicAnswers *bool                 `json:"enableEnhancedCivicAnswers,omitempty"`
@@ -355,15 +394,15 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 	var aux struct {
 		Alias
 		TopPSnake                       *float64              `json:"top_p,omitempty"`
-		TopKSnake                       *float64              `json:"top_k,omitempty"`
+		TopKSnake                       *int                  `json:"top_k,omitempty"`
 		MaxOutputTokensSnake            *uint                 `json:"max_output_tokens,omitempty"`
 		CandidateCountSnake             *int                  `json:"candidate_count,omitempty"`
 		StopSequencesSnake              []string              `json:"stop_sequences,omitempty"`
 		ResponseMimeTypeSnake           string                `json:"response_mime_type,omitempty"`
 		ResponseSchemaSnake             any                   `json:"response_schema,omitempty"`
 		ResponseJsonSchemaSnake         json.RawMessage       `json:"response_json_schema,omitempty"`
-		PresencePenaltySnake            *float32              `json:"presence_penalty,omitempty"`
-		FrequencyPenaltySnake           *float32              `json:"frequency_penalty,omitempty"`
+		PresencePenaltySnake            *float64              `json:"presence_penalty,omitempty"`
+		FrequencyPenaltySnake           *float64              `json:"frequency_penalty,omitempty"`
 		ResponseLogprobsSnake           *bool                 `json:"response_logprobs,omitempty"`
 		EnableEnhancedCivicAnswersSnake *bool                 `json:"enable_enhanced_civic_answers,omitempty"`
 		MediaResolutionSnake            MediaResolution       `json:"media_resolution,omitempty"`
@@ -438,10 +477,23 @@ func (c *GeminiChatGenerationConfig) UnmarshalJSON(data []byte) error {
 type MediaResolution string
 
 type GeminiChatCandidate struct {
-	Content       GeminiChatContent        `json:"content"`
-	FinishReason  *string                  `json:"finishReason"`
-	Index         int64                    `json:"index"`
-	SafetyRatings []GeminiChatSafetyRating `json:"safetyRatings"`
+	Content           GeminiChatContent        `json:"content"`
+	FinishReason      *string                  `json:"finishReason"`
+	Index             int64                    `json:"index"`
+	SafetyRatings     []GeminiChatSafetyRating `json:"safetyRatings"`
+	GroundingMetadata *GeminiGroundingMetadata `json:"groundingMetadata,omitempty"`
+}
+
+type GeminiGroundingMetadata struct {
+	WebSearchQueries   []string               `json:"webSearchQueries,omitempty"`
+	ImageSearchQueries []string               `json:"imageSearchQueries,omitempty"`
+	GroundingChunks    []GeminiGroundingChunk `json:"groundingChunks,omitempty"`
+}
+
+type GeminiGroundingChunk struct {
+	Web   any `json:"web,omitempty"`
+	Maps  any `json:"maps,omitempty"`
+	Image any `json:"image,omitempty"`
 }
 
 type GeminiChatSafetyRating struct {
@@ -505,8 +557,10 @@ type GeminiUsageMetadata struct {
 	ThoughtsTokenCount         int                         `json:"thoughtsTokenCount"`
 	CachedContentTokenCount    int                         `json:"cachedContentTokenCount"`
 	PromptTokensDetails        []GeminiPromptTokensDetails `json:"promptTokensDetails"`
+	CacheTokensDetails         []GeminiPromptTokensDetails `json:"cacheTokensDetails"`
 	ToolUsePromptTokensDetails []GeminiPromptTokensDetails `json:"toolUsePromptTokensDetails"`
 	CandidatesTokensDetails    []GeminiPromptTokensDetails `json:"candidatesTokensDetails"`
+	ServiceTier                string                      `json:"serviceTier,omitempty"`
 	BillingUsage               *BillingUsage               `json:"billing_usage,omitempty"`
 }
 
@@ -544,12 +598,14 @@ type GeminiImagePrediction struct {
 }
 
 // Embedding related structs
+const MaxGeminiEmbeddingDimensions = 3072
+
 type GeminiEmbeddingRequest struct {
 	Model                string            `json:"model,omitempty"`
 	Content              GeminiChatContent `json:"content"`
 	TaskType             string            `json:"taskType,omitempty"`
 	Title                string            `json:"title,omitempty"`
-	OutputDimensionality int               `json:"outputDimensionality,omitempty"`
+	OutputDimensionality *int              `json:"outputDimensionality,omitempty"`
 }
 
 func (r *GeminiEmbeddingRequest) IsStream(c *gin.Context) bool {
@@ -588,6 +644,9 @@ func (r *GeminiBatchEmbeddingRequest) IsStream(c *gin.Context) bool {
 func (r *GeminiBatchEmbeddingRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	var inputTexts []string
 	for _, request := range r.Requests {
+		if request == nil {
+			continue
+		}
 		meta := request.GetTokenCountMeta()
 		if meta != nil && meta.CombineText != "" {
 			inputTexts = append(inputTexts, meta.CombineText)
@@ -602,6 +661,9 @@ func (r *GeminiBatchEmbeddingRequest) GetTokenCountMeta() *types.TokenCountMeta 
 func (r *GeminiBatchEmbeddingRequest) SetModelName(modelName string) {
 	if modelName != "" {
 		for _, req := range r.Requests {
+			if req == nil {
+				continue
+			}
 			req.SetModelName(modelName)
 		}
 	}

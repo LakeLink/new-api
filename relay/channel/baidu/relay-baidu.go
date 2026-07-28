@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,28 +17,31 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
-	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 )
 
 // https://cloud.baidu.com/doc/WENXINWORKSHOP/s/flfmc9do2
 
-var baiduTokenStore sync.Map
+var (
+	baiduTokenStore        sync.Map
+	baiduTokenRefreshGroup singleflight.Group
+)
 
 func requestOpenAI2Baidu(request dto.GeneralOpenAIRequest) *BaiduChatRequest {
 	baiduRequest := BaiduChatRequest{
 		Temperature:    request.Temperature,
-		TopP:           lo.FromPtrOr(request.TopP, 0),
-		PenaltyScore:   lo.FromPtrOr(request.FrequencyPenalty, 0),
-		Stream:         lo.FromPtrOr(request.Stream, false),
+		TopP:           request.TopP,
+		PenaltyScore:   request.FrequencyPenalty,
+		Stream:         request.Stream,
 		DisableSearch:  false,
 		EnableCitation: false,
 		UserId:         request.User,
 	}
-	if request.GetMaxTokens() != 0 {
-		maxTokens := int(request.GetMaxTokens())
-		if request.GetMaxTokens() == 1 {
+	if requestedMaxTokens := request.GetMaxTokensPointer(); requestedMaxTokens != nil {
+		maxTokens := int(*requestedMaxTokens)
+		if *requestedMaxTokens == 1 {
 			maxTokens = 2
 		}
 		baiduRequest.MaxOutputTokens = &maxTokens
@@ -139,12 +142,13 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 }
 
 func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	var baiduResponse BaiduChatResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
@@ -164,12 +168,13 @@ func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 }
 
 func baiduEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	var baiduResponse BaiduEmbeddingResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
@@ -199,22 +204,37 @@ func getBaiduAccessToken(apiKey string, ctx context.Context) (string, error) {
 				// Refresh a still-valid token in the background before it expires,
 				// but never return an already expired cached credential.
 				if now.Add(time.Hour).After(accessToken.ExpiresAt) {
-					go func() {
-						_, _ = getBaiduAccessTokenHelper(apiKey, context.Background())
-					}()
+					// DoChan starts at most one bounded refresh per key. Duplicate
+					// callers join the in-flight operation without spawning an
+					// unbounded set of waiting goroutines.
+					_ = baiduTokenRefreshGroup.DoChan(apiKey, func() (any, error) {
+						return getBaiduAccessTokenHelper(apiKey, context.Background())
+					})
 				}
 				return accessToken.AccessToken, nil
 			}
 		}
 	}
-	accessToken, err := getBaiduAccessTokenHelper(apiKey, ctx)
-	if err != nil {
-		return "", err
+
+	result := baiduTokenRefreshGroup.DoChan(apiKey, func() (any, error) {
+		// The shared refresh must not be canceled by whichever request happens
+		// to become the leader. getBaiduAccessTokenHelper supplies its own
+		// finite timeout; individual waiters can still stop waiting below.
+		return getBaiduAccessTokenHelper(apiKey, context.Background())
+	})
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case refreshResult := <-result:
+		if refreshResult.Err != nil {
+			return "", refreshResult.Err
+		}
+		accessToken, ok := refreshResult.Val.(*BaiduAccessToken)
+		if !ok || accessToken == nil {
+			return "", errors.New("getBaiduAccessToken return a nil token")
+		}
+		return accessToken.AccessToken, nil
 	}
-	if accessToken == nil {
-		return "", errors.New("getBaiduAccessToken return a nil token")
-	}
-	return (*accessToken).AccessToken, nil
 }
 
 func getBaiduAccessTokenHelper(apiKey string, ctx context.Context) (*BaiduAccessToken, error) {
@@ -222,22 +242,39 @@ func getBaiduAccessTokenHelper(apiKey string, ctx context.Context) (*BaiduAccess
 	if len(parts) != 2 {
 		return nil, errors.New("invalid baidu apikey")
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=%s&client_secret=%s",
-		parts[0], parts[1]), nil)
+	tokenURL, err := url.Parse("https://aip.baidubce.com/oauth/2.0/token")
 	if err != nil {
 		return nil, err
+	}
+	query := tokenURL.Query()
+	query.Set("grant_type", "client_credentials")
+	query.Set("client_id", parts[0])
+	query.Set("client_secret", parts[1])
+	tokenURL.RawQuery = query.Encode()
+
+	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, tokenURL.String(), nil)
+	if err != nil {
+		return nil, service.SanitizeNetworkError(err)
 	}
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("Accept", "application/json")
-	res, err := service.GetHttpClient().Do(req)
+	res, err := service.DoUpstreamRequest(service.GetHttpClient(), req)
+	if err != nil {
+		return nil, fmt.Errorf("Baidu token request failed: %s", common.MaskSensitiveInfo(err.Error()))
+	}
+	defer res.Body.Close()
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Baidu token endpoint returned status %d", res.StatusCode)
+	}
+
+	var accessToken BaiduAccessToken
+	body, err := service.ReadResponseBodyWithLimit(res.Body, 1<<20)
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
-
-	var accessToken BaiduAccessToken
-	err = common.DecodeJson(res.Body, &accessToken)
-	if err != nil {
+	if err = common.Unmarshal(body, &accessToken); err != nil {
 		return nil, err
 	}
 	if accessToken.Error != "" {
@@ -246,7 +283,11 @@ func getBaiduAccessTokenHelper(apiKey string, ctx context.Context) (*BaiduAccess
 	if accessToken.AccessToken == "" {
 		return nil, errors.New("getBaiduAccessTokenHelper get empty access token")
 	}
-	accessToken.ExpiresAt = time.Now().Add(time.Duration(accessToken.ExpiresIn) * time.Second)
+	expiresIn, ok := common.SafeOptionalDuration64(accessToken.ExpiresIn, time.Second, "Baidu access token expiry")
+	if !ok {
+		return nil, errors.New("Baidu token response contains invalid expires_in")
+	}
+	accessToken.ExpiresAt = time.Now().Add(expiresIn)
 	baiduTokenStore.Store(apiKey, accessToken)
 	return &accessToken, nil
 }

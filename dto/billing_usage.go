@@ -12,9 +12,13 @@ const (
 )
 
 type BillingUsage struct {
-	Source              string               `json:"source,omitempty"`
-	Semantic            string               `json:"semantic,omitempty"`
-	Estimated           bool                 `json:"estimated,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Semantic  string `json:"semantic,omitempty"`
+	Estimated bool   `json:"estimated,omitempty"`
+	// VerifiedZero is an internal trust marker set only after a provider-specific
+	// response rule establishes that an all-zero charge is authoritative. It is
+	// deliberately excluded from JSON so upstream payloads cannot spoof it.
+	VerifiedZero        bool                 `json:"-"`
 	OpenAIUsage         *Usage               `json:"openai_usage,omitempty"`
 	ClaudeUsage         *ClaudeUsage         `json:"claude_usage,omitempty"`
 	GeminiUsageMetadata *GeminiUsageMetadata `json:"gemini_usage_metadata,omitempty"`
@@ -48,6 +52,9 @@ func HasClaudeUsageTokens(usage *ClaudeUsage) bool {
 	}
 	if usage.CacheCreation != nil &&
 		(usage.CacheCreation.Ephemeral5mInputTokens != 0 || usage.CacheCreation.Ephemeral1hInputTokens != 0) {
+		return true
+	}
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests != 0 {
 		return true
 	}
 	return false
@@ -181,6 +188,7 @@ func cloneClaudeUsage(usage *ClaudeUsage) *ClaudeUsage {
 
 func cloneGeminiUsageMetadata(metadata GeminiUsageMetadata) GeminiUsageMetadata {
 	metadata.PromptTokensDetails = append([]GeminiPromptTokensDetails{}, metadata.PromptTokensDetails...)
+	metadata.CacheTokensDetails = append([]GeminiPromptTokensDetails{}, metadata.CacheTokensDetails...)
 	metadata.ToolUsePromptTokensDetails = append([]GeminiPromptTokensDetails{}, metadata.ToolUsePromptTokensDetails...)
 	metadata.CandidatesTokensDetails = append([]GeminiPromptTokensDetails{}, metadata.CandidatesTokensDetails...)
 	metadata.BillingUsage = nil
@@ -200,6 +208,11 @@ func HasGeminiUsageMetadataTokens(metadata *GeminiUsageMetadata) bool {
 		return true
 	}
 	for _, detail := range metadata.PromptTokensDetails {
+		if detail.TokenCount != 0 {
+			return true
+		}
+	}
+	for _, detail := range metadata.CacheTokensDetails {
 		if detail.TokenCount != 0 {
 			return true
 		}

@@ -8,6 +8,14 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 )
 
+func snapshotTokenForCache(token Token) Token {
+	if token.AllowIps != nil {
+		allowIPs := *token.AllowIps
+		token.AllowIps = &allowIPs
+	}
+	return token
+}
+
 func cacheSetToken(token Token) error {
 	key := common.GenerateHMAC(token.Key)
 	token.Clean()

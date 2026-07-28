@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,15 +22,19 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 var channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
 
-func InitChannelCache() {
+func InitChannelCache() error {
 	if !common.MemoryCacheEnabled {
 		InvalidatePricingCache()
-		return
+		return nil
 	}
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*dto.AdvancedCustomConfig)
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		err = fmt.Errorf("load channels for runtime cache: %w", err)
+		common.SysError(err.Error())
+		return err
+	}
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
@@ -41,29 +44,28 @@ func InitChannelCache() {
 		}
 	}
 	var abilities []*Ability
-	DB.Find(&abilities)
-	groups := make(map[string]bool)
-	for _, ability := range abilities {
-		groups[ability.Group] = true
+	if err := DB.Find(&abilities).Error; err != nil {
+		err = fmt.Errorf("load abilities for runtime cache: %w", err)
+		common.SysError(err.Error())
+		return err
 	}
 	newGroup2model2channels := make(map[string]map[string][]int)
-	for group := range groups {
-		newGroup2model2channels[group] = make(map[string][]int)
-	}
-	for _, channel := range channels {
-		if channel.Status != common.ChannelStatusEnabled || constant.IsRetiredChannelType(channel.Type) {
-			continue // skip disabled and retired channels
+	for _, ability := range abilities {
+		if !ability.Enabled {
+			continue
 		}
-		groups := strings.Split(channel.Group, ",")
-		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
-			for _, model := range models {
-				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]int, 0)
-				}
-				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
-			}
+		channel, ok := newChannelId2channel[ability.ChannelId]
+		if !ok || channel.Status != common.ChannelStatusEnabled ||
+			constant.IsRetiredChannelType(channel.Type) {
+			continue
 		}
+		if newGroup2model2channels[ability.Group] == nil {
+			newGroup2model2channels[ability.Group] = make(map[string][]int)
+		}
+		newGroup2model2channels[ability.Group][ability.Model] = append(
+			newGroup2model2channels[ability.Group][ability.Model],
+			channel.Id,
+		)
 	}
 
 	// sort by priority
@@ -101,13 +103,16 @@ func InitChannelCache() {
 	// invalidating the pricing cache, otherwise the reversed order deadlocks.
 	InvalidatePricingCache()
 	common.SysLog("channels synced from database")
+	return nil
 }
 
 func SyncChannelCache(frequency int) {
-	for {
-		time.Sleep(time.Duration(frequency) * time.Second)
+	interval := common.SafeIntervalDuration(frequency, time.Second, 60*time.Second, "channel cache sync")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
 		common.SysLog("syncing channels from database")
-		InitChannelCache()
+		_ = InitChannelCache()
 	}
 }
 
@@ -135,7 +140,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
-			return channel, nil
+			return cloneChannel(channel), nil
 		}
 		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
 	}
@@ -160,12 +165,12 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	targetPriority := int64(sortedUniquePriorities[retry])
 
 	// get the priority for the given retry number
-	var sumWeight = 0
+	var sumWeight int64
 	var targetChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
-				sumWeight += channel.GetWeight()
+				sumWeight += int64(channel.GetWeight())
 				targetChannels = append(targetChannels, channel)
 			}
 		} else {
@@ -178,15 +183,15 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	}
 
 	// smoothing factor and adjustment
-	smoothingFactor := 1
-	smoothingAdjustment := 0
+	smoothingFactor := int64(1)
+	smoothingAdjustment := int64(0)
 
 	if sumWeight == 0 {
 		// when all channels have weight 0, set sumWeight to the number of channels and set smoothing adjustment to 100
 		// each channel's effective weight = 100
-		sumWeight = len(targetChannels) * 100
+		sumWeight = int64(len(targetChannels)) * 100
 		smoothingAdjustment = 100
-	} else if sumWeight/len(targetChannels) < 10 {
+	} else if sumWeight/int64(len(targetChannels)) < 10 {
 		// when the average weight is less than 10, set smoothing factor to 100
 		smoothingFactor = 100
 	}
@@ -195,13 +200,13 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	totalWeight := sumWeight * smoothingFactor
 
 	// Generate a random value in the range [0, totalWeight)
-	randomWeight := rand.Intn(totalWeight)
+	randomWeight := rand.Int63n(totalWeight)
 
 	// Find a channel based on its weight
 	for _, channel := range targetChannels {
-		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
+		randomWeight -= int64(channel.GetWeight())*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
-			return channel, nil
+			return cloneChannel(channel), nil
 		}
 	}
 	// return null if no channel is not found
@@ -247,7 +252,7 @@ func CacheGetChannel(id int) (*Channel, error) {
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
-	return c, nil
+	return cloneChannel(c), nil
 }
 
 func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
@@ -265,7 +270,8 @@ func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
-	return &c.ChannelInfo, nil
+	snapshot := cloneChannel(c)
+	return &snapshot.ChannelInfo, nil
 }
 
 func CacheUpdateChannelStatus(id int, status int) {
@@ -274,9 +280,17 @@ func CacheUpdateChannelStatus(id int, status int) {
 	}
 	channelSyncLock.Lock()
 	defer channelSyncLock.Unlock()
-	if channel, ok := channelsIDM[id]; ok {
-		channel.Status = status
+	cacheUpdateChannelStatusLocked(id, status)
+}
+
+// cacheUpdateChannelStatusLocked updates routing membership together with the
+// cached channel status. Caller must hold channelSyncLock for writing.
+func cacheUpdateChannelStatusLocked(id int, status int) {
+	channel, ok := channelsIDM[id]
+	if !ok {
+		return
 	}
+	channel.Status = status
 	if status != common.ChannelStatusEnabled {
 		// delete the channel from group2model2channels
 		for group, model2channels := range group2model2channels {
@@ -289,6 +303,35 @@ func CacheUpdateChannelStatus(id int, status int) {
 					}
 				}
 			}
+		}
+		return
+	}
+	if constant.IsRetiredChannelType(channel.Type) {
+		return
+	}
+	if group2model2channels == nil {
+		group2model2channels = make(map[string]map[string][]int)
+	}
+	for _, group := range channel.GetGroups() {
+		if group2model2channels[group] == nil {
+			group2model2channels[group] = make(map[string][]int)
+		}
+		for _, model := range channel.GetModels() {
+			channels := group2model2channels[group][model]
+			alreadyPresent := false
+			for _, channelID := range channels {
+				if channelID == id {
+					alreadyPresent = true
+					break
+				}
+			}
+			if !alreadyPresent {
+				channels = append(channels, id)
+			}
+			sort.SliceStable(channels, func(i, j int) bool {
+				return channelsIDM[channels[i]].GetPriority() > channelsIDM[channels[j]].GetPriority()
+			})
+			group2model2channels[group][model] = channels
 		}
 	}
 }
@@ -306,6 +349,7 @@ func CacheUpdateChannel(channel *Channel) {
 	if channelsIDM == nil {
 		channelsIDM = make(map[int]*Channel)
 	}
+	channel = cloneChannel(channel)
 	if oldChannel, ok := channelsIDM[channel.Id]; ok {
 		logger.LogDebug(nil, "CacheUpdateChannel before: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, oldChannel.ChannelInfo.MultiKeyPollingIndex)
 	}
@@ -326,4 +370,86 @@ func CacheUpdateChannel(channel *Channel) {
 	// updatePricingLock while holding channelSyncLock would be an AB-BA deadlock.
 	channelSyncLock.Unlock()
 	InvalidatePricingCache()
+}
+
+// cloneChannel isolates mutable request snapshots from the shared channel
+// cache. In particular ChannelInfo contains maps and polling state that are
+// updated by health checks while relay requests concurrently read the channel.
+func cloneChannel(channel *Channel) *Channel {
+	if channel == nil {
+		return nil
+	}
+	snapshot := *channel
+	if channel.OpenAIOrganization != nil {
+		value := *channel.OpenAIOrganization
+		snapshot.OpenAIOrganization = &value
+	}
+	if channel.TestModel != nil {
+		value := *channel.TestModel
+		snapshot.TestModel = &value
+	}
+	if channel.Weight != nil {
+		value := *channel.Weight
+		snapshot.Weight = &value
+	}
+	if channel.BaseURL != nil {
+		value := *channel.BaseURL
+		snapshot.BaseURL = &value
+	}
+	if channel.ModelMapping != nil {
+		value := *channel.ModelMapping
+		snapshot.ModelMapping = &value
+	}
+	if channel.StatusCodeMapping != nil {
+		value := *channel.StatusCodeMapping
+		snapshot.StatusCodeMapping = &value
+	}
+	if channel.Priority != nil {
+		value := *channel.Priority
+		snapshot.Priority = &value
+	}
+	if channel.AutoBan != nil {
+		value := *channel.AutoBan
+		snapshot.AutoBan = &value
+	}
+	if channel.Tag != nil {
+		value := *channel.Tag
+		snapshot.Tag = &value
+	}
+	if channel.Setting != nil {
+		value := *channel.Setting
+		snapshot.Setting = &value
+	}
+	if channel.ParamOverride != nil {
+		value := *channel.ParamOverride
+		snapshot.ParamOverride = &value
+	}
+	if channel.HeaderOverride != nil {
+		value := *channel.HeaderOverride
+		snapshot.HeaderOverride = &value
+	}
+	if channel.Remark != nil {
+		value := *channel.Remark
+		snapshot.Remark = &value
+	}
+	snapshot.Keys = append([]string(nil), channel.Keys...)
+	if channel.ChannelInfo.MultiKeyStatusList != nil {
+		snapshot.ChannelInfo.MultiKeyStatusList = make(map[int]int, len(channel.ChannelInfo.MultiKeyStatusList))
+		for key, value := range channel.ChannelInfo.MultiKeyStatusList {
+			snapshot.ChannelInfo.MultiKeyStatusList[key] = value
+		}
+	}
+	if channel.ChannelInfo.MultiKeyDisabledReason != nil {
+		snapshot.ChannelInfo.MultiKeyDisabledReason = make(map[int]string, len(channel.ChannelInfo.MultiKeyDisabledReason))
+		for key, value := range channel.ChannelInfo.MultiKeyDisabledReason {
+			snapshot.ChannelInfo.MultiKeyDisabledReason[key] = value
+		}
+	}
+	if channel.ChannelInfo.MultiKeyDisabledTime != nil {
+		snapshot.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64, len(channel.ChannelInfo.MultiKeyDisabledTime))
+		for key, value := range channel.ChannelInfo.MultiKeyDisabledTime {
+			snapshot.ChannelInfo.MultiKeyDisabledTime[key] = value
+		}
+	}
+	return &snapshot
 }

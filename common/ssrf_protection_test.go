@@ -57,3 +57,39 @@ func TestNewSSRFProtectionFromFetchSettingParsesPortRanges(t *testing.T) {
 	require.NoError(t, protection.ValidateNetworkTarget("example.com", 8001))
 	require.Error(t, protection.ValidateNetworkTarget("example.com", 9000))
 }
+
+func TestSSRFProtectionCanonicalizesTrailingDotBeforeDomainFiltering(t *testing.T) {
+	protection := &SSRFProtection{
+		AllowPrivateIp:   false,
+		DomainFilterMode: false,
+		DomainList:       []string{"blocked.example"},
+		IpFilterMode:     false,
+	}
+
+	require.Error(t, protection.ValidateNetworkTarget("BLOCKED.EXAMPLE.", 443))
+}
+
+func TestSSRFProtectionRejectsScopedIPv6Literal(t *testing.T) {
+	protection := &SSRFProtection{
+		AllowPrivateIp:   true,
+		DomainFilterMode: false,
+		IpFilterMode:     false,
+	}
+
+	require.Error(t, protection.ValidateNetworkTarget("fe80::1%eth0", 80))
+}
+
+func TestSSRFProtectionRejectsNonCanonicalIPv4Literals(t *testing.T) {
+	protection := &SSRFProtection{
+		AllowPrivateIp:         true,
+		DomainFilterMode:       false,
+		IpFilterMode:           false,
+		ApplyIPFilterForDomain: false,
+	}
+
+	for _, host := range []string{"2130706433", "0177.0.0.1", "0x7f000001", "0x7f.0.0.1"} {
+		t.Run(host, func(t *testing.T) {
+			require.Error(t, protection.ValidateNetworkTarget(host, 80))
+		})
+	}
+}

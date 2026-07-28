@@ -15,15 +15,11 @@ var defaultGroupRatio = map[string]float64{
 	"svip":    1,
 }
 
-var groupRatioMap = types.NewRWMap[string, float64]()
-
 var defaultGroupGroupRatio = map[string]map[string]float64{
 	"vip": {
 		"edit_this": 0.9,
 	},
 }
-
-var groupGroupRatioMap = types.NewRWMap[string, map[string]float64]()
 
 var defaultGroupSpecialUsableGroup = map[string]map[string]string{}
 
@@ -36,6 +32,8 @@ type GroupRatioSetting struct {
 var groupRatioSetting GroupRatioSetting
 
 func init() {
+	groupRatioMap := types.NewRWMap[string, float64]()
+	groupGroupRatioMap := types.NewRWMap[string, map[string]float64]()
 	groupSpecialUsableGroup := types.NewRWMap[string, map[string]string]()
 	groupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
 
@@ -52,32 +50,45 @@ func init() {
 }
 
 func GetGroupRatioSetting() *GroupRatioSetting {
-	if groupRatioSetting.GroupSpecialUsableGroup == nil {
-		groupRatioSetting.GroupSpecialUsableGroup = types.NewRWMap[string, map[string]string]()
-		groupRatioSetting.GroupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
+	setting := config.Snapshot[GroupRatioSetting]("group_ratio_setting")
+	if setting.GroupSpecialUsableGroup != nil {
+		return setting
 	}
-	return &groupRatioSetting
+
+	fallback := *setting
+	fallback.GroupSpecialUsableGroup = types.NewRWMap[string, map[string]string]()
+	fallback.GroupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
+	return &fallback
 }
 
 func GetGroupRatioCopy() map[string]float64 {
-	return groupRatioMap.ReadAll()
+	return GetGroupRatioSetting().GroupRatio.ReadAll()
 }
 
 func ContainsGroupRatio(name string) bool {
-	_, ok := groupRatioMap.Get(name)
+	_, ok := GetGroupRatioSetting().GroupRatio.Get(name)
 	return ok
 }
 
 func GroupRatio2JSONString() string {
-	return groupRatioMap.MarshalJSONString()
+	return GetGroupRatioSetting().GroupRatio.MarshalJSONString()
 }
 
 func UpdateGroupRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonString(groupRatioMap, jsonStr)
+	if err := CheckGroupRatio(jsonStr); err != nil {
+		return err
+	}
+	next := types.NewRWMap[string, float64]()
+	if err := types.LoadFromJsonString(next, jsonStr); err != nil {
+		return err
+	}
+	return config.Mutate(&groupRatioSetting, func() {
+		groupRatioSetting.GroupRatio = next
+	})
 }
 
 func GetGroupRatio(name string) float64 {
-	ratio, ok := groupRatioMap.Get(name)
+	ratio, ok := GetGroupRatioSetting().GroupRatio.Get(name)
 	if !ok {
 		common.SysLog("group ratio not found: " + name)
 		return 1
@@ -86,7 +97,7 @@ func GetGroupRatio(name string) float64 {
 }
 
 func GetGroupGroupRatio(userGroup, usingGroup string) (float64, bool) {
-	gp, ok := groupGroupRatioMap.Get(userGroup)
+	gp, ok := GetGroupRatioSetting().GroupGroupRatio.Get(userGroup)
 	if !ok {
 		return -1, false
 	}
@@ -98,11 +109,51 @@ func GetGroupGroupRatio(userGroup, usingGroup string) (float64, bool) {
 }
 
 func GroupGroupRatio2JSONString() string {
-	return groupGroupRatioMap.MarshalJSONString()
+	return GetGroupRatioSetting().GroupGroupRatio.MarshalJSONString()
 }
 
 func UpdateGroupGroupRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonString(groupGroupRatioMap, jsonStr)
+	if err := CheckGroupGroupRatio(jsonStr); err != nil {
+		return err
+	}
+	next := types.NewRWMap[string, map[string]float64]()
+	if err := types.LoadFromJsonString(next, jsonStr); err != nil {
+		return err
+	}
+	return config.Mutate(&groupRatioSetting, func() {
+		groupRatioSetting.GroupGroupRatio = next
+	})
+}
+
+func (s GroupRatioSetting) Validate() error {
+	if s.GroupRatio == nil {
+		return errors.New("group ratio must be a JSON object")
+	}
+	for name, ratio := range s.GroupRatio.ReadAll() {
+		if name == "" {
+			return errors.New("group ratio name must not be empty")
+		}
+		if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+			return errors.New("group ratio must be finite and not less than 0: " + name)
+		}
+	}
+	if s.GroupGroupRatio == nil {
+		return errors.New("group-to-group ratio must be a JSON object")
+	}
+	for userGroup, ratios := range s.GroupGroupRatio.ReadAll() {
+		if userGroup == "" {
+			return errors.New("group-to-group source name must not be empty")
+		}
+		for usingGroup, ratio := range ratios {
+			if usingGroup == "" {
+				return errors.New("group-to-group target name must not be empty")
+			}
+			if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+				return errors.New("group-to-group ratio must be finite and not less than 0: " + userGroup + "/" + usingGroup)
+			}
+		}
+	}
+	return nil
 }
 
 func CheckGroupRatio(jsonStr string) error {
@@ -110,6 +161,9 @@ func CheckGroupRatio(jsonStr string) error {
 	err := common.UnmarshalJsonStr(jsonStr, &checkGroupRatio)
 	if err != nil {
 		return err
+	}
+	if checkGroupRatio == nil {
+		return errors.New("group ratio configuration must be a JSON object")
 	}
 	for name, ratio := range checkGroupRatio {
 		if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {

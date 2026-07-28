@@ -1,6 +1,7 @@
 package oairesponses
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	relaymedia "github.com/QuantumNous/new-api/service/relayconvert/internal/media"
 	sharedclaude "github.com/QuantumNous/new-api/service/relayconvert/internal/shared/claude"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/gin-gonic/gin"
 )
 
@@ -31,19 +33,50 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 	if err := ValidateRequestChatUnsupportedFields(req); err != nil {
 		return nil, err
 	}
+	if err := ValidateToolsForConversion(req.Tools, "Anthropic Messages"); err != nil {
+		return nil, err
+	}
 
 	claudeRequest := &dto.ClaudeRequest{
 		Model:       req.Model,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		Stream:      req.Stream,
+		MaxTokens:   req.MaxOutputTokens,
 	}
-	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
-		claudeRequest.MaxTokens = common.GetPointer(*req.MaxOutputTokens)
-	}
-	if claudeRequest.MaxTokens == nil || *claudeRequest.MaxTokens == 0 {
+	if claudeRequest.MaxTokens == nil {
 		defaultMaxTokens := uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(req.Model))
 		claudeRequest.MaxTokens = &defaultMaxTokens
+	}
+	if baseModel, effort, ok := reasoning.ParseClaudeEffortSuffix(req.Model); ok &&
+		(strings.HasPrefix(baseModel, "claude-opus-4-6") ||
+			reasoning.IsClaudeAdaptiveThinkingOnlyModel(baseModel)) {
+		claudeRequest.Model = baseModel
+		claudeRequest.Thinking = &dto.Thinking{Type: "adaptive"}
+		claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effort))
+		if reasoning.IsClaudeSamplingRestrictedModel(baseModel) {
+			claudeRequest.Thinking.Display = "summarized"
+		}
+	} else if model_setting.GetClaudeSettings().ThinkingAdapterEnabled &&
+		strings.HasSuffix(req.Model, "-thinking") {
+		baseModel := strings.TrimSuffix(req.Model, "-thinking")
+		if reasoning.IsClaudeAdaptiveThinkingOnlyModel(baseModel) {
+			claudeRequest.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
+			claudeRequest.OutputConfig = json.RawMessage(`{"effort":"high"}`)
+		} else {
+			if *claudeRequest.MaxTokens < 1280 {
+				claudeRequest.MaxTokens = common.GetPointer(uint(1280))
+			}
+			claudeRequest.Thinking = &dto.Thinking{
+				Type:         "enabled",
+				BudgetTokens: common.GetPointer(model_setting.GetClaudeSettings().GetThinkingBudgetTokens(*claudeRequest.MaxTokens)),
+			}
+			claudeRequest.Temperature = common.GetPointer(1.0)
+			claudeRequest.TopP = nil
+		}
+		if !model_setting.ShouldPreserveThinkingSuffix(req.Model) {
+			claudeRequest.Model = baseModel
+		}
 	}
 
 	functions, err := RequestFunctionDeclarations(req.Tools)
@@ -62,6 +95,11 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 		claudeRequest.ToolChoice = sharedclaude.MapOpenAIToolChoice(toolChoice, ParallelToolCalls(req.ParallelToolCalls))
 	}
 	applyResponsesReasoningToClaude(req, claudeRequest)
+	if reasoning.IsClaudeSamplingRestrictedModel(claudeRequest.Model) {
+		claudeRequest.Temperature = nil
+		claudeRequest.TopP = nil
+		claudeRequest.TopK = nil
+	}
 
 	systemMessages := make([]dto.ClaudeMediaMessage, 0)
 	if RawJSONPresent(req.Instructions) {
@@ -156,6 +194,18 @@ func responsesFunctionParametersToClaudeInputSchema(parameters any) map[string]i
 
 func applyResponsesReasoningToClaude(req *dto.OpenAIResponsesRequest, claudeRequest *dto.ClaudeRequest) {
 	effort := ReasoningEffort(req)
+	if reasoning.IsClaudeAdaptiveThinkingOnlyModel(claudeRequest.Model) {
+		if effort == "none" && !reasoning.IsClaudeAlwaysThinkingModel(claudeRequest.Model) {
+			claudeRequest.Thinking = &dto.Thinking{Type: "disabled"}
+			claudeRequest.OutputConfig = nil
+			return
+		}
+		if reasoning.IsClaudeEffortLevel(effort) {
+			claudeRequest.Thinking = &dto.Thinking{Type: "adaptive", Display: "summarized"}
+			claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effort))
+			return
+		}
+	}
 	switch effort {
 	case "low":
 		claudeRequest.Thinking = &dto.Thinking{

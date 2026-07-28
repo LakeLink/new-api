@@ -10,10 +10,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/reasonmap"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -39,11 +41,20 @@ func getAwsErrorStatusCode(err error) int {
 	return http.StatusInternalServerError
 }
 
-func newAwsInvokeContext() (context.Context, context.CancelFunc) {
-	if common.RelayTimeout <= 0 {
-		return context.Background(), func() {}
+func newAwsInvokeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
 	}
-	return context.WithTimeout(context.Background(), time.Duration(common.RelayTimeout)*time.Second)
+	if common.RelayTimeout == 0 {
+		return context.WithCancel(parent)
+	}
+	timeout := common.SafeIntervalDuration(
+		common.RelayTimeout,
+		time.Second,
+		60*time.Second,
+		"AWS relay request timeout",
+	)
+	return context.WithTimeout(parent, timeout)
 }
 
 func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.Client, error) {
@@ -115,25 +126,37 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 	}
 
 	if isNovaModel(awsModelId) {
+		if !isNovaTextModel(awsModelId) {
+			return nil, types.NewError(
+				fmt.Errorf("AWS Nova model %q is not supported by the chat adapter", awsModelId),
+				types.ErrorCodeInvalidRequest,
+			)
+		}
 		var novaReq *NovaRequest
 		err = common.DecodeJson(requestBody, &novaReq)
 		if err != nil {
 			return nil, types.NewError(errors.Wrap(err, "decode nova request fail"), types.ErrorCodeBadRequestBody)
 		}
 
-		// 使用InvokeModel API，但使用Nova格式的请求体
-		awsReq := &bedrockruntime.InvokeModelInput{
-			ModelId:     aws.String(awsModelId),
-			Accept:      aws.String("application/json"),
-			ContentType: aws.String("application/json"),
-		}
-
 		reqBody, err := common.Marshal(novaReq)
 		if err != nil {
 			return nil, types.NewError(errors.Wrap(err, "marshal nova request"), types.ErrorCodeBadResponseBody)
 		}
-		awsReq.Body = reqBody
-		a.AwsReq = awsReq
+		if info.IsStream {
+			a.AwsReq = &bedrockruntime.InvokeModelWithResponseStreamInput{
+				ModelId:     aws.String(awsModelId),
+				Accept:      aws.String("application/json"),
+				ContentType: aws.String("application/json"),
+				Body:        reqBody,
+			}
+		} else {
+			a.AwsReq = &bedrockruntime.InvokeModelInput{
+				ModelId:     aws.String(awsModelId),
+				Accept:      aws.String("application/json"),
+				ContentType: aws.String("application/json"),
+				Body:        reqBody,
+			}
+		}
 		return nil, nil
 	} else {
 		awsClaudeReq, err := formatRequest(requestBody, requestHeader)
@@ -222,7 +245,7 @@ func getAwsModelID(requestModel string) string {
 
 func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
 
-	ctx, cancel := newAwsInvokeContext()
+	ctx, cancel := newAwsInvokeContext(info.GetRelayContext(c.Request.Context()))
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModel(ctx, a.AwsReq.(*bedrockruntime.InvokeModelInput))
@@ -252,7 +275,7 @@ func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types
 }
 
 func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
-	ctx, cancel := newAwsInvokeContext()
+	ctx, cancel := newAwsInvokeContext(info.GetRelayContext(c.Request.Context()))
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModelWithResponseStream(ctx, a.AwsReq.(*bedrockruntime.InvokeModelWithResponseStreamInput))
@@ -280,10 +303,10 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 				return respErr, nil
 			}
 		case *bedrockruntimeTypes.UnknownUnionMember:
-			fmt.Println("unknown tag:", v.Tag)
+			logger.LogWarn(c, fmt.Sprintf("AWS response stream returned unknown event tag %q", v.Tag))
 			return types.NewError(errors.New("unknown response type"), types.ErrorCodeInvalidRequest), nil
 		default:
-			fmt.Println("union is nil or unknown type")
+			logger.LogWarn(c, "AWS response stream returned a nil or unknown event type")
 			return types.NewError(errors.New("nil or unknown response type"), types.ErrorCodeInvalidRequest), nil
 		}
 	}
@@ -292,10 +315,54 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 	return nil, claudeInfo.Usage
 }
 
-// Nova模型处理函数
-func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
+func novaStopReasonToOpenAI(stopReason string) string {
+	if strings.EqualFold(stopReason, "content_filtered") {
+		return "content_filter"
+	}
+	if stopReason == "" {
+		return "stop"
+	}
+	return reasonmap.ClaudeStopReasonToOpenAIFinishReason(stopReason)
+}
 
-	ctx, cancel := newAwsInvokeContext()
+func novaUsageToOpenAI(usage NovaUsage) dto.Usage {
+	totalTokens := usage.TotalTokens
+	if totalTokens == 0 && (usage.InputTokens != 0 || usage.OutputTokens != 0) {
+		totalTokens = usage.InputTokens + usage.OutputTokens
+	}
+	return dto.Usage{
+		PromptTokens:     usage.InputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      totalTokens,
+	}
+}
+
+func novaResponseToOpenAI(responseID string, created int64, model string, novaResp NovaResponse) dto.OpenAITextResponse {
+	var content strings.Builder
+	for _, block := range novaResp.Output.Message.Content {
+		content.WriteString(block.Text)
+	}
+	return dto.OpenAITextResponse{
+		Id:      responseID,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   model,
+		Choices: []dto.OpenAITextResponseChoice{{
+			Index: 0,
+			Message: dto.Message{
+				Role:    "assistant",
+				Content: content.String(),
+			},
+			FinishReason: novaStopReasonToOpenAI(novaResp.StopReason),
+		}},
+		Usage: novaUsageToOpenAI(novaResp.Usage),
+	}
+}
+
+// handleNovaRequest converts the documented Nova Invoke response into the
+// OpenAI chat-completions contract.
+func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
+	ctx, cancel := newAwsInvokeContext(info.GetRelayContext(c.Request.Context()))
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModel(ctx, a.AwsReq.(*bedrockruntime.InvokeModelInput))
@@ -304,47 +371,126 @@ func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) 
 		return types.NewOpenAIError(errors.Wrap(err, "InvokeModel"), types.ErrorCodeAwsInvokeError, statusCode), nil
 	}
 
-	// 解析Nova响应
-	var novaResp struct {
-		Output struct {
-			Message struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"message"`
-		} `json:"output"`
-		Usage struct {
-			InputTokens  int `json:"inputTokens"`
-			OutputTokens int `json:"outputTokens"`
-			TotalTokens  int `json:"totalTokens"`
-		} `json:"usage"`
-	}
-
+	var novaResp NovaResponse
 	if err := common.Unmarshal(awsResp.Body, &novaResp); err != nil {
 		return types.NewError(errors.Wrap(err, "unmarshal nova response"), types.ErrorCodeBadResponseBody), nil
 	}
 
-	// 构造OpenAI格式响应
-	response := dto.OpenAITextResponse{
-		Id:      helper.GetResponseID(c),
-		Object:  "chat.completion",
-		Created: common.GetTimestamp(),
-		Model:   info.UpstreamModelName,
-		Choices: []dto.OpenAITextResponseChoice{{
-			Index: 0,
-			Message: dto.Message{
-				Role:    "assistant",
-				Content: novaResp.Output.Message.Content[0].Text,
-			},
-			FinishReason: "stop",
-		}},
-		Usage: dto.Usage{
-			PromptTokens:     novaResp.Usage.InputTokens,
-			CompletionTokens: novaResp.Usage.OutputTokens,
-			TotalTokens:      novaResp.Usage.TotalTokens,
-		},
-	}
-
+	response := novaResponseToOpenAI(
+		helper.GetResponseID(c),
+		common.GetTimestamp(),
+		info.UpstreamModelName,
+		novaResp,
+	)
 	c.JSON(http.StatusOK, response)
 	return nil, &response.Usage
+}
+
+// handleNovaStreamRequest converts Nova's documented event stream
+// (contentBlockDelta, messageStop, and metadata) into OpenAI SSE chunks.
+func handleNovaStreamRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
+	ctx, cancel := newAwsInvokeContext(info.GetRelayContext(c.Request.Context()))
+	defer cancel()
+
+	awsResp, err := a.AwsClient.InvokeModelWithResponseStream(
+		ctx,
+		a.AwsReq.(*bedrockruntime.InvokeModelWithResponseStreamInput),
+	)
+	if err != nil {
+		statusCode := getAwsErrorStatusCode(err)
+		return types.NewOpenAIError(errors.Wrap(err, "InvokeModelWithResponseStream"), types.ErrorCodeAwsInvokeError, statusCode), nil
+	}
+
+	stream := awsResp.GetStream()
+	defer stream.Close()
+
+	responseID := helper.GetResponseID(c)
+	created := common.GetTimestamp()
+	usage := &dto.Usage{}
+	var responseText strings.Builder
+	finishReason := "stop"
+	streamStarted := false
+	sawTerminal := false
+	sawUsageMetadata := false
+
+	startStream := func() error {
+		if streamStarted {
+			return nil
+		}
+		helper.SetEventStreamHeaders(c)
+		if err := helper.ObjectData(c, helper.GenerateStartEmptyResponse(responseID, created, info.UpstreamModelName, nil)); err != nil {
+			return err
+		}
+		streamStarted = true
+		return nil
+	}
+
+	for event := range stream.Events() {
+		switch value := event.(type) {
+		case *bedrockruntimeTypes.ResponseStreamMemberChunk:
+			var novaEvent NovaStreamEvent
+			if err := common.Unmarshal(value.Value.Bytes, &novaEvent); err != nil {
+				return types.NewError(errors.Wrap(err, "unmarshal nova stream event"), types.ErrorCodeBadResponseBody), usage
+			}
+			if novaEvent.ContentBlockDelta != nil && novaEvent.ContentBlockDelta.Delta.Text != "" {
+				if err := startStream(); err != nil {
+					return types.NewError(err, types.ErrorCodeBadResponseBody), usage
+				}
+				info.SetFirstResponseTime()
+				text := novaEvent.ContentBlockDelta.Delta.Text
+				responseText.WriteString(text)
+				chunk := &dto.ChatCompletionsStreamResponse{
+					Id:      responseID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   info.UpstreamModelName,
+					Choices: []dto.ChatCompletionsStreamResponseChoice{{
+						Index: 0,
+						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &text},
+					}},
+				}
+				if err := helper.ObjectData(c, chunk); err != nil {
+					return types.NewError(err, types.ErrorCodeBadResponseBody), usage
+				}
+			}
+			if novaEvent.MessageStop != nil {
+				finishReason = novaStopReasonToOpenAI(novaEvent.MessageStop.StopReason)
+				sawTerminal = true
+			}
+			if novaEvent.Metadata != nil {
+				*usage = novaUsageToOpenAI(novaEvent.Metadata.Usage)
+				sawUsageMetadata = true
+			}
+		case *bedrockruntimeTypes.UnknownUnionMember:
+			return types.NewError(
+				fmt.Errorf("AWS Nova response stream returned unknown event tag %q", value.Tag),
+				types.ErrorCodeBadResponseBody,
+			), usage
+		default:
+			return types.NewError(errors.New("AWS Nova response stream returned an unknown event"), types.ErrorCodeBadResponseBody), usage
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return types.NewOpenAIError(errors.Wrap(err, "read Nova response stream"), types.ErrorCodeAwsInvokeError, getAwsErrorStatusCode(err)), usage
+	}
+	if !sawTerminal {
+		return types.NewError(errors.New("AWS Nova response stream ended before messageStop"), types.ErrorCodeBadResponseBody), usage
+	}
+	if !sawUsageMetadata {
+		estimated := service.ResponseText2Usage(c, responseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+		*usage = *estimated
+	}
+	if err := startStream(); err != nil {
+		return types.NewError(err, types.ErrorCodeBadResponseBody), usage
+	}
+	if err := helper.ObjectData(c, helper.GenerateStopResponse(responseID, created, info.UpstreamModelName, finishReason)); err != nil {
+		return types.NewError(err, types.ErrorCodeBadResponseBody), usage
+	}
+	if info.ShouldIncludeUsage {
+		if err := helper.ObjectData(c, helper.GenerateFinalUsageResponse(responseID, created, info.UpstreamModelName, *usage)); err != nil {
+			return types.NewError(err, types.ErrorCodeBadResponseBody), usage
+		}
+	}
+	helper.Done(c)
+	return nil, usage
 }

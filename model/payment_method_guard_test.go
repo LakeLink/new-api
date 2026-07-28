@@ -139,6 +139,24 @@ func TestUpdatePendingTopUpStatus_RejectsMismatchedPaymentProvider(t *testing.T)
 	}
 }
 
+func TestUpdatePendingTopUpStatus_ReplayedTerminalEventIsIdempotent(t *testing.T) {
+	truncateTables(t)
+	insertUserForPaymentGuardTest(t, 151, 0)
+	insertTopUpForPaymentGuardTest(t, "stripe-expire-replay", 151, PaymentProviderStripe)
+
+	require.NoError(t, UpdatePendingTopUpStatus(
+		"stripe-expire-replay",
+		PaymentProviderStripe,
+		common.TopUpStatusExpired,
+	))
+	require.NoError(t, UpdatePendingTopUpStatus(
+		"stripe-expire-replay",
+		PaymentProviderStripe,
+		common.TopUpStatusExpired,
+	))
+	assert.Equal(t, common.TopUpStatusExpired, getTopUpStatusForPaymentGuardTest(t, "stripe-expire-replay"))
+}
+
 func TestCompleteSubscriptionOrder_RejectsMismatchedPaymentProvider(t *testing.T) {
 	truncateTables(t)
 

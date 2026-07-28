@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -113,10 +115,10 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 	}
 
 	// check auto group
-	autoGroup, exists := ctx.Get("auto_group")
+	autoGroup, exists := common.GetContextKeyType[string](ctx, constant.ContextKeyAutoGroup)
 	if exists {
 		logger.LogDebug(ctx, "final group: %s", autoGroup)
-		relayInfo.UsingGroup = autoGroup.(string)
+		relayInfo.UsingGroup = autoGroup
 	}
 
 	if !exists {
@@ -143,6 +145,13 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 }
 
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (types.PriceData, error) {
+	if meta == nil {
+		return types.PriceData{}, errors.New("token count metadata is required")
+	}
+	if meta.ImageInputTokens < 0 || meta.ImageOutputTokens < 0 ||
+		(meta.MaxTokens >= 0 && meta.ImageOutputTokens > meta.MaxTokens) {
+		return types.PriceData{}, errors.New("image token reservation metadata is invalid")
+	}
 	modelPrice, usePrice := ratio_setting.GetModelPrice(info.OriginModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)
@@ -162,8 +171,11 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	var cacheCreationRatio1h float64
 	var audioRatio float64
 	var audioCompletionRatio float64
+	preConsumeMaxTokens := meta.MaxTokens
 	var freeModel bool
 	regionalProcessingRatio := 1.0
+	anthropicInferenceGeoRatio := 1.0
+	hasParamOverride := info.ChannelMeta != nil && len(info.ChannelMeta.ParamOverride) > 0
 	if !usePrice {
 		var success bool
 		var matchName string
@@ -191,13 +203,14 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		preConsumeCompletionRatio := completionRatio
 		inputMultiplier := 1.0
 		outputMultiplier := 1.0
+		channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 		defaultRatio, usesBuiltInOpenAIPricing := ratio_setting.GetDefaultModelRatioMap()[info.OriginModelName]
 		usesBuiltInOpenAIPricing = usesBuiltInOpenAIPricing && modelRatio == defaultRatio &&
-			common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeOpenAI
+			channelType == constant.ChannelTypeOpenAI
 
 		if usesBuiltInOpenAIPricing {
 			channelOtherSettings, ok := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
-			if ok && channelOtherSettings.AllowServiceTier {
+			if ok && (channelOtherSettings.AllowServiceTier || hasParamOverride) {
 				requestedServiceTier := ""
 				switch request := info.Request.(type) {
 				case *dto.GeneralOpenAIRequest:
@@ -233,10 +246,109 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 			}
 		}
 
-		preConsumedPromptTokens := common.Max(promptTokens, common.PreConsumedQuota)
+		defaultRatio, usesBuiltInGeminiPricing := ratio_setting.GetDefaultModelRatioMap()[info.OriginModelName]
+		usesBuiltInGeminiPricing = usesBuiltInGeminiPricing &&
+			(channelType == constant.ChannelTypeGemini || channelType == constant.ChannelTypeVertexAi) &&
+			modelRatio == defaultRatio && completionRatio == ratio_setting.GetDefaultCompletionRatio(info.OriginModelName) &&
+			cacheRatio == ratio_setting.GetDefaultCacheRatio(info.OriginModelName) &&
+			cacheCreationRatio == ratio_setting.GetDefaultCreateCacheRatio(info.OriginModelName)
+		if usesBuiltInGeminiPricing {
+			if channelType == constant.ChannelTypeGemini {
+				channelOtherSettings, _ := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
+				channelSettings, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+				passesRawBody := model_setting.GetGlobalSettings().PassThroughRequestEnabled ||
+					channelSettings.PassThroughBodyEnabled ||
+					(info.ChannelMeta != nil && info.ChannelSetting.PassThroughBodyEnabled)
+				if channelOtherSettings.AllowServiceTier || passesRawBody || hasParamOverride {
+					requestedServiceTier := ""
+					switch request := info.Request.(type) {
+					case *dto.GeminiChatRequest:
+						if request.ServiceTier != nil {
+							requestedServiceTier = *request.ServiceTier
+						}
+					case *dto.GeneralOpenAIRequest:
+						if len(request.ServiceTier) > 0 {
+							_ = common.Unmarshal(request.ServiceTier, &requestedServiceTier)
+						}
+					case *dto.OpenAIResponsesRequest:
+						requestedServiceTier = request.ServiceTier
+					}
+					if tierPricing, found := ratio_setting.GetGeminiServiceTierPriceRatios(info.OriginModelName, requestedServiceTier); found {
+						preConsumeModelRatio = modelRatio * tierPricing.ModelMultiplier
+					}
+				}
+			}
+
+			if promptTokens > ratio_setting.GeminiLongContextThreshold &&
+				ratio_setting.IsGeminiLongContextModel(info.OriginModelName) {
+				inputMultiplier = 2
+				outputMultiplier = 1.5
+			}
+			if imageOutputRatio, ok := ratio_setting.GetGeminiImageOutputRatio(info.OriginModelName); ok {
+				preConsumeCompletionRatio = imageOutputRatio
+				imageOutputs := 1
+				switch request := info.Request.(type) {
+				case *dto.GeminiChatRequest:
+					if request.GenerationConfig.CandidateCount != nil {
+						imageOutputs = *request.GenerationConfig.CandidateCount
+					}
+				case *dto.GeneralOpenAIRequest:
+					if request.N != nil && *request.N <= dto.MaxChatCompletionsN {
+						imageOutputs = int(*request.N)
+					}
+				}
+				if imageOutputs < 1 {
+					imageOutputs = 1
+				} else if imageOutputs > dto.MaxChatCompletionsN {
+					imageOutputs = dto.MaxChatCompletionsN
+				}
+				if maxImageTokens, found := ratio_setting.GetGeminiMaxImageOutputTokens(info.OriginModelName); found {
+					maxImageTokens *= imageOutputs
+					if preConsumeMaxTokens < maxImageTokens {
+						preConsumeMaxTokens = maxImageTokens
+					}
+				}
+			}
+		}
+
+		defaultRatio, usesBuiltInClaudePricing := ratio_setting.GetDefaultModelRatioMap()[info.OriginModelName]
+		usesBuiltInClaudePricing = usesBuiltInClaudePricing && channelType == constant.ChannelTypeAnthropic &&
+			modelRatio == defaultRatio && completionRatio == ratio_setting.GetDefaultCompletionRatio(info.OriginModelName) &&
+			cacheRatio == ratio_setting.GetDefaultCacheRatio(info.OriginModelName) &&
+			cacheCreationRatio == ratio_setting.GetDefaultCreateCacheRatio(info.OriginModelName)
+		if usesBuiltInClaudePricing {
+			channelOtherSettings, ok := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
+			request, requestOk := info.Request.(*dto.ClaudeRequest)
+			if ok && requestOk {
+				channelSettings, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+				passesRawBody := model_setting.GetGlobalSettings().PassThroughRequestEnabled ||
+					channelSettings.PassThroughBodyEnabled ||
+					(info.ChannelMeta != nil && info.ChannelSetting.PassThroughBodyEnabled)
+				if (channelOtherSettings.AllowSpeed || passesRawBody || hasParamOverride) && len(request.Speed) > 0 {
+					requestedSpeed := ""
+					_ = common.Unmarshal(request.Speed, &requestedSpeed)
+					if strings.EqualFold(requestedSpeed, "fast") {
+						if fastRatios, found := ratio_setting.GetClaudeFastPriceRatios(info.OriginModelName); found {
+							preConsumeModelRatio = fastRatios.ModelRatio
+							preConsumeCompletionRatio = fastRatios.CompletionRatio
+						}
+					}
+				}
+				if (channelOtherSettings.AllowInferenceGeo || passesRawBody || hasParamOverride) && request.InferenceGeo != nil && strings.EqualFold(*request.InferenceGeo, "us") &&
+					ratio_setting.IsClaudeInferenceGeoPricingModel(info.OriginModelName) {
+					anthropicInferenceGeoRatio = 1.1
+				}
+			}
+		}
+
+		preConsumeModelRatio *= xaiPreConsumeMultiplier(c, info, promptTokens, modelRatio, completionRatio, cacheRatio, cacheCreationRatio)
+
+		preConsumedQuotaSetting := common.GetLegacyOptionInt("PreConsumedQuota", &common.PreConsumedQuota)
+		preConsumedPromptTokens := common.Max(promptTokens, preConsumedQuotaSetting)
 		preConsumeUnits := float64(preConsumedPromptTokens)*inputMultiplier +
-			float64(meta.MaxTokens)*preConsumeCompletionRatio*outputMultiplier
-		preConsumeRatio := preConsumeModelRatio * groupRatioInfo.GroupRatio * regionalProcessingRatio
+			float64(meta.ImageInputTokens)*imageRatio*inputMultiplier +
+			float64(preConsumeMaxTokens)*preConsumeCompletionRatio*outputMultiplier
+		preConsumeRatio := preConsumeModelRatio * groupRatioInfo.GroupRatio * regionalProcessingRatio * anthropicInferenceGeoRatio
 		quota, err := common.QuotaFromFloatStrict(preConsumeUnits * preConsumeRatio)
 		if err != nil {
 			return types.PriceData{}, err
@@ -286,22 +398,70 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	if regionalProcessingRatio != 1 {
 		priceData.AddOtherRatio("openai_regional_processing", regionalProcessingRatio)
 	}
+	if anthropicInferenceGeoRatio != 1 {
+		priceData.AddOtherRatio("anthropic_inference_geo", anthropicInferenceGeoRatio)
+	}
 	if usePrice {
 		for name, ratio := range meta.BillingRatios {
 			priceData.AddOtherRatio(name, ratio)
 		}
-		quotaToPreConsume := priceData.ApplyOtherRatiosToFloat(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		quotaToPreConsume := priceData.ApplyOtherRatiosToFloat(modelPrice * common.CurrentQuotaPerUnit() * groupRatioInfo.GroupRatio)
 		quota, err := common.QuotaFromFloatStrict(quotaToPreConsume)
 		if err != nil {
 			return types.PriceData{}, err
 		}
 		priceData.QuotaToPreConsume = quota
 	}
+	if err := applyCohereRerankSearchUnitPreConsume(c, info, &priceData); err != nil {
+		return types.PriceData{}, err
+	}
+	if err := applyPerplexityRequestFeePreConsume(c, info, &priceData); err != nil {
+		return types.PriceData{}, err
+	}
 
 	if common.DebugEnabled {
 		logger.LogDebug(c, "model_price_helper result: %s", priceData.ToSetting())
 	}
 	info.PriceData = priceData
+	return priceData, nil
+}
+
+// RefreshModelPriceForFinalRequest recomputes pricing from the exact outbound
+// request after disabled-field filtering and channel parameter overrides. The
+// original request object must stay intact because a later channel retry starts
+// conversion from it again, but tiered billing must retain the final request
+// snapshot used for the successful attempt.
+func RefreshModelPriceForFinalRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request, promptTokens int, meta *types.TokenCountMeta) (types.PriceData, error) {
+	if info == nil {
+		return types.PriceData{}, fmt.Errorf("relay info is required")
+	}
+	if request == nil {
+		return types.PriceData{}, fmt.Errorf("final request is required")
+	}
+	if meta == nil {
+		return types.PriceData{}, fmt.Errorf("final token metadata is required")
+	}
+
+	requestInput, err := BuildBillingExprRequestInputFromRequest(request, info.RequestHeaders)
+	if err != nil {
+		return types.PriceData{}, fmt.Errorf("build final billing request input: %w", err)
+	}
+
+	originalRequest := info.Request
+	originalInput := info.BillingRequestInput
+	originalSnapshot := info.TieredBillingSnapshot
+	originalPriceData := info.PriceData
+	info.Request = request
+	info.BillingRequestInput = &requestInput
+
+	priceData, err := ModelPriceHelper(c, info, promptTokens, meta)
+	info.Request = originalRequest
+	if err != nil {
+		info.BillingRequestInput = originalInput
+		info.TieredBillingSnapshot = originalSnapshot
+		info.PriceData = originalPriceData
+		return types.PriceData{}, err
+	}
 	return priceData, nil
 }
 
@@ -337,7 +497,7 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 
 	if usePrice {
 		var err error
-		quota, err = common.QuotaFromFloatStrict(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		quota, err = common.QuotaFromFloatStrict(modelPrice * common.CurrentQuotaPerUnit() * groupRatioInfo.GroupRatio)
 		if err != nil {
 			return types.PriceData{}, err
 		}
@@ -350,7 +510,7 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 	} else {
 		// 按量计费：以模型倍率的一半作为预扣额度
 		var err error
-		quota, err = common.QuotaFromFloatStrict(modelRatio / 2 * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
+		quota, err = common.QuotaFromFloatStrict(modelRatio / 2 * common.CurrentQuotaPerUnit() * groupRatioInfo.GroupRatio)
 		if err != nil {
 			return types.PriceData{}, err
 		}
@@ -398,23 +558,39 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptT
 	if estimatedCompletionTokens == 0 && groupRatioInfo.GroupRatio != 0 {
 		estimatedCompletionTokens = defaultTieredPreConsumeMaxTokens
 	}
+	if meta.ImageInputTokens < 0 || meta.ImageOutputTokens < 0 ||
+		meta.ImageOutputTokens > estimatedCompletionTokens {
+		return types.PriceData{}, errors.New("image token reservation metadata is invalid")
+	}
 
 	requestInput, err := ResolveIncomingBillingExprRequestInput(c, info)
 	if err != nil {
 		return types.PriceData{}, err
 	}
 
-	rawCost, trace, err := billingexpr.RunExprWithRequest(exprStr, billingexpr.TokenParams{
+	usedVars := billingexpr.UsedVars(exprStr)
+	tokenParams := billingexpr.TokenParams{
 		P:   float64(promptTokens),
 		C:   float64(estimatedCompletionTokens),
-		Len: float64(promptTokens),
-	}, requestInput)
+		Len: float64(promptTokens + meta.ImageInputTokens),
+	}
+	if usedVars["img"] {
+		tokenParams.Img = float64(meta.ImageInputTokens)
+	} else {
+		tokenParams.P += float64(meta.ImageInputTokens)
+	}
+	if usedVars["img_o"] {
+		tokenParams.C -= float64(meta.ImageOutputTokens)
+		tokenParams.ImgO = float64(meta.ImageOutputTokens)
+	}
+
+	rawCost, trace, err := billingexpr.RunExprWithRequest(exprStr, tokenParams, requestInput)
 	if err != nil {
 		return types.PriceData{}, fmt.Errorf("model %s tiered expr run failed: %w", info.OriginModelName, err)
 	}
 
 	// Expression coefficients are $/1M tokens prices; convert to quota the same way per-call billing does.
-	quotaBeforeGroup := rawCost / 1_000_000 * common.QuotaPerUnit
+	quotaBeforeGroup := rawCost / 1_000_000 * common.CurrentQuotaPerUnit()
 	preConsumedQuota, err := billingexpr.QuotaRoundStrict(quotaBeforeGroup * groupRatioInfo.GroupRatio)
 	if err != nil {
 		return types.PriceData{}, err
@@ -435,12 +611,12 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptT
 		ExprString:                exprStr,
 		ExprHash:                  exprHash,
 		GroupRatio:                groupRatioInfo.GroupRatio,
-		EstimatedPromptTokens:     promptTokens,
+		EstimatedPromptTokens:     promptTokens + meta.ImageInputTokens,
 		EstimatedCompletionTokens: estimatedCompletionTokens,
 		EstimatedQuotaBeforeGroup: quotaBeforeGroup,
 		EstimatedQuotaAfterGroup:  preConsumedQuota,
 		EstimatedTier:             trace.MatchedTier,
-		QuotaPerUnit:              common.QuotaPerUnit,
+		QuotaPerUnit:              common.CurrentQuotaPerUnit(),
 		ExprVersion:               billingexpr.ExprVersion(exprStr),
 	}
 	info.TieredBillingSnapshot = snapshot

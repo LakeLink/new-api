@@ -1,7 +1,16 @@
 package model_setting
 
 import (
+	"fmt"
+	"math"
+
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
+)
+
+const (
+	minimumGeminiThinkingBudgetRatio = 0.002
+	defaultGeminiThinkingBudgetRatio = 0.6
 )
 
 // GeminiSettings defines Gemini model configuration. 注意bool要以enabled结尾才可以生效编辑
@@ -25,20 +34,31 @@ var defaultGeminiSettings = GeminiSettings{
 		"gemini-1.0-pro": "v1",
 	},
 	SupportedImagineModels: []string{
-		"gemini-2.0-flash-exp-image-generation",
-		"gemini-2.0-flash-exp",
-		"gemini-3-pro-image-preview",
 		"gemini-2.5-flash-image",
-		"gemini-3.1-flash-image-preview",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-flash-lite-image",
+		"gemini-3-pro-image",
 	},
 	ThinkingAdapterEnabled:                false,
-	ThinkingAdapterBudgetTokensPercentage: 0.6,
+	ThinkingAdapterBudgetTokensPercentage: defaultGeminiThinkingBudgetRatio,
 	FunctionCallThoughtSignatureEnabled:   true,
 	RemoveFunctionResponseIdEnabled:       true,
 }
 
 // 全局实例
 var geminiSettings = defaultGeminiSettings
+
+func (s GeminiSettings) Validate() error {
+	percentage := s.ThinkingAdapterBudgetTokensPercentage
+	if math.IsNaN(percentage) || math.IsInf(percentage, 0) ||
+		percentage < minimumGeminiThinkingBudgetRatio || percentage > 1 {
+		return fmt.Errorf(
+			"Gemini thinking budget percentage must be finite and in the range [%g, 1]",
+			minimumGeminiThinkingBudgetRatio,
+		)
+	}
+	return nil
+}
 
 func init() {
 	// 注册到全局配置管理器
@@ -47,30 +67,44 @@ func init() {
 
 // GetGeminiSettings 获取Gemini配置
 func GetGeminiSettings() *GeminiSettings {
-	return &geminiSettings
+	return config.Snapshot[GeminiSettings]("gemini")
 }
 
 // GetGeminiSafetySetting 获取安全设置
 func GetGeminiSafetySetting(key string) string {
-	if value, ok := geminiSettings.SafetySettings[key]; ok {
+	settings := GetGeminiSettings()
+	if value, ok := settings.SafetySettings[key]; ok {
 		return value
 	}
-	return geminiSettings.SafetySettings["default"]
+	return settings.SafetySettings["default"]
 }
 
 // GetGeminiVersionSetting 获取版本设置
 func GetGeminiVersionSetting(key string) string {
-	if value, ok := geminiSettings.VersionSettings[key]; ok {
+	settings := GetGeminiSettings()
+	if value, ok := settings.VersionSettings[key]; ok {
 		return value
 	}
-	return geminiSettings.VersionSettings["default"]
+	return settings.VersionSettings["default"]
 }
 
 func IsGeminiModelSupportImagine(model string) bool {
-	for _, v := range geminiSettings.SupportedImagineModels {
+	for _, v := range GetGeminiSettings().SupportedImagineModels {
 		if v == model {
 			return true
 		}
 	}
 	return false
+}
+
+// GetThinkingBudgetTokens converts the configured ratio without allowing a
+// non-finite or out-of-range administrative value to reach an integer cast.
+// Provider-specific minimum and maximum budgets are applied by the converter.
+func (g *GeminiSettings) GetThinkingBudgetTokens(maxTokens uint) int {
+	percentage := g.ThinkingAdapterBudgetTokensPercentage
+	if math.IsNaN(percentage) || math.IsInf(percentage, 0) ||
+		percentage < minimumGeminiThinkingBudgetRatio || percentage > 1 {
+		percentage = defaultGeminiThinkingBudgetRatio
+	}
+	return common.QuotaFromFloat(float64(maxTokens) * percentage)
 }

@@ -181,6 +181,37 @@ type modelListGroups struct {
 	ownerGroups []string
 }
 
+func writeModelListError(c *gin.Context, modelType int, err error) {
+	common.SysError("failed to load enabled models: " + err.Error())
+	const message = "Failed to load models"
+	switch modelType {
+	case constant.ChannelTypeAnthropic:
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"type": "error",
+			"error": types.ClaudeError{
+				Type:    "api_error",
+				Message: message,
+			},
+		})
+	case constant.ChannelTypeGemini:
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{
+				"code":    http.StatusInternalServerError,
+				"message": message,
+				"status":  "INTERNAL",
+			},
+		})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": types.OpenAIError{
+				Message: message,
+				Type:    "server_error",
+				Code:    "database_error",
+			},
+		})
+	}
+}
+
 func getModelListGroups(c *gin.Context) (modelListGroups, error) {
 	tokenGroup := common.GetContextKeyString(c, constant.ContextKeyTokenGroup)
 	userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
@@ -212,7 +243,7 @@ func getModelListGroups(c *gin.Context) (modelListGroups, error) {
 }
 
 func ListModels(c *gin.Context, modelType int) {
-	acceptUnsetRatioModel := operation_setting.SelfUseModeEnabled
+	acceptUnsetRatioModel := common.GetLegacyOptionBool("SelfUseModeEnabled", &operation_setting.SelfUseModeEnabled)
 	if !acceptUnsetRatioModel {
 		userId := c.GetInt("id")
 		if userId > 0 {
@@ -238,11 +269,13 @@ func ListModels(c *gin.Context, modelType int) {
 			ownerGroups = []string{userGroup}
 		}
 
-		s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-		var tokenModelLimit map[string]bool
-		if ok {
-			tokenModelLimit = s.(map[string]bool)
-		} else {
+		tokenModelLimit, ok := common.GetContextKeyType[map[string]bool](
+			c,
+			constant.ContextKeyTokenModelLimit,
+		)
+		if !ok {
+			// A missing or stale context value must fail closed. The token
+			// middleware is the only trusted producer of this map.
 			tokenModelLimit = map[string]bool{}
 		}
 		for allowModel, _ := range tokenModelLimit {
@@ -267,7 +300,11 @@ func ListModels(c *gin.Context, modelType int) {
 		var models []string
 		if groups.tokenGroup == "auto" {
 			for _, autoGroup := range ownerGroups {
-				groupModels := model.GetGroupEnabledModels(autoGroup)
+				groupModels, err := model.GetGroupEnabledModels(autoGroup)
+				if err != nil {
+					writeModelListError(c, modelType, err)
+					return
+				}
 				for _, g := range groupModels {
 					if !common.StringsContains(models, g) {
 						models = append(models, g)
@@ -275,7 +312,11 @@ func ListModels(c *gin.Context, modelType int) {
 				}
 			}
 		} else {
-			models = model.GetGroupEnabledModels(ownerGroups[0])
+			models, err = model.GetGroupEnabledModels(ownerGroups[0])
+			if err != nil {
+				writeModelListError(c, modelType, err)
+				return
+			}
 		}
 		for _, modelName := range models {
 			if !acceptUnsetRatioModel {
@@ -352,9 +393,14 @@ func DashboardListModels(c *gin.Context) {
 }
 
 func EnabledListModels(c *gin.Context) {
+	models, err := model.GetEnabledModels()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data":    model.GetEnabledModels(),
+		"data":    models,
 	})
 }
 

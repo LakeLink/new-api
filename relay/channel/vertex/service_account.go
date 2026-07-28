@@ -1,15 +1,17 @@
 package vertex
 
 import (
+	"bytes"
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 
@@ -46,7 +48,15 @@ func getAccessToken(a *Adaptor, info *relaycommon.RelayInfo) (string, error) {
 	}
 	val, err := Cache.Get(cacheKey)
 	if err == nil {
-		return val.(string), nil
+		if token, ok := val.(string); ok && strings.TrimSpace(token) != "" {
+			return token, nil
+		}
+		// Cache is exported for channel lifecycle management, so tolerate a
+		// stale entry from an older process/version instead of panicking or
+		// returning an empty bearer token.
+		Cache.DeleteIf(func(key string) bool {
+			return key == cacheKey
+		})
 	}
 
 	signedJWT, err := createSignedJWT(a.AccountCredentials.ClientEmail, a.AccountCredentials.PrivateKey)
@@ -122,33 +132,52 @@ func exchangeJwtForAccessToken(signedJWT string, info *relaycommon.RelayInfo) (s
 		client = service.GetHttpClient()
 	}
 
-	resp, err := client.PostForm(authURL, data)
+	ctx, cancel := context.WithTimeout(info.GetRelayContext(nil), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		authURL,
+		bytes.NewBufferString(data.Encode()),
+	)
+	if err != nil {
+		return "", service.SanitizeNetworkError(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("failed to get access token: status %d", resp.StatusCode)
+	}
 
+	body, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
+	if err != nil {
+		return "", err
+	}
 	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := common.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 
-	if accessToken, ok := result["access_token"].(string); ok {
+	if accessToken, ok := result["access_token"].(string); ok && strings.TrimSpace(accessToken) != "" {
 		return accessToken, nil
 	}
 
-	return "", fmt.Errorf("failed to get access token: %v", result)
+	return "", errors.New("failed to get access token: response missing access_token")
 }
 
-func AcquireAccessToken(creds Credentials, proxy string) (string, error) {
+func AcquireAccessToken(ctx context.Context, creds Credentials, proxy string) (string, error) {
 	signedJWT, err := createSignedJWT(creds.ClientEmail, creds.PrivateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create signed JWT: %w", err)
 	}
-	return exchangeJwtForAccessTokenWithProxy(signedJWT, proxy)
+	return exchangeJwtForAccessTokenWithProxy(ctx, signedJWT, proxy)
 }
 
-func exchangeJwtForAccessTokenWithProxy(signedJWT string, proxy string) (string, error) {
+func exchangeJwtForAccessTokenWithProxy(parentCtx context.Context, signedJWT string, proxy string) (string, error) {
 	authURL := "https://www.googleapis.com/oauth2/v4/token"
 	data := url.Values{}
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -165,19 +194,41 @@ func exchangeJwtForAccessTokenWithProxy(signedJWT string, proxy string) (string,
 		client = service.GetHttpClient()
 	}
 
-	resp, err := client.PostForm(authURL, data)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		authURL,
+		bytes.NewBufferString(data.Encode()),
+	)
+	if err != nil {
+		return "", service.SanitizeNetworkError(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("failed to get access token: status %d", resp.StatusCode)
+	}
 
+	body, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
+	if err != nil {
+		return "", err
+	}
 	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := common.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 
-	if accessToken, ok := result["access_token"].(string); ok {
+	if accessToken, ok := result["access_token"].(string); ok && strings.TrimSpace(accessToken) != "" {
 		return accessToken, nil
 	}
-	return "", fmt.Errorf("failed to get access token: %v", result)
+	return "", errors.New("failed to get access token: response missing access_token")
 }

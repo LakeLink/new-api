@@ -125,6 +125,84 @@ func TestQuotaFromDecimalChecked(t *testing.T) {
 	}
 }
 
+func TestQuotaConversionsAcceptExactInt32Bounds(t *testing.T) {
+	tests := []struct {
+		name     string
+		boundary int
+	}{
+		{name: "minimum", boundary: MinQuota},
+		{name: "maximum", boundary: MaxQuota},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			boundary := test.boundary
+			quota, clamp := QuotaFromFloatChecked(float64(boundary))
+			assert.Equal(t, boundary, quota)
+			assert.Nil(t, clamp)
+
+			quota, err := QuotaFromFloatStrict(float64(boundary))
+			require.NoError(t, err)
+			assert.Equal(t, boundary, quota)
+
+			quota, clamp = QuotaRoundChecked(float64(boundary))
+			assert.Equal(t, boundary, quota)
+			assert.Nil(t, clamp)
+
+			quota, err = QuotaRoundStrict(float64(boundary))
+			require.NoError(t, err)
+			assert.Equal(t, boundary, quota)
+
+			quota, clamp = QuotaFromDecimalChecked(decimal.NewFromInt(int64(boundary)))
+			assert.Equal(t, boundary, quota)
+			assert.Nil(t, clamp)
+		})
+	}
+}
+
+func TestQuotaClampAuditMapUsesJSONSafeNonFiniteValues(t *testing.T) {
+	tests := []struct {
+		name         string
+		original     float64
+		wantOriginal interface{}
+	}{
+		{name: "finite remains numeric", original: float64(MaxQuota) + 1, wantOriginal: float64(MaxQuota) + 1},
+		{name: "nan", original: math.NaN(), wantOriginal: "NaN"},
+		{name: "positive infinity", original: math.Inf(1), wantOriginal: "+Inf"},
+		{name: "negative infinity", original: math.Inf(-1), wantOriginal: "-Inf"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clamp := &QuotaClamp{
+				Op:       "QuotaFromFloat",
+				Kind:     QuotaClampOverflow,
+				Original: test.original,
+				Clamped:  MaxQuota,
+			}
+
+			audit := clamp.AuditMap()
+			assert.Equal(t, test.wantOriginal, audit["original"])
+
+			payload := map[string]interface{}{
+				"admin_info": map[string]interface{}{
+					"quota_saturation": audit,
+				},
+			}
+			encoded, err := Marshal(payload)
+			require.NoError(t, err)
+
+			var decoded map[string]interface{}
+			require.NoError(t, Unmarshal(encoded, &decoded))
+			adminInfo, ok := decoded["admin_info"].(map[string]interface{})
+			require.True(t, ok)
+			saturation, ok := adminInfo["quota_saturation"].(map[string]interface{})
+			require.True(t, ok)
+			assert.Equal(t, test.wantOriginal, saturation["original"])
+		})
+	}
+}
+
 func TestGetTrustQuotaSaturatesConfiguredMultiplier(t *testing.T) {
 	original := QuotaPerUnit
 	t.Cleanup(func() { QuotaPerUnit = original })

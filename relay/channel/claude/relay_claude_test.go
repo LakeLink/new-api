@@ -138,6 +138,25 @@ func TestFormatClaudeResponseInfo_MessageDelta_FullUsage(t *testing.T) {
 	}
 }
 
+func TestFormatClaudeResponseInfoMessageDeltaPreservesServerToolUsage(t *testing.T) {
+	claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{PromptTokens: 100}}
+	claudeResponse := &dto.ClaudeResponse{
+		Type: "message_delta",
+		Usage: &dto.ClaudeUsage{
+			OutputTokens: 20,
+			ServerToolUse: &dto.ClaudeServerToolUse{
+				WebSearchRequests: 2,
+			},
+		},
+	}
+
+	require.True(t, FormatClaudeResponseInfo(claudeResponse, nil, claudeInfo))
+	require.NotNil(t, claudeInfo.Usage.BillingUsage)
+	require.NotNil(t, claudeInfo.Usage.BillingUsage.ClaudeUsage)
+	require.NotNil(t, claudeInfo.Usage.BillingUsage.ClaudeUsage.ServerToolUse)
+	assert.Equal(t, 2, claudeInfo.Usage.BillingUsage.ClaudeUsage.ServerToolUse.WebSearchRequests)
+}
+
 func TestFormatClaudeResponseInfo_MessageDelta_OnlyOutputTokens(t *testing.T) {
 	// 模拟 Bedrock: message_start 已积累 usage
 	claudeInfo := &ClaudeResponseInfo{

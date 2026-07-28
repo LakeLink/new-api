@@ -129,6 +129,47 @@ func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	require.Equal(t, common.QuotaPerUnit, info.TieredBillingSnapshot.QuotaPerUnit)
 }
 
+func TestModelPriceHelperTieredReservesImageInputAndOutputDimensions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+	})
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":    `{"tiered-image-model":"tiered_expr"}`,
+		"billing_setting.billing_expr":    `{"tiered-image-model":"p * 5 + img * 8 + c * 10 + img_o * 32"}`,
+		"group_ratio_setting.group_ratio": `{"default":1}`,
+	}))
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil)
+	ctx.Set("group", "default")
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "tiered-image-model",
+		UserGroup:       "default",
+		UsingGroup:      "default",
+		BillingRequestInput: &billingexpr.RequestInput{
+			Body: []byte(`{}`),
+		},
+	}
+
+	priceData, err := ModelPriceHelper(ctx, info, 100, &types.TokenCountMeta{
+		MaxTokens:         272,
+		ImageInputTokens:  581,
+		ImageOutputTokens: 272,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 6926, priceData.QuotaToPreConsume)
+	require.Equal(t, 681, info.TieredBillingSnapshot.EstimatedPromptTokens)
+}
+
 func TestHandleGroupRatio_UsesFallbackGroupForTargetPricingMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -154,6 +195,24 @@ func TestHandleGroupRatio_UsesFallbackGroupForTargetPricingMode(t *testing.T) {
 
 	HandleGroupRatio(ctx, info)
 	require.Equal(t, "emergency", info.UsingGroup)
+}
+
+func TestHandleGroupRatioIgnoresStaleAutoGroupContextType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(ctx, constant.ContextKeyAutoGroup, 123)
+
+	info := &relaycommon.RelayInfo{
+		UsingGroup: "default",
+		UserGroup:  "default",
+	}
+
+	require.NotPanics(t, func() {
+		HandleGroupRatio(ctx, info)
+	})
+	require.Equal(t, "default", info.UsingGroup)
 }
 
 func TestHandleGroupRatio_UsesFallbackSourceGroupAfterPreviousTargetMutation(t *testing.T) {
@@ -364,14 +423,6 @@ func TestHandleGroupRatio_FallbackTargetPricingRatioModes(t *testing.T) {
 			wantRatio:       fallbackRatioTestSourceSpec,
 			wantSpecial:     true,
 			wantSpecialVal:  fallbackRatioTestSourceSpec,
-		},
-		{
-			name:            "unknown mode keeps default target_special behavior",
-			mode:            "unknown",
-			groupGroupRatio: bothSpecialRatios,
-			wantRatio:       fallbackRatioTestTargetSpec,
-			wantSpecial:     true,
-			wantSpecialVal:  fallbackRatioTestTargetSpec,
 		},
 	}
 
@@ -614,6 +665,7 @@ func TestModelPriceHelperPreConsumesOpenAIDynamicRates(t *testing.T) {
 	savedCompletionRatios := ratio_setting.CompletionRatio2JSONString()
 	savedCacheRatios := ratio_setting.CacheRatio2JSONString()
 	savedCreateCacheRatios := ratio_setting.CreateCacheRatio2JSONString()
+	savedImageRatios := ratio_setting.ImageRatio2JSONString()
 	savedGroupRatios := ratio_setting.GroupRatio2JSONString()
 	t.Cleanup(func() {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedModelPrices))
@@ -621,11 +673,35 @@ func TestModelPriceHelperPreConsumesOpenAIDynamicRates(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(savedCompletionRatios))
 		require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(savedCacheRatios))
 		require.NoError(t, ratio_setting.UpdateCreateCacheRatioByJSONString(savedCreateCacheRatios))
+		require.NoError(t, ratio_setting.UpdateImageRatioByJSONString(savedImageRatios))
 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(savedGroupRatios))
 	})
 
 	ratio_setting.InitRatioSettings()
 	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+
+	t.Run("image edits reserve input image tokens at the image modality rate", func(t *testing.T) {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Set("group", "default")
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-image-1.5",
+			UserGroup:       "default",
+			UsingGroup:      "default",
+		}
+		request := &dto.ImageRequest{
+			Model:           "gpt-image-1.5",
+			Prompt:          "edit",
+			Quality:         "low",
+			Size:            "1024x1024",
+			InputImageCount: 1,
+		}
+
+		priceData, err := ModelPriceHelper(ctx, info, 1000, request.GetTokenCountMeta())
+
+		require.NoError(t, err)
+		// (1000 text + 581 image*1.6 + 272 output*6.4) * 2.5.
+		require.Equal(t, 9176, priceData.QuotaToPreConsume)
+	})
 
 	t.Run("requested priority and regional processing reserve the full rate", func(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

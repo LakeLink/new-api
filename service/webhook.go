@@ -61,7 +61,7 @@ func SendWebhookNotify(webhookURL string, secret string, data dto.Notify) error 
 		// 构建worker请求数据
 		workerReq := &WorkerRequest{
 			URL:    webhookURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    system_setting.GetWorkerSetting().ValidKey,
 			Method: http.MethodPost,
 			Headers: map[string]string{
 				"Content-Type": "application/json",
@@ -94,7 +94,7 @@ func SendWebhookNotify(webhookURL string, secret string, data dto.Notify) error 
 
 		req, err = http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(payloadBytes))
 		if err != nil {
-			return fmt.Errorf("failed to create webhook request: %v", err)
+			return fmt.Errorf("failed to create webhook request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 
 		// 设置请求头
@@ -108,9 +108,9 @@ func SendWebhookNotify(webhookURL string, secret string, data dto.Notify) error 
 
 		// 发送请求
 		client := GetSSRFProtectedHTTPClient()
-		resp, err = client.Do(req)
+		resp, err = DoUpstreamRequest(client, req)
 		if err != nil {
-			return fmt.Errorf("failed to send webhook request: %v", err)
+			return fmt.Errorf("failed to send webhook request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 		defer resp.Body.Close()
 

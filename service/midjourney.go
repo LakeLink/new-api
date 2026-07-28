@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -192,16 +191,16 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 		if err != nil {
 			return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "read_request_body_failed", http.StatusInternalServerError), nullBytes, err
 		}
-		if !setting.MjAccountFilterEnabled {
+		if !setting.IsMjAccountFilterEnabled() {
 			delete(mapResult, "accountFilter")
 		}
-		if !setting.MjNotifyEnabled {
+		if !setting.IsMjNotifyEnabled() {
 			delete(mapResult, "notifyHook")
 		}
 		//req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
 		// make new request with mapResult
 	}
-	if setting.MjModeClearEnabled {
+	if setting.IsMjModeClearEnabled() {
 		if prompt, ok := mapResult["prompt"].(string); ok {
 			prompt = strings.Replace(prompt, "--fast", "", -1)
 			prompt = strings.Replace(prompt, "--relax", "", -1)
@@ -214,13 +213,12 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	if err != nil {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "marshal_request_body_failed", http.StatusInternalServerError), nullBytes, err
 	}
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, strings.NewReader(string(reqBody)))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, c.Request.Method, fullRequestURL, strings.NewReader(string(reqBody)))
 	if err != nil {
-		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "create_request_failed", http.StatusInternalServerError), nullBytes, err
+		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "create_request_failed", http.StatusInternalServerError), nullBytes, SanitizeNetworkError(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	// 使用带有超时的 context 创建新的请求
-	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	req.Header.Set("Accept", c.Request.Header.Get("Accept"))
 	auth := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
@@ -228,12 +226,13 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 		auth = strings.TrimPrefix(auth, "Bearer ")
 		req.Header.Set("mj-api-secret", auth)
 	}
-	defer cancel()
-	resp, err := GetHttpClient().Do(req)
+	resp, err := DoUpstreamRequest(GetHttpClient(), req)
 	if err != nil {
 		common.SysLog("do request failed: " + err.Error())
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "do_request_failed", http.StatusInternalServerError), nullBytes, err
 	}
+	defer CloseResponseBodyGracefully(resp)
+
 	statusCode := resp.StatusCode
 	//if statusCode != 200  {
 	//	return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "bad_response_status_code", statusCode), nullBytes, nil
@@ -248,17 +247,16 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	}
 	var midjResponse dto.MidjourneyResponse
 	var midjourneyUploadsResponse dto.MidjourneyUploadResponse
-	maxMB := constant.MaxUpstreamResponseBodyMB
-	if maxMB <= 0 {
-		maxMB = 128
-	}
-	resp.Body = http.MaxBytesReader(nil, resp.Body, int64(maxMB)<<20)
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "read_response_body_failed", statusCode), nullBytes, err
 	}
-	CloseResponseBodyGracefully(resp)
-	logger.LogDebug(c, "midjourney response body: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"midjourney response received: status=%d bytes=%d",
+		statusCode,
+		len(responseBody),
+	)
 	if len(responseBody) == 0 {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "empty_response_body", statusCode), responseBody, nil
 	} else {

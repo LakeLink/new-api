@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
-	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/common_handler"
 	"github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +36,17 @@ type embeddingRequest struct {
 	Input         any    `json:"input"`
 	EmbeddingType string `json:"embedding_type,omitempty"`
 	Dimensions    *int   `json:"dimensions,omitempty"`
+}
+
+type embeddingResponseMeta struct {
+	Error any `json:"error,omitempty"`
+	Usage struct {
+		TotalTokens  int `json:"total_tokens"`
+		PromptTokens int `json:"prompt_tokens"`
+		ImageTokens  int `json:"image_tokens"`
+		AudioTokens  int `json:"audio_tokens"`
+		VideoTokens  int `json:"video_tokens"`
+	} `json:"usage"`
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
@@ -92,6 +105,19 @@ func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dt
 		return nil, errors.New("jina rerank top_n must be at least 1")
 	}
 
+	allowedMedia := map[string]bool{}
+	if strings.EqualFold(request.Model, "jina-reranker-m0") {
+		allowedMedia["image"] = true
+	}
+	if field := findUnsupportedJinaMedia(request.Query, allowedMedia); field != "" {
+		return nil, fmt.Errorf("jina model %s does not support %s input", request.Model, field)
+	}
+	for _, document := range request.Documents {
+		if field := findUnsupportedJinaMedia(document, allowedMedia); field != "" {
+			return nil, fmt.Errorf("jina model %s does not support %s input", request.Model, field)
+		}
+	}
+
 	_, textQuery := request.QueryString()
 	imageQuery := hasNonEmptyStringField(request.Query, "image")
 	if !textQuery && (!strings.EqualFold(request.Model, "jina-reranker-m0") || !imageQuery) {
@@ -128,6 +154,22 @@ func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dt
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
 	if !hasValidEmbeddingInput(request.Input) {
 		return nil, errors.New("jina embedding input must contain non-empty text or supported media")
+	}
+	allowedMedia := map[string]bool{}
+	switch strings.ToLower(request.Model) {
+	case "jina-embeddings-v4":
+		allowedMedia["image"] = true
+		allowedMedia["pdf"] = true
+	case "jina-clip-v1", "jina-clip-v2":
+		allowedMedia["image"] = true
+	case "jina-embeddings-v5-omni-nano", "jina-embeddings-v5-omni-small":
+		allowedMedia["image"] = true
+		allowedMedia["audio"] = true
+		allowedMedia["video"] = true
+		allowedMedia["pdf"] = true
+	}
+	if field := findUnsupportedJinaMedia(request.Input, allowedMedia); field != "" {
+		return nil, fmt.Errorf("jina model %s does not support %s input", request.Model, field)
 	}
 	if request.Dimensions != nil && *request.Dimensions < 1 {
 		return nil, errors.New("jina embedding dimensions must be at least 1")
@@ -210,13 +252,99 @@ func hasSupportedEmbeddingField(input map[string]any) bool {
 	return false
 }
 
+func findUnsupportedJinaMedia(input any, allowed map[string]bool) string {
+	switch value := input.(type) {
+	case []any:
+		for _, item := range value {
+			if field := findUnsupportedJinaMedia(item, allowed); field != "" {
+				return field
+			}
+		}
+	case map[string]any:
+		for _, field := range []string{"image", "audio", "video", "pdf"} {
+			data, ok := value[field].(string)
+			if ok && strings.TrimSpace(data) != "" && !allowed[field] {
+				return field
+			}
+		}
+		if content, ok := value["content"]; ok {
+			return findUnsupportedJinaMedia(content, allowed)
+		}
+	case map[string]string:
+		for _, field := range []string{"image", "audio", "video", "pdf"} {
+			if strings.TrimSpace(value[field]) != "" && !allowed[field] {
+				return field
+			}
+		}
+	}
+	return ""
+}
+
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if info.RelayMode == constant.RelayModeRerank {
 		usage, err = common_handler.RerankHandler(c, info, resp)
+		if err == nil {
+			rerankUsage := usage.(*dto.Usage)
+			if rerankUsage.TotalTokens <= 0 || rerankUsage.TotalTokens > common.MaxQuota {
+				logger.LogWarn(c, fmt.Sprintf("invalid jina rerank usage total_tokens=%d; using the bounded pre-consume estimate", rerankUsage.TotalTokens))
+				estimate := info.GetEstimatePromptTokens()
+				rerankUsage.PromptTokens = estimate
+				rerankUsage.CompletionTokens = 0
+				rerankUsage.TotalTokens = estimate
+			}
+		}
 	} else if info.RelayMode == constant.RelayModeEmbeddings {
-		usage, err = openai.OpenaiHandler(c, info, resp)
+		usage, err = jinaEmbeddingHandler(c, info, resp)
 	}
 	return
+}
+
+func jinaEmbeddingHandler(c *gin.Context, _ *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	logger.LogDebug(
+		c,
+		"jina embedding response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
+
+	var response embeddingResponseMeta
+	if err := common.Unmarshal(responseBody, &response); err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+	}
+	if openAIError := dto.GetOpenAIError(response.Error); openAIError != nil && openAIError.Type != "" {
+		return nil, types.WithOpenAIError(*openAIError, resp.StatusCode)
+	}
+
+	providerUsage := response.Usage
+	if providerUsage.TotalTokens <= 0 || providerUsage.TotalTokens > common.MaxQuota ||
+		providerUsage.PromptTokens < 0 || providerUsage.PromptTokens > providerUsage.TotalTokens ||
+		providerUsage.ImageTokens < 0 || providerUsage.ImageTokens > providerUsage.TotalTokens ||
+		providerUsage.AudioTokens < 0 || providerUsage.AudioTokens > providerUsage.TotalTokens ||
+		providerUsage.VideoTokens < 0 || providerUsage.VideoTokens > providerUsage.TotalTokens {
+		return nil, types.NewOpenAIError(
+			fmt.Errorf("invalid jina embedding usage: total=%d prompt=%d image=%d audio=%d video=%d",
+				providerUsage.TotalTokens, providerUsage.PromptTokens, providerUsage.ImageTokens, providerUsage.AudioTokens, providerUsage.VideoTokens),
+			types.ErrorCodeBadResponseBody,
+			http.StatusBadGateway,
+		)
+	}
+
+	billingUsage := &dto.Usage{
+		PromptTokens: providerUsage.TotalTokens,
+		TotalTokens:  providerUsage.TotalTokens,
+		PromptTokensDetails: dto.InputTokenDetails{
+			ImageTokens: providerUsage.ImageTokens,
+			AudioTokens: providerUsage.AudioTokens,
+		},
+	}
+	service.IOCopyBytesGracefully(c, resp, responseBody)
+	return billingUsage, nil
 }
 
 func (a *Adaptor) GetModelList() []string {

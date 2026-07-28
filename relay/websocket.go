@@ -2,8 +2,8 @@ package relay
 
 import (
 	"fmt"
+	"net/http"
 
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
@@ -31,7 +31,12 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 	}
 
 	if resp != nil {
-		info.TargetWs = resp.(*websocket.Conn)
+		target, ok := resp.(*websocket.Conn)
+		if !ok || target == nil {
+			err := fmt.Errorf("invalid websocket adaptor response type: %T", resp)
+			return types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+		}
+		info.TargetWs = target
 		defer info.TargetWs.Close()
 	}
 
@@ -41,6 +46,6 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, usage.(*dto.RealtimeUsage), "")
+	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, adaptorRealtimeUsage(usage), "")
 	return nil
 }

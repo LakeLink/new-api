@@ -112,8 +112,13 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 			wantErr: boundErr,
 		},
 		{
-			name:  "n at max is accepted",
-			body:  fmt.Sprintf(`{"model":"gpt-image-1","prompt":"a cat","n":%d}`, dto.MaxImageN),
+			name:  "OpenAI n at max is accepted",
+			body:  fmt.Sprintf(`{"model":"gpt-image-1","prompt":"a cat","n":%d}`, dto.MaxOpenAIImageN),
+			wantN: dto.MaxOpenAIImageN,
+		},
+		{
+			name:  "custom provider keeps generic max",
+			body:  fmt.Sprintf(`{"model":"custom-image-model","prompt":"a cat","n":%d}`, dto.MaxImageN),
 			wantN: dto.MaxImageN,
 		},
 		{
@@ -122,9 +127,9 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 			wantN: 3,
 		},
 		{
-			name:  "zero n defaults to 1",
-			body:  `{"model":"gpt-image-1","prompt":"a cat","n":0}`,
-			wantN: 1,
+			name:    "zero n is rejected",
+			body:    `{"model":"gpt-image-1","prompt":"a cat","n":0}`,
+			wantErr: boundErr,
 		},
 		{
 			name:  "absent n defaults to 1",
@@ -165,6 +170,202 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), boundErr)
 	})
+
+	t.Run("zero multipart n is rejected", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		require.NoError(t, writer.WriteField("model", "gpt-image-1"))
+		require.NoError(t, writer.WriteField("prompt", "edit this image"))
+		require.NoError(t, writer.WriteField("n", "0"))
+		require.NoError(t, writer.Close())
+
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+
+		_, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesEdits)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), boundErr)
+	})
+}
+
+func TestValidateOpenAIImageRequestProtocol(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name            string
+		body            string
+		path            string
+		mode            int
+		wantInputImages int
+		wantErr         string
+	}{
+		{
+			name:    "dall-e-3 only supports one image",
+			body:    `{"model":"dall-e-3","prompt":"cat","n":2}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "n must be 1",
+		},
+		{
+			name:    "GPT Image compression needs a compressed format",
+			body:    `{"model":"gpt-image-1","prompt":"cat","output_format":"png","output_compression":50}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "output_compression requires",
+		},
+		{
+			name:    "partials require streaming",
+			body:    `{"model":"gpt-image-1","prompt":"cat","partial_images":1}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "requires stream=true",
+		},
+		{
+			name: "explicit zero partials are valid without streaming",
+			body: `{"model":"gpt-image-1","prompt":"cat","partial_images":0}`,
+			path: "/v1/images/generations",
+			mode: relayconstant.RelayModeImagesGenerations,
+		},
+		{
+			name: "maximum partials are valid with streaming",
+			body: `{"model":"gpt-image-2","prompt":"cat","stream":true,"partial_images":3}`,
+			path: "/v1/images/generations",
+			mode: relayconstant.RelayModeImagesGenerations,
+		},
+		{
+			name:    "partials are bounded",
+			body:    `{"model":"gpt-image-2","prompt":"cat","stream":true,"partial_images":4}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "between 0 and 3",
+		},
+		{
+			name:    "GPT Image 2 rejects transparent background",
+			body:    `{"model":"gpt-image-2","prompt":"cat","background":"transparent"}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "transparent background",
+		},
+		{
+			name:    "transparent background rejects JPEG output",
+			body:    `{"model":"gpt-image-1.5","prompt":"cat","background":"transparent","output_format":"jpeg"}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "requires output_format png or webp",
+		},
+		{
+			name: "GPT Image 2 arbitrary dimensions",
+			body: `{"model":"gpt-image-2","prompt":"cat","size":"3840x2160"}`,
+			path: "/v1/images/generations",
+			mode: relayconstant.RelayModeImagesGenerations,
+		},
+		{
+			name:    "GPT Image 2 dimensions must be multiples of sixteen",
+			body:    `{"model":"gpt-image-2","prompt":"cat","size":"1000x1000"}`,
+			path:    "/v1/images/generations",
+			mode:    relayconstant.RelayModeImagesGenerations,
+			wantErr: "size is invalid",
+		},
+		{
+			name:            "JSON edit accepts exact image references",
+			body:            `{"model":"gpt-image-1","prompt":"edit","images":[{"file_id":"file_1"},{"image_url":"https://example.com/a.png"}]}`,
+			path:            "/v1/images/edits",
+			mode:            relayconstant.RelayModeImagesEdits,
+			wantInputImages: 2,
+		},
+		{
+			name:    "JSON edit reference is exclusive",
+			body:    `{"model":"gpt-image-1","prompt":"edit","images":[{"file_id":"file_1","image_url":"https://example.com/a.png"}]}`,
+			path:    "/v1/images/edits",
+			mode:    relayconstant.RelayModeImagesEdits,
+			wantErr: "exactly one",
+		},
+		{
+			name:    "GPT Image 2 edit rejects input fidelity",
+			body:    `{"model":"gpt-image-2","prompt":"edit","images":[{"file_id":"file_1"}],"input_fidelity":"high"}`,
+			path:    "/v1/images/edits",
+			mode:    relayconstant.RelayModeImagesEdits,
+			wantErr: "input_fidelity is not supported",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, test.path, bytes.NewBufferString(test.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			request, err := GetAndValidOpenAIImageRequest(c, test.mode)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				require.Equal(t, test.wantInputImages, request.InputImageCount)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
+func TestValidateResponsesImageGenerationTool(t *testing.T) {
+	base := func(tool string, stream bool) *dto.OpenAIResponsesRequest {
+		return &dto.OpenAIResponsesRequest{
+			Model:  "gpt-5",
+			Input:  []byte(`"draw a cat"`),
+			Tools:  []byte("[" + tool + "]"),
+			Stream: common.GetPointer(stream),
+		}
+	}
+	tests := []struct {
+		name    string
+		request *dto.OpenAIResponsesRequest
+		wantErr string
+	}{
+		{
+			name:    "omitted partials",
+			request: base(`{"type":"image_generation"}`, false),
+		},
+		{
+			name:    "explicit zero partials",
+			request: base(`{"type":"image_generation","partial_images":0}`, false),
+		},
+		{
+			name:    "maximum partials",
+			request: base(`{"type":"image_generation","model":"gpt-image-2","partial_images":3}`, true),
+		},
+		{
+			name:    "partials require stream",
+			request: base(`{"type":"image_generation","partial_images":1}`, false),
+			wantErr: "requires stream=true",
+		},
+		{
+			name:    "unknown image model",
+			request: base(`{"type":"image_generation","model":"dall-e-3"}`, false),
+			wantErr: "supported GPT Image model",
+		},
+		{
+			name:    "transparent background rejects JPEG output",
+			request: base(`{"type":"image_generation","model":"gpt-image-1.5","background":"transparent","output_format":"jpeg"}`, false),
+			wantErr: "requires output_format png or webp",
+		},
+		{
+			name:    "GPT Image 2 arbitrary dimensions",
+			request: base(`{"type":"image_generation","model":"gpt-image-2","size":"2048x1024"}`, false),
+		},
+		{
+			name:    "unknown image tool field",
+			request: base(`{"type":"image_generation","seed":1}`, false),
+			wantErr: "unsupported image_generation field",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateResponsesRequest(test.request)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
 }
 
 func TestGetAndValidOpenAIImageRequestReconcilesNativeBatchSize(t *testing.T) {

@@ -244,7 +244,12 @@ func (t *ActiveRequestTracker) pruneCompletedLocked(now time.Time, retentionSeco
 		clear(t.completed)
 		return
 	}
-	retention := time.Duration(retentionSeconds) * time.Second
+	retention := common.SafeIntervalDuration(
+		retentionSeconds,
+		time.Second,
+		10*time.Second,
+		"active request retention",
+	)
 	for requestId, req := range t.completed {
 		if req.EndTime.IsZero() || now.Sub(req.EndTime) > retention {
 			delete(t.completed, requestId)

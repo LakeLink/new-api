@@ -1,6 +1,8 @@
 package operation_setting
 
 import (
+	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -24,6 +26,7 @@ var defaultToolPrices = map[string]float64{
 	"web_search_preview": 10.0, // OpenAI web search preview (default: reasoning models)
 	"file_search":        2.5,  // OpenAI file search (Responses API)
 	"google_search":      14.0, // Gemini Grounding with Google Search
+	"google_maps":        14.0, // Gemini 3 Grounding with Google Maps
 }
 
 var defaultToolPriceOverrides = map[string]float64{
@@ -31,11 +34,17 @@ var defaultToolPriceOverrides = map[string]float64{
 	"web_search_preview:gpt-4.1*":      25.0,
 	"web_search_preview:gpt-4o-mini*":  25.0,
 	"web_search_preview:gpt-4.1-mini*": 25.0,
+	"google_search:gemini-2.5*":        35.0, // Gemini 2.5 bills per grounded prompt
+	"google_maps:gemini-2.5*":          25.0, // Gemini 2.5 bills per grounded prompt
 }
 
 // ToolPriceSetting is managed by config.GlobalConfig.Register.
 type ToolPriceSetting struct {
 	Prices map[string]float64 `json:"prices"`
+}
+
+func (s ToolPriceSetting) Validate() error {
+	return ValidateToolPriceMap(s.Prices)
 }
 
 var toolPriceSetting = ToolPriceSetting{
@@ -75,14 +84,18 @@ var currentIndex atomic.Pointer[toolPriceIndex]
 // RebuildToolPriceIndex rebuilds the lookup index from the current config.
 // Called on init and after config updates. Not on the billing hot path.
 func RebuildToolPriceIndex() {
-	merged := make(map[string]float64, len(defaultToolPrices)+len(defaultToolPriceOverrides)+len(toolPriceSetting.Prices))
+	prices := config.Snapshot[ToolPriceSetting]("tool_price_setting").Prices
+	merged := make(map[string]float64, len(defaultToolPrices)+len(defaultToolPriceOverrides)+len(prices))
 	for k, v := range defaultToolPrices {
 		merged[k] = v
 	}
 	for k, v := range defaultToolPriceOverrides {
 		merged[k] = v
 	}
-	for k, v := range toolPriceSetting.Prices {
+	for k, v := range prices {
+		if strings.TrimSpace(k) == "" || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
 		merged[k] = v
 	}
 
@@ -112,6 +125,44 @@ func RebuildToolPriceIndex() {
 	}
 
 	currentIndex.Store(idx)
+}
+
+// ValidateToolPriceMap rejects values that could turn a server-tool charge
+// into a credit or poison quota arithmetic. Zero is allowed as an explicit
+// administrator choice to disable billing for a tool.
+func ValidateToolPriceMap(prices map[string]float64) error {
+	if prices == nil {
+		return fmt.Errorf("tool prices must be a JSON object")
+	}
+	for key, price := range prices {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("tool price key must not be empty")
+		}
+		if price < 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			return fmt.Errorf("tool price %q must be a finite non-negative number", key)
+		}
+	}
+	return nil
+}
+
+// UpdateToolPrices validates and atomically publishes a replacement tool
+// price index. The copied map prevents callers from mutating billing config
+// after validation.
+func UpdateToolPrices(prices map[string]float64) error {
+	if err := ValidateToolPriceMap(prices); err != nil {
+		return err
+	}
+	validated := make(map[string]float64, len(prices))
+	for key, price := range prices {
+		validated[key] = price
+	}
+	if err := config.Mutate(&toolPriceSetting, func() {
+		toolPriceSetting.Prices = validated
+	}); err != nil {
+		return err
+	}
+	RebuildToolPriceIndex()
+	return nil
 }
 
 // GetToolPriceForModel returns the price ($/1K calls) for a tool given a model name.
@@ -199,21 +250,58 @@ const (
 	Gemini25FlashNativeAudioInputAudioPrice = 3.00
 	Gemini20FlashInputAudioPrice            = 0.70
 	GeminiRoboticsER15InputAudioPrice       = 1.00
+	Gemini31FlashLiteInputAudioPrice        = 0.50
+	Gemini3FlashPreviewInputAudioPrice      = 1.00
+	GeminiRoboticsER16InputAudioPrice       = 2.00
 )
 
 func GetGeminiInputAudioPricePerMillionTokens(modelName string) float64 {
-	if strings.HasPrefix(modelName, "gemini-2.5-flash-preview-native-audio") {
+	if strings.HasPrefix(modelName, "gemini-2.5-flash-native-audio") ||
+		strings.HasPrefix(modelName, "gemini-2.5-flash-preview-native-audio") {
 		return Gemini25FlashNativeAudioInputAudioPrice
+	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-lite") {
+		return 0.30
 	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-preview-lite") {
 		return Gemini25FlashLitePreviewInputAudioPrice
 	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-preview") {
 		return Gemini25FlashPreviewInputAudioPrice
 	} else if strings.HasPrefix(modelName, "gemini-2.5-flash") {
 		return Gemini25FlashProductionInputAudioPrice
+	} else if modelName == "gemini-3.1-flash-lite" || modelName == "gemini-flash-lite-latest" {
+		return Gemini31FlashLiteInputAudioPrice
+	} else if modelName == "gemini-3-flash-preview" {
+		return Gemini3FlashPreviewInputAudioPrice
 	} else if strings.HasPrefix(modelName, "gemini-2.0-flash") {
 		return Gemini20FlashInputAudioPrice
 	} else if strings.HasPrefix(modelName, "gemini-robotics-er-1.5") {
 		return GeminiRoboticsER15InputAudioPrice
+	} else if strings.HasPrefix(modelName, "gemini-robotics-er-1.6") {
+		return GeminiRoboticsER16InputAudioPrice
 	}
 	return 0
+}
+
+// GetGeminiInputAudioPriceForServiceTier returns the actual interactive-tier
+// audio price. Only models with first-party Flex/Priority audio rows are
+// adjusted; models such as Robotics and Live remain on their documented rate.
+func GetGeminiInputAudioPriceForServiceTier(modelName, serviceTier string) float64 {
+	price := GetGeminiInputAudioPricePerMillionTokens(modelName)
+	if price == 0 {
+		return 0
+	}
+
+	supportsTierPricing := modelName == "gemini-2.5-flash" || modelName == "gemini-2.5-flash-lite" ||
+		modelName == "gemini-3.1-flash-lite" || modelName == "gemini-flash-lite-latest" ||
+		modelName == "gemini-3-flash-preview"
+	if !supportsTierPricing {
+		return price
+	}
+	switch strings.ToLower(serviceTier) {
+	case "flex":
+		return price * 0.5
+	case "priority":
+		return price * 1.8
+	default:
+		return price
+	}
 }

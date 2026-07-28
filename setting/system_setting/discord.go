@@ -17,5 +17,5 @@ func init() {
 }
 
 func GetDiscordSettings() *DiscordSettings {
-	return &defaultDiscordSettings
+	return config.Snapshot[DiscordSettings]("discord")
 }

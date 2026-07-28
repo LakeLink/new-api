@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"hash/fnv"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -253,8 +254,9 @@ func matchAnyRegexCached(patterns []string, s string) bool {
 		if pattern == "" {
 			continue
 		}
-		re, ok := channelAffinityRegexCache.Load(pattern)
-		if !ok {
+		cached, ok := channelAffinityRegexCache.Load(pattern)
+		re, valid := cached.(*regexp.Regexp)
+		if !ok || !valid || re == nil {
 			compiled, err := regexp.Compile(pattern)
 			if err != nil {
 				continue
@@ -262,7 +264,7 @@ func matchAnyRegexCached(patterns []string, s string) bool {
 			re = compiled
 			channelAffinityRegexCache.Store(pattern, re)
 		}
-		if re.(*regexp.Regexp).MatchString(s) {
+		if re.MatchString(s) {
 			return true
 		}
 	}
@@ -345,7 +347,10 @@ func buildChannelAffinityCacheKeySuffix(rule operation_setting.ChannelAffinityRu
 	if rule.IncludeUsingGroup && usingGroup != "" {
 		parts = append(parts, usingGroup)
 	}
-	parts = append(parts, affinityValue)
+	// Affinity values can come from authorization-like headers, request
+	// metadata, or body fields. Keep the routing behavior deterministic without
+	// publishing the raw value into Redis keys, cache diagnostics, or errors.
+	parts = append(parts, common.GenerateHMACParts(affinityValue))
 	return strings.Join(parts, ":")
 }
 
@@ -414,9 +419,9 @@ func affinityFingerprint(s string) string {
 	if s == "" {
 		return ""
 	}
-	hex := common.Sha1([]byte(s))
-	if len(hex) >= 8 {
-		return hex[:8]
+	hex := common.GenerateHMAC(s)
+	if len(hex) >= 16 {
+		return hex[:16]
 	}
 	return hex
 }
@@ -861,19 +866,32 @@ func observeChannelAffinityUsageCache(statsCtx ChannelAffinityStatsContext, usag
 			next.CachedTokenRateMode = cacheTokenRateModeMixed
 		}
 	}
-	next.Total++
+	next.Total = addChannelAffinityUsageCounter(next.Total, 1)
 	hit, cachedTokens, promptCacheHitTokens := usageCacheSignals(usage)
 	if hit {
-		next.Hit++
+		next.Hit = addChannelAffinityUsageCounter(next.Hit, 1)
 	}
 	next.WindowSeconds = windowSeconds
 	next.LastSeenAt = time.Now().Unix()
-	next.CachedTokens += cachedTokens
-	next.PromptCacheHitTokens += promptCacheHitTokens
-	next.PromptTokens += int64(usagePromptTokens(usage))
-	next.CompletionTokens += int64(usageCompletionTokens(usage))
-	next.TotalTokens += int64(usageTotalTokens(usage))
+	next.CachedTokens = addChannelAffinityUsageCounter(next.CachedTokens, cachedTokens)
+	next.PromptCacheHitTokens = addChannelAffinityUsageCounter(next.PromptCacheHitTokens, promptCacheHitTokens)
+	next.PromptTokens = addChannelAffinityUsageCounter(next.PromptTokens, usagePromptTokens(usage))
+	next.CompletionTokens = addChannelAffinityUsageCounter(next.CompletionTokens, usageCompletionTokens(usage))
+	next.TotalTokens = addChannelAffinityUsageCounter(next.TotalTokens, usageTotalTokens(usage))
 	_ = cache.SetWithTTL(entryKey, next, ttl)
+}
+
+func addChannelAffinityUsageCounter(current, delta int64) int64 {
+	if current < 0 {
+		current = 0
+	}
+	if delta <= 0 || current == math.MaxInt64 {
+		return current
+	}
+	if current > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	return current + delta
 }
 
 func normalizeCachedTokenRateMode(mode string) string {
@@ -928,37 +946,37 @@ func usageCacheSignals(usage *dto.Usage) (hit bool, cachedTokens int64, promptCa
 	return cached > 0 || pcht > 0, cached, pcht
 }
 
-func usagePromptTokens(usage *dto.Usage) int {
+func usagePromptTokens(usage *dto.Usage) int64 {
 	if usage == nil {
 		return 0
 	}
 	if usage.PromptTokens > 0 {
-		return usage.PromptTokens
+		return int64(usage.PromptTokens)
 	}
-	return usage.InputTokens
+	return int64(usage.InputTokens)
 }
 
-func usageCompletionTokens(usage *dto.Usage) int {
+func usageCompletionTokens(usage *dto.Usage) int64 {
 	if usage == nil {
 		return 0
 	}
 	if usage.CompletionTokens > 0 {
-		return usage.CompletionTokens
+		return int64(usage.CompletionTokens)
 	}
-	return usage.OutputTokens
+	return int64(usage.OutputTokens)
 }
 
-func usageTotalTokens(usage *dto.Usage) int {
+func usageTotalTokens(usage *dto.Usage) int64 {
 	if usage == nil {
 		return 0
 	}
 	if usage.TotalTokens > 0 {
-		return usage.TotalTokens
+		return int64(usage.TotalTokens)
 	}
 	pt := usagePromptTokens(usage)
 	ct := usageCompletionTokens(usage)
 	if pt > 0 || ct > 0 {
-		return pt + ct
+		return addChannelAffinityUsageCounter(pt, ct)
 	}
 	return 0
 }

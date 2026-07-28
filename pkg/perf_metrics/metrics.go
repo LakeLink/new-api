@@ -12,23 +12,36 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
+	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/go-redis/redis/v8"
 )
 
-var hotBuckets sync.Map
+var (
+	hotBuckets sync.Map
+	initOnce   sync.Once
+)
 
 // seriesSchema is a stable client cache/schema marker. Do not change it when
 // hiding fields or making response-only privacy hardening changes.
 const seriesSchema = "dbcd0a3c01b55203"
 
 func Init() {
-	go flushLoop()
+	initOnce.Do(func() {
+		go flushLoop()
+	})
 }
 
-func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+type recordSnapshot struct {
+	enabled       bool
+	bucketSeconds int64
+	recordedAt    int64
+	redisClient   *redis.Client
+}
+
+func buildRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64, now time.Time) (Sample, bool) {
 	if info == nil {
-		return
+		return Sample{}, false
 	}
-	now := time.Now()
 	hasTtft := info.IsStream && info.HasSendResponse()
 	ttftMs := int64(0)
 	if hasTtft {
@@ -42,7 +55,7 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 	if generationMs <= 0 {
 		generationMs = latencyMs
 	}
-	Record(Sample{
+	return Sample{
 		Model:        info.OriginModelName,
 		Group:        info.UsingGroup,
 		LatencyMs:    latencyMs,
@@ -51,12 +64,57 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 		Success:      success,
 		OutputTokens: outputTokens,
 		GenerationMs: generationMs,
+	}, true
+}
+
+func captureRecordSnapshot(now time.Time) recordSnapshot {
+	setting := perf_metrics_setting.GetSetting()
+	bucketSeconds := perf_metrics_setting.GetBucketSeconds()
+	if bucketSeconds <= 0 {
+		bucketSeconds = 3600
+	}
+	var redisClient *redis.Client
+	if common.RedisEnabled {
+		redisClient = common.RDB
+	}
+	return recordSnapshot{
+		enabled:       setting.Enabled,
+		bucketSeconds: bucketSeconds,
+		recordedAt:    now.Unix(),
+		redisClient:   redisClient,
+	}
+}
+
+func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+	now := time.Now()
+	sample, ok := buildRelaySample(info, success, outputTokens, now)
+	if !ok {
+		return
+	}
+	record(sample, captureRecordSnapshot(now))
+}
+
+// RecordRelaySampleAsync snapshots the mutable relay and metrics configuration
+// before dispatch. The worker never races request teardown or runtime config
+// replacement while recording a non-critical performance sample.
+func RecordRelaySampleAsync(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+	now := time.Now()
+	sample, ok := buildRelaySample(info, success, outputTokens, now)
+	if !ok {
+		return
+	}
+	snapshot := captureRecordSnapshot(now)
+	gopool.Go(func() {
+		record(sample, snapshot)
 	})
 }
 
 func Record(sample Sample) {
-	setting := perf_metrics_setting.GetSetting()
-	if !setting.Enabled || sample.Model == "" {
+	record(sample, captureRecordSnapshot(time.Now()))
+}
+
+func record(sample Sample, snapshot recordSnapshot) {
+	if !snapshot.enabled || sample.Model == "" {
 		return
 	}
 	if sample.Group == "" {
@@ -69,11 +127,25 @@ func Record(sample Sample) {
 	key := bucketKey{
 		model:    sample.Model,
 		group:    sample.Group,
-		bucketTs: bucketStart(time.Now().Unix()),
+		bucketTs: bucketStartWithSeconds(snapshot.recordedAt, snapshot.bucketSeconds),
 	}
-	actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
-	actual.(*atomicBucket).add(sample)
-	recordRedis(key, sample)
+	addHotBucketSample(key, sample)
+	recordRedis(snapshot.redisClient, key, sample)
+}
+
+func addHotBucketSample(key bucketKey, sample Sample) {
+	for {
+		actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
+		bucket := actual.(*atomicBucket)
+		bucket.mu.Lock()
+		current, ok := hotBuckets.Load(key)
+		if ok && current == bucket {
+			bucket.addLocked(sample)
+			bucket.mu.Unlock()
+			return
+		}
+		bucket.mu.Unlock()
+	}
 }
 
 func Query(params QueryParams) (QueryResult, error) {
@@ -202,15 +274,7 @@ func mergeModelTotals(totals map[string]counters, modelName string, value counte
 	if value.requestCount == 0 {
 		return
 	}
-	current := totals[modelName]
-	current.requestCount += value.requestCount
-	current.successCount += value.successCount
-	current.totalLatencyMs += value.totalLatencyMs
-	current.ttftSumMs += value.ttftSumMs
-	current.ttftCount += value.ttftCount
-	current.outputTokens += value.outputTokens
-	current.generationMs += value.generationMs
-	totals[modelName] = current
+	totals[modelName] = totals[modelName].add(value)
 }
 
 func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName string, bucketTs int64, value counters) {
@@ -220,15 +284,7 @@ func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName stri
 	if _, ok := modelBuckets[modelName]; !ok {
 		modelBuckets[modelName] = map[int64]counters{}
 	}
-	current := modelBuckets[modelName][bucketTs]
-	current.requestCount += value.requestCount
-	current.successCount += value.successCount
-	current.totalLatencyMs += value.totalLatencyMs
-	current.ttftSumMs += value.ttftSumMs
-	current.ttftCount += value.ttftCount
-	current.outputTokens += value.outputTokens
-	current.generationMs += value.generationMs
-	modelBuckets[modelName][bucketTs] = current
+	modelBuckets[modelName][bucketTs] = modelBuckets[modelName][bucketTs].add(value)
 }
 
 func recentSuccessRates(buckets map[int64]counters, limit int) []float64 {
@@ -268,6 +324,10 @@ func bucketStart(ts int64) int64 {
 	if bucketSeconds <= 0 {
 		bucketSeconds = 3600
 	}
+	return bucketStartWithSeconds(ts, bucketSeconds)
+}
+
+func bucketStartWithSeconds(ts int64, bucketSeconds int64) int64 {
 	return ts - (ts % bucketSeconds)
 }
 
@@ -275,15 +335,7 @@ func mergeCounters(merged map[bucketKey]counters, key bucketKey, value counters)
 	if value.requestCount == 0 {
 		return
 	}
-	current := merged[key]
-	current.requestCount += value.requestCount
-	current.successCount += value.successCount
-	current.totalLatencyMs += value.totalLatencyMs
-	current.ttftSumMs += value.ttftSumMs
-	current.ttftCount += value.ttftCount
-	current.outputTokens += value.outputTokens
-	current.generationMs += value.generationMs
-	merged[key] = current
+	merged[key] = merged[key].add(value)
 }
 
 func buildQueryResult(modelName string, merged map[bucketKey]counters) QueryResult {
@@ -319,13 +371,7 @@ func buildQueryResult(modelName string, merged map[bucketKey]counters) QueryResu
 		series := make([]BucketPoint, 0, len(timestamps))
 		for _, ts := range timestamps {
 			value := buckets[ts]
-			total.requestCount += value.requestCount
-			total.successCount += value.successCount
-			total.totalLatencyMs += value.totalLatencyMs
-			total.ttftSumMs += value.ttftSumMs
-			total.ttftCount += value.ttftCount
-			total.outputTokens += value.outputTokens
-			total.generationMs += value.generationMs
+			total = total.add(value)
 			series = append(series, bucketPoint(ts, value))
 		}
 
@@ -377,15 +423,15 @@ func avgTps(value counters) float64 {
 	return float64(value.outputTokens) / (float64(value.generationMs) / 1000)
 }
 
-func recordRedis(key bucketKey, sample Sample) {
-	if !common.RedisEnabled || common.RDB == nil {
+func recordRedis(client *redis.Client, key bucketKey, sample Sample) {
+	if client == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	redisKey := redisBucketKey(key)
-	pipe := common.RDB.TxPipeline()
+	pipe := client.TxPipeline()
 	pipe.HIncrBy(ctx, redisKey, "req", 1)
 	if sample.Success {
 		pipe.HIncrBy(ctx, redisKey, "ok", 1)

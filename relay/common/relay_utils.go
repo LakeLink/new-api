@@ -44,15 +44,20 @@ func SanitizeURLForLog(rawURL string) string {
 
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
-	}
-
-	query := parsedURL.Query()
-	if len(query) == 0 {
-		return rawURL
+		return "[invalid URL]"
 	}
 
 	changed := false
+	if parsedURL.User != nil {
+		parsedURL.User = nil
+		changed = true
+	}
+	if parsedURL.Fragment != "" {
+		parsedURL.Fragment = ""
+		changed = true
+	}
+
+	query := parsedURL.Query()
 	for key := range query {
 		if isSensitiveURLQueryKey(key) {
 			query.Set(key, "***masked***")
@@ -146,12 +151,14 @@ func validatePrompt(prompt string) *dto.TaskError {
 const MaxTaskDurationSeconds = 3600
 
 func validateTaskDurationBounds(req TaskSubmitReq) *dto.TaskError {
-	seconds := req.Duration
-	if seconds == 0 && req.Seconds != "" {
-		seconds, _ = strconv.Atoi(req.Seconds)
-	}
-	if seconds < 0 || seconds > MaxTaskDurationSeconds {
+	if req.Duration < 0 || req.Duration > MaxTaskDurationSeconds {
 		return createTaskError(fmt.Errorf("seconds must be between 1 and %d", MaxTaskDurationSeconds), "invalid_seconds", http.StatusBadRequest, true)
+	}
+	if req.Seconds != "" {
+		seconds, err := strconv.Atoi(req.Seconds)
+		if err != nil || seconds < 1 || seconds > MaxTaskDurationSeconds {
+			return createTaskError(fmt.Errorf("seconds must be between 1 and %d", MaxTaskDurationSeconds), "invalid_seconds", http.StatusBadRequest, true)
+		}
 	}
 	return nil
 }
@@ -210,6 +217,9 @@ func ValidateMultipartDirect(c *gin.Context, info *RelayInfo) *dto.TaskError {
 
 	prompt = req.Prompt
 	model = req.Model
+	if info != nil && info.ChannelMeta != nil && info.IsModelMapped && info.UpstreamModelName != "" {
+		model = info.UpstreamModelName
+	}
 	size = req.Size
 	seconds, _ = strconv.Atoi(req.Seconds)
 	if seconds == 0 {
@@ -250,6 +260,14 @@ func ValidateMultipartDirect(c *gin.Context, info *RelayInfo) *dto.TaskError {
 
 		if seconds <= 0 {
 			seconds = 4
+		}
+		if !lo.Contains([]int{4, 8, 12}, seconds) {
+			return createTaskError(
+				fmt.Errorf("sora-2 seconds must be one of 4, 8, or 12"),
+				"invalid_seconds",
+				http.StatusBadRequest,
+				true,
+			)
 		}
 
 		if model == "sora-2" && !lo.Contains([]string{"720x1280", "1280x720"}, size) {

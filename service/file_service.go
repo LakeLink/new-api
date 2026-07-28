@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -24,6 +25,13 @@ import (
 
 // FileService 统一的文件处理服务
 // 提供文件下载、解码、缓存等功能的统一入口
+
+type fileSourceCleanupRegistry struct {
+	mu      sync.Mutex
+	sources []types.FileSource
+}
+
+var fileSourceCleanupRegistryMu sync.Mutex
 
 // getContextCacheKey 生成 URL context 缓存的 key
 func getContextCacheKey(url string) string {
@@ -43,15 +51,19 @@ func LoadFileSource(c *gin.Context, source types.FileSource, reason ...string) (
 	}
 
 	if common.DebugEnabled {
-		logger.LogDebug(c, "LoadFileSource starting for: %s", source.GetIdentifier())
+		identifier := source.GetIdentifier()
+		if source.IsURL() {
+			identifier = common.MaskSensitiveInfo(identifier)
+		}
+		logger.LogDebug(c, "LoadFileSource starting for: %s", identifier)
 	}
 
 	// 1. 快速检查内部缓存
-	if source.HasCache() {
+	if cachedData := source.GetCache(); cachedData != nil {
 		if c != nil {
 			registerSourceForCleanup(c, source)
 		}
-		return source.GetCache(), nil
+		return cachedData, nil
 	}
 
 	// 2. 加锁保护加载过程
@@ -59,11 +71,11 @@ func LoadFileSource(c *gin.Context, source types.FileSource, reason ...string) (
 	defer source.Mu().Unlock()
 
 	// 3. 双重检查
-	if source.HasCache() {
+	if cachedData := source.GetCache(); cachedData != nil {
 		if c != nil {
 			registerSourceForCleanup(c, source)
 		}
-		return source.GetCache(), nil
+		return cachedData, nil
 	}
 
 	// 4. 根据来源类型加载（含 URL context 缓存查找）
@@ -76,10 +88,11 @@ func LoadFileSource(c *gin.Context, source types.FileSource, reason ...string) (
 		if c != nil {
 			contextKey = getContextCacheKey(s.URL)
 			if cached, exists := c.Get(contextKey); exists {
-				data := cached.(*types.CachedFileData)
-				source.SetCache(data)
-				registerSourceForCleanup(c, source)
-				return data, nil
+				if data, ok := cached.(*types.CachedFileData); ok && data != nil && !data.IsClosed() {
+					source.SetCache(data)
+					registerSourceForCleanup(c, source)
+					return data, nil
+				}
 			}
 		}
 		cachedData, err = loadFromURL(c, s.URL, reason...)
@@ -87,10 +100,11 @@ func LoadFileSource(c *gin.Context, source types.FileSource, reason ...string) (
 		if c != nil {
 			contextKey = getBase64ContextCacheKey(s.Base64Data, s.MimeType)
 			if cached, exists := c.Get(contextKey); exists {
-				data := cached.(*types.CachedFileData)
-				source.SetCache(data)
-				registerSourceForCleanup(c, source)
-				return data, nil
+				if data, ok := cached.(*types.CachedFileData); ok && data != nil && !data.IsClosed() {
+					source.SetCache(data)
+					registerSourceForCleanup(c, source)
+					return data, nil
+				}
 			}
 		}
 		cachedData, err = loadFromBase64(s.Base64Data, s.MimeType)
@@ -118,45 +132,62 @@ func LoadFileSource(c *gin.Context, source types.FileSource, reason ...string) (
 
 // registerSourceForCleanup 注册 FileSource 到 context 以便请求结束时清理
 func registerSourceForCleanup(c *gin.Context, source types.FileSource) {
-	if source.IsRegistered() {
+	key := string(constant.ContextKeyFileSourcesToCleanup)
+	fileSourceCleanupRegistryMu.Lock()
+	existing, _ := c.Get(key)
+	registry, _ := existing.(*fileSourceCleanupRegistry)
+	if registry == nil {
+		registry = &fileSourceCleanupRegistry{}
+		c.Set(key, registry)
+	}
+	registry.mu.Lock()
+	fileSourceCleanupRegistryMu.Unlock()
+	defer registry.mu.Unlock()
+
+	if !source.ClaimCleanupRegistration() {
 		return
 	}
-
-	key := string(constant.ContextKeyFileSourcesToCleanup)
-	var sources []types.FileSource
-	if existing, exists := c.Get(key); exists {
-		sources = existing.([]types.FileSource)
-	}
-	sources = append(sources, source)
-	c.Set(key, sources)
-	source.SetRegistered(true)
+	registry.sources = append(registry.sources, source)
 }
 
 // CleanupFileSources 清理请求中所有注册的 FileSource
 // 应在请求结束时调用（通常由中间件自动调用）
 func CleanupFileSources(c *gin.Context) {
 	key := string(constant.ContextKeyFileSourcesToCleanup)
-	if sources, exists := c.Get(key); exists {
-		for _, source := range sources.([]types.FileSource) {
-			if cache := source.GetCache(); cache != nil {
-				cache.Close()
-			}
-		}
-		c.Set(key, nil)
+	fileSourceCleanupRegistryMu.Lock()
+	existing, _ := c.Get(key)
+	registry, _ := existing.(*fileSourceCleanupRegistry)
+	if registry == nil {
+		fileSourceCleanupRegistryMu.Unlock()
+		return
+	}
+	registry.mu.Lock()
+	c.Set(key, nil)
+	fileSourceCleanupRegistryMu.Unlock()
+	sources := registry.sources
+	registry.sources = nil
+	registry.mu.Unlock()
+
+	for _, source := range sources {
+		source.ClearCache()
+		source.SetRegistered(false)
 	}
 }
 
 // loadFromURL 从 URL 加载文件
 func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFileData, error) {
 	// 下载文件
-	var maxFileSize = constant.MaxFileDownloadMB * 1024 * 1024
+	maxFileSize := common.BytesFromMegabytes(constant.MaxFileDownloadMB)
+	if maxFileSize <= 0 {
+		maxFileSize = 64 << 20
+	}
 
 	if common.DebugEnabled {
 		logger.LogDebug(c, "loadFromURL: initiating download")
 	}
 	resp, err := DoDownloadRequest(url, reason...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download file from %s: %w", url, err)
+		return nil, fmt.Errorf("failed to download file from %s: %w", common.MaskSensitiveInfo(url), err)
 	}
 	defer resp.Body.Close()
 
@@ -168,11 +199,11 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 	if common.DebugEnabled {
 		logger.LogDebug(c, "loadFromURL: reading response body")
 	}
-	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxFileSize+1)))
+	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, common.ReadLimitWithOverrunByte(maxFileSize)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file content: %w", err)
 	}
-	if len(fileBytes) > maxFileSize {
+	if int64(len(fileBytes)) > maxFileSize {
 		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
 	}
 
@@ -338,9 +369,19 @@ func loadFromBase64(base64String string, providedMimeType string) (*types.Cached
 		mimeType = providedMimeType
 	}
 
-	decodedData, err := base64.StdEncoding.DecodeString(cleanBase64)
+	maxFileBytes := common.BytesFromMegabytes(constant.MaxFileDownloadMB)
+	if maxFileBytes <= 0 {
+		maxFileBytes = 64 << 20
+	}
+	decodedData, err := io.ReadAll(io.LimitReader(
+		base64.NewDecoder(base64.StdEncoding, strings.NewReader(cleanBase64)),
+		common.ReadLimitWithOverrunByte(maxFileBytes),
+	))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
+	}
+	if int64(len(decodedData)) > maxFileBytes {
+		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
 	}
 
 	base64Size := int64(len(cleanBase64))
@@ -422,8 +463,8 @@ func GetBase64Data(c *gin.Context, source types.FileSource, reason ...string) (s
 
 // GetMimeType 获取文件的 MIME 类型
 func GetMimeType(c *gin.Context, source types.FileSource) (string, error) {
-	if source.HasCache() {
-		return source.GetCache().MimeType, nil
+	if cachedData := source.GetCache(); cachedData != nil {
+		return cachedData.MimeType, nil
 	}
 
 	if urlSource, ok := source.(*types.URLSource); ok {
@@ -516,23 +557,8 @@ func parseHEIFDimensions(data []byte) (int, int, bool) {
 	// Walk top-level boxes to find "meta"
 	offset := 0
 	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		boxType := string(data[offset+4 : offset+8])
-		headerLen := 8
-
-		if boxSize == 1 {
-			// 64-bit extended size
-			if offset+16 > size {
-				break
-			}
-			boxSize = int(binary.BigEndian.Uint64(data[offset+8 : offset+16]))
-			headerLen = 16
-		} else if boxSize == 0 {
-			// box extends to end of data
-			boxSize = size - offset
-		}
-
-		if boxSize < headerLen || offset+boxSize > size {
+		boxSize, headerLen, boxType, ok := nextISOBMFFBox(data, offset)
+		if !ok {
 			break
 		}
 
@@ -552,18 +578,25 @@ func parseHEIFDimensions(data []byte) (int, int, bool) {
 // findISPE recursively searches for the ispe box within container boxes.
 // Path: meta -> iprp -> ipco -> ispe
 func findISPE(data []byte) (int, int, bool) {
+	return findISPEAtDepth(data, 0)
+}
+
+func findISPEAtDepth(data []byte, depth int) (int, int, bool) {
+	const maxISOBMFFContainerDepth = 32
+	if depth > maxISOBMFFContainerDepth {
+		return 0, 0, false
+	}
 	offset := 0
 	size := len(data)
 	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		boxType := string(data[offset+4 : offset+8])
-		if boxSize < 8 || offset+boxSize > size {
+		boxSize, headerLen, boxType, ok := nextISOBMFFBox(data, offset)
+		if !ok {
 			break
 		}
-		content := data[offset+8 : offset+boxSize]
+		content := data[offset+headerLen : offset+boxSize]
 		switch boxType {
 		case "iprp", "ipco":
-			if w, h, ok := findISPE(content); ok {
+			if w, h, ok := findISPEAtDepth(content, depth+1); ok {
 				return w, h, true
 			}
 		case "ispe":
@@ -579,6 +612,33 @@ func findISPE(data []byte) (int, int, bool) {
 		offset += boxSize
 	}
 	return 0, 0, false
+}
+
+func nextISOBMFFBox(data []byte, offset int) (int, int, string, bool) {
+	if offset < 0 || offset > len(data)-8 {
+		return 0, 0, "", false
+	}
+	size32 := binary.BigEndian.Uint32(data[offset : offset+4])
+	boxType := string(data[offset+4 : offset+8])
+	headerLen := 8
+	boxSize := uint64(size32)
+	switch size32 {
+	case 0:
+		boxSize = uint64(len(data) - offset)
+	case 1:
+		if offset > len(data)-16 {
+			return 0, 0, "", false
+		}
+		headerLen = 16
+		boxSize = binary.BigEndian.Uint64(data[offset+8 : offset+16])
+	}
+	// Compare in uint64 before converting to int. A hostile extended-size box
+	// can otherwise wrap the conversion or offset addition and panic slicing.
+	remaining := len(data) - offset
+	if boxSize < uint64(headerLen) || boxSize > uint64(remaining) {
+		return 0, 0, "", false
+	}
+	return int(boxSize), headerLen, boxType, true
 }
 
 // guessMimeTypeFromURL 从 URL 猜测 MIME 类型

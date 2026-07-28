@@ -31,6 +31,9 @@ func UpdateModelRequestRateLimitGroupByJSONString(jsonStr string) error {
 	if err := common.UnmarshalJsonStr(jsonStr, &next); err != nil {
 		return err
 	}
+	if err := validateModelRequestRateLimitGroups(next); err != nil {
+		return err
+	}
 
 	ModelRequestRateLimitMutex.Lock()
 	defer ModelRequestRateLimitMutex.Unlock()
@@ -55,16 +58,25 @@ func GetGroupRateLimit(group string) (totalCount, successCount int, found bool) 
 
 func CheckModelRequestRateLimitGroup(jsonStr string) error {
 	checkModelRequestRateLimitGroup := make(map[string][2]int)
-	err := common.UnmarshalJsonStr(jsonStr, &checkModelRequestRateLimitGroup)
-	if err != nil {
+	if err := common.UnmarshalJsonStr(jsonStr, &checkModelRequestRateLimitGroup); err != nil {
 		return err
 	}
-	for group, limits := range checkModelRequestRateLimitGroup {
+	return validateModelRequestRateLimitGroups(checkModelRequestRateLimitGroup)
+}
+
+func validateModelRequestRateLimitGroups(groups map[string][2]int) error {
+	for group, limits := range groups {
 		if limits[0] < 0 || limits[1] < 1 {
-			return fmt.Errorf("group %s has negative rate limit values: [%d, %d]", group, limits[0], limits[1])
+			return fmt.Errorf(
+				"group %s rate limits must be in the ranges [0, %d] and [1, %d], got [%d, %d]",
+				group, math.MaxInt32, math.MaxInt32, limits[0], limits[1],
+			)
 		}
 		if limits[0] > math.MaxInt32 || limits[1] > math.MaxInt32 {
-			return fmt.Errorf("group %s [%d, %d] has max rate limits value 2147483647", group, limits[0], limits[1])
+			return fmt.Errorf(
+				"group %s rate limits must be in the ranges [0, %d] and [1, %d], got [%d, %d]",
+				group, math.MaxInt32, math.MaxInt32, limits[0], limits[1],
+			)
 		}
 	}
 

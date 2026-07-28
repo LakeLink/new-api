@@ -171,6 +171,7 @@ func UsageFromClaudeAPIUsage(usage *dto.ClaudeUsage) *dto.Usage {
 	semanticUsage := &dto.Usage{
 		PromptTokens:     usage.InputTokens,
 		CompletionTokens: usage.OutputTokens,
+		ClaudeSpeed:      usage.Speed,
 		UsageSemantic:    "anthropic",
 		UsageSource:      "anthropic",
 		BillingUsage:     dto.CloneBillingUsage(usage.BillingUsage),
@@ -247,6 +248,15 @@ func BuildMessageDeltaPatchUsage(claudeResponse *dto.ClaudeResponse, claudeInfo 
 	if usage.CacheCreationInputTokens == 0 && claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens > 0 {
 		usage.CacheCreationInputTokens = claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens
 	}
+	if usage.Speed == "" {
+		usage.Speed = claudeInfo.Usage.ClaudeSpeed
+	}
+	if usage.ServerToolUse == nil && claudeInfo.Usage.BillingUsage != nil &&
+		claudeInfo.Usage.BillingUsage.ClaudeUsage != nil &&
+		claudeInfo.Usage.BillingUsage.ClaudeUsage.ServerToolUse != nil {
+		serverToolUse := *claudeInfo.Usage.BillingUsage.ClaudeUsage.ServerToolUse
+		usage.ServerToolUse = &serverToolUse
+	}
 	cacheCreation5m := 0
 	cacheCreation1h := 0
 	if usage.CacheCreation != nil {
@@ -271,7 +281,7 @@ func BuildMessageDeltaPatchUsage(claudeResponse *dto.ClaudeResponse, claudeInfo 
 	return usage
 }
 
-func claudeBillingUsageFromSemanticUsage(usage *dto.Usage) *dto.BillingUsage {
+func claudeBillingUsageFromSemanticUsage(usage *dto.Usage, serverToolUse *dto.ClaudeServerToolUse) *dto.BillingUsage {
 	if usage == nil {
 		return nil
 	}
@@ -285,6 +295,14 @@ func claudeBillingUsageFromSemanticUsage(usage *dto.Usage) *dto.BillingUsage {
 		CacheCreationInputTokens: usage.PromptTokensDetails.CachedCreationTokens,
 		CacheReadInputTokens:     usage.PromptTokensDetails.CachedTokens,
 		OutputTokens:             usage.CompletionTokens,
+		Speed:                    usage.ClaudeSpeed,
+	}
+	if serverToolUse == nil && usage.BillingUsage != nil && usage.BillingUsage.ClaudeUsage != nil {
+		serverToolUse = usage.BillingUsage.ClaudeUsage.ServerToolUse
+	}
+	if serverToolUse != nil {
+		serverToolUseClone := *serverToolUse
+		claudeUsage.ServerToolUse = &serverToolUseClone
 	}
 	if cacheCreation5m > 0 || cacheCreation1h > 0 {
 		claudeUsage.CacheCreation = &dto.ClaudeCacheCreationUsage{
@@ -344,13 +362,17 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 
 		if claudeResponse.Message != nil && claudeResponse.Message.Usage != nil {
 			claudeInfo.Usage.PromptTokens = claudeResponse.Message.Usage.InputTokens
+			claudeInfo.Usage.ClaudeSpeed = claudeResponse.Message.Usage.Speed
 			claudeInfo.Usage.UsageSemantic = "anthropic"
 			claudeInfo.Usage.PromptTokensDetails.CachedTokens = claudeResponse.Message.Usage.CacheReadInputTokens
 			claudeInfo.Usage.PromptTokensDetails.CachedCreationTokens = claudeResponse.Message.Usage.CacheCreationInputTokens
 			claudeInfo.Usage.ClaudeCacheCreation5mTokens = claudeResponse.Message.Usage.GetCacheCreation5mTokens()
 			claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Message.Usage.GetCacheCreation1hTokens()
 			claudeInfo.Usage.CompletionTokens = claudeResponse.Message.Usage.OutputTokens
-			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(claudeInfo.Usage)
+			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(
+				claudeInfo.Usage,
+				claudeResponse.Message.Usage.ServerToolUse,
+			)
 		}
 	} else if claudeResponse.Type == "content_block_delta" {
 		if claudeResponse.Delta != nil {
@@ -364,6 +386,9 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	} else if claudeResponse.Type == "message_delta" {
 		if claudeResponse.Usage != nil {
 			claudeInfo.Usage.UsageSemantic = "anthropic"
+			if claudeResponse.Usage.Speed != "" {
+				claudeInfo.Usage.ClaudeSpeed = claudeResponse.Usage.Speed
+			}
 			if claudeResponse.Usage.InputTokens > 0 {
 				claudeInfo.Usage.PromptTokens = claudeResponse.Usage.InputTokens
 			}
@@ -383,7 +408,10 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 				claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
 			}
 			claudeInfo.Usage.TotalTokens = claudeInfo.Usage.PromptTokens + claudeInfo.Usage.CompletionTokens
-			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(claudeInfo.Usage)
+			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(
+				claudeInfo.Usage,
+				claudeResponse.Usage.ServerToolUse,
+			)
 		}
 
 		claudeInfo.Done = true

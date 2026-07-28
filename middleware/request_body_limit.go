@@ -36,7 +36,7 @@ func AnonymousRequestBodyLimit() gin.HandlerFunc {
 }
 
 func readAnonymousRequestBody(body io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(body, common.ReadLimitWithOverrunByte(maxBytes)))
 	if err != nil {
 		return nil, err
 	}

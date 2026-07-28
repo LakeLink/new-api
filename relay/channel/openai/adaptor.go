@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -31,7 +33,6 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
-	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
 )
@@ -83,7 +84,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	//}
 	if info.SupportStreamOptions && info.IsStream {
 		aiRequest.StreamOptions = &dto.StreamOptions{
-			IncludeUsage: true,
+			IncludeUsage: common.GetPointer(true),
 		}
 	}
 	return a.ConvertOpenAIRequest(c, info, aiRequest)
@@ -289,7 +290,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		// 没有做排除3.5Haiku等，要出问题再加吧，最佳兼容性（不是
 		if request.THINKING != nil && strings.HasPrefix(info.UpstreamModelName, "anthropic") {
 			var thinking dto.Thinking // Claude标准Thinking格式
-			if err := json.Unmarshal(request.THINKING, &thinking); err != nil {
+			if err := common.Unmarshal(request.THINKING, &thinking); err != nil {
 				return nil, fmt.Errorf("error Unmarshal thinking: %w", err)
 			}
 
@@ -302,7 +303,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 
 				reasoning := openrouter.RequestReasoning{
 					Enabled:   true,
-					MaxTokens: *thinking.BudgetTokens,
+					MaxTokens: thinking.BudgetTokens,
 				}
 
 				marshal, err := common.Marshal(reasoning)
@@ -321,7 +322,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	isOModel := dto.IsOpenAIReasoningOModel(info.UpstreamModelName)
 	isGPT5Model := dto.IsOpenAIGPT5Model(info.UpstreamModelName)
 	if isOModel || isGPT5Model {
-		if lo.FromPtrOr(request.MaxCompletionTokens, uint(0)) == 0 && lo.FromPtrOr(request.MaxTokens, uint(0)) != 0 {
+		if request.MaxCompletionTokens == nil && request.MaxTokens != nil {
 			request.MaxCompletionTokens = request.MaxTokens
 			request.MaxTokens = nil
 		}
@@ -379,24 +380,27 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		var requestBody bytes.Buffer
 		writer := multipart.NewWriter(&requestBody)
 
-		writer.WriteField("model", request.Model)
+		if err := writer.WriteField("model", request.Model); err != nil {
+			return nil, fmt.Errorf("write audio model field: %w", err)
+		}
 
 		formData, err2 := common.ParseMultipartFormReusable(c)
 		if err2 != nil {
 			return nil, fmt.Errorf("error parsing multipart form: %w", err2)
 		}
 
-		// 打印类似 curl 命令格式的信息
-		logger.LogDebug(c.Request.Context(), "--form 'model=\"%s\"'", request.Model)
-
-		// 遍历表单字段并打印输出
+		fieldCount := 1
+		fieldBytes := len(request.Model)
 		for key, values := range formData.Value {
 			if key == "model" {
 				continue
 			}
 			for _, value := range values {
-				writer.WriteField(key, value)
-				logger.LogDebug(c.Request.Context(), "--form '%s=\"%s\"'", key, value)
+				if err := writer.WriteField(key, value); err != nil {
+					return nil, fmt.Errorf("write audio form field: %w", err)
+				}
+				fieldCount++
+				fieldBytes += len(value)
 			}
 		}
 
@@ -408,8 +412,13 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 		// 使用 formData 中的第一个文件
 		fileHeader := fileHeaders[0]
-		logger.LogDebug(c.Request.Context(), "--form 'file=@\"%s\"' (size: %d bytes, content-type: %s)",
-			fileHeader.Filename, fileHeader.Size, fileHeader.Header.Get("Content-Type"))
+		logger.LogDebug(
+			c.Request.Context(),
+			"audio multipart request prepared: fields=%d field_bytes=%d file_bytes=%d",
+			fieldCount,
+			fieldBytes,
+			fileHeader.Size,
+		)
 
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -443,7 +452,9 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		var requestBody bytes.Buffer
 		writer := multipart.NewWriter(&requestBody)
 
-		writer.WriteField("model", request.Model)
+		if err := writer.WriteField("model", request.Model); err != nil {
+			return nil, fmt.Errorf("write image model field: %w", err)
+		}
 		// 使用已解析的 multipart 表单，避免重复解析
 		mf := c.Request.MultipartForm
 		if mf == nil {
@@ -463,34 +474,28 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 					continue
 				}
 				for _, value := range values {
-					writer.WriteField(key, value)
+					if err := writer.WriteField(key, value); err != nil {
+						return nil, fmt.Errorf("write image edit field %q: %w", key, err)
+					}
 				}
 			}
 		}
 
 		if mf != nil && mf.File != nil {
-			// Check if "image" field exists in any form, including array notation
 			var imageFiles []*multipart.FileHeader
-			var exists bool
-
-			// First check for standard "image" field
-			if imageFiles, exists = mf.File["image"]; !exists || len(imageFiles) == 0 {
-				// If not found, check for "image[]" field
-				if imageFiles, exists = mf.File["image[]"]; !exists || len(imageFiles) == 0 {
-					// If still not found, iterate through all fields to find any that start with "image["
-					foundArrayImages := false
-					for fieldName, files := range mf.File {
-						if strings.HasPrefix(fieldName, "image[") && len(files) > 0 {
-							foundArrayImages = true
-							imageFiles = append(imageFiles, files...)
-						}
-					}
-
-					// If no image fields found at all
-					if !foundArrayImages && (len(imageFiles) == 0) {
-						return nil, errors.New("image is required")
-					}
+			imageFieldNames := make([]string, 0, len(mf.File))
+			for fieldName := range mf.File {
+				if fieldName == "image" || fieldName == "image[]" ||
+					(strings.HasPrefix(fieldName, "image[") && strings.HasSuffix(fieldName, "]")) {
+					imageFieldNames = append(imageFieldNames, fieldName)
 				}
+			}
+			sort.Strings(imageFieldNames)
+			for _, fieldName := range imageFieldNames {
+				imageFiles = append(imageFiles, mf.File[fieldName]...)
+			}
+			if len(imageFiles) == 0 {
+				return nil, errors.New("image is required")
 			}
 
 			// Process all image files
@@ -511,20 +516,25 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 				// Create a form file with the appropriate content type
 				h := make(textproto.MIMEHeader)
-				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, fileHeader.Filename))
+				h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+					"name": fieldName, "filename": fileHeader.Filename,
+				}))
 				h.Set("Content-Type", mimeType)
 
 				part, err := writer.CreatePart(h)
 				if err != nil {
+					_ = file.Close()
 					return nil, fmt.Errorf("create form part failed for image %d: %w", i, err)
 				}
 
-				if _, err := io.Copy(part, file); err != nil {
-					return nil, fmt.Errorf("copy file failed for image %d: %w", i, err)
+				_, copyErr := io.Copy(part, file)
+				closeErr := file.Close()
+				if copyErr != nil {
+					return nil, fmt.Errorf("copy file failed for image %d: %w", i, copyErr)
 				}
-
-				// 复制完立即关闭，避免在循环内使用 defer 占用资源
-				_ = file.Close()
+				if closeErr != nil {
+					return nil, fmt.Errorf("close image file %d: %w", i, closeErr)
+				}
 			}
 
 			// Handle mask file if present
@@ -540,25 +550,34 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 				// Create a form file with the appropriate content type
 				h := make(textproto.MIMEHeader)
-				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="mask"; filename="%s"`, maskFiles[0].Filename))
+				h.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+					"name": "mask", "filename": maskFiles[0].Filename,
+				}))
 				h.Set("Content-Type", mimeType)
 
 				maskPart, err := writer.CreatePart(h)
 				if err != nil {
+					_ = maskFile.Close()
 					return nil, errors.New("create form file failed for mask")
 				}
 
-				if _, err := io.Copy(maskPart, maskFile); err != nil {
+				_, copyErr := io.Copy(maskPart, maskFile)
+				closeErr := maskFile.Close()
+				if copyErr != nil {
 					return nil, errors.New("copy mask file failed")
 				}
-				_ = maskFile.Close()
+				if closeErr != nil {
+					return nil, fmt.Errorf("close mask file: %w", closeErr)
+				}
 			}
 		} else {
 			return nil, errors.New("no multipart form data found")
 		}
 
 		// 关闭 multipart 编写器以设置分界线
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("close image edit multipart body: %w", err)
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		return &requestBody, nil
 

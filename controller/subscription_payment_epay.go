@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/Calcium-Ion/go-epay/epay"
@@ -66,12 +65,12 @@ func SubscriptionRequestEpay(c *gin.Context) {
 	}
 
 	callBackAddress := service.GetCallbackAddress()
-	returnUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/return")
+	returnUrl, err := parsePaymentCallbackURL(callBackAddress + "/api/subscription/epay/return")
 	if err != nil {
 		common.ApiErrorMsg(c, "回调地址配置错误")
 		return
 	}
-	notifyUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/notify")
+	notifyUrl, err := parsePaymentCallbackURL(callBackAddress + "/api/subscription/epay/notify")
 	if err != nil {
 		common.ApiErrorMsg(c, "回调地址配置错误")
 		return
@@ -95,6 +94,10 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		PaymentProvider: model.PaymentProviderEpay,
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
+	}
+	if err := order.SetPlanSnapshot(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
 	}
 	if err := order.Insert(); err != nil {
 		common.ApiErrorMsg(c, "创建订单失败")
@@ -121,9 +124,9 @@ func completeSubscriptionEpayCallback(verifyInfo *epay.VerifyRes) error {
 	if verifyInfo == nil || verifyInfo.ServiceTradeNo == "" || verifyInfo.TradeNo == "" {
 		return errors.New("易支付回调缺少订单标识")
 	}
-	order := model.GetSubscriptionOrderByTradeNo(verifyInfo.ServiceTradeNo)
-	if order == nil {
-		return model.ErrSubscriptionOrderNotFound
+	order, err := model.FindSubscriptionOrderByTradeNo(verifyInfo.ServiceTradeNo)
+	if err != nil {
+		return err
 	}
 	if order.PaymentProvider != model.PaymentProviderEpay || order.PaymentMethod != verifyInfo.Type {
 		return model.ErrPaymentMethodMismatch

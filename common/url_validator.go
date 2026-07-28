@@ -3,10 +3,45 @@ package common
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
 )
+
+// ParseAbsoluteHTTPURL validates the common syntax requirements for outbound
+// HTTP targets. It deliberately does not apply deployment-specific
+// domain/IP policy; callers that fetch user-controlled URLs must still apply
+// SSRF validation before dispatch.
+func ParseAbsoluteHTTPURL(rawURL string) (*url.URL, error) {
+	if rawURL == "" || rawURL != strings.TrimSpace(rawURL) {
+		return nil, fmt.Errorf("URL must not be empty or contain surrounding whitespace")
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL format: %w", err)
+	}
+	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return nil, fmt.Errorf("invalid URL scheme: only http and https are allowed")
+	}
+	if parsedURL.Host == "" || parsedURL.Hostname() == "" || parsedURL.Opaque != "" {
+		return nil, fmt.Errorf("URL must be absolute and include a host")
+	}
+	if portText := parsedURL.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("URL contains an invalid port")
+		}
+	}
+	if parsedURL.User != nil {
+		return nil, fmt.Errorf("URL credentials are not allowed")
+	}
+	if parsedURL.Fragment != "" || parsedURL.RawFragment != "" {
+		return nil, fmt.Errorf("URL fragments are not allowed")
+	}
+	return parsedURL, nil
+}
 
 // ValidateRedirectURL validates that a redirect URL is safe to use.
 // It checks that:

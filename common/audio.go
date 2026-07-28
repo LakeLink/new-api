@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/abema/go-mp4"
 	"github.com/go-audio/aiff"
@@ -20,6 +21,13 @@ import (
 // 它不再依赖外部的 ffmpeg 或 ffprobe 程序。
 func GetAudioDuration(ctx context.Context, f io.ReadSeeker, ext string) (duration float64, err error) {
 	SysLog(fmt.Sprintf("GetAudioDuration: ext=%s", ext))
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+	}
 	// 根据文件扩展名选择解析器
 	switch ext {
 	case ".mp3":
@@ -44,8 +52,21 @@ func GetAudioDuration(ctx context.Context, f io.ReadSeeker, ext string) (duratio
 	default:
 		return 0, fmt.Errorf("unsupported audio format: %s", ext)
 	}
+	if err != nil {
+		return 0, err
+	}
+	if math.IsNaN(duration) || math.IsInf(duration, 0) || duration < 0 {
+		return 0, errors.New("invalid audio duration metadata")
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+	}
 	SysLog(fmt.Sprintf("GetAudioDuration: duration=%f", duration))
-	return duration, err
+	return duration, nil
 }
 
 // getMP3Duration 解析 MP3 文件以获取时长。
@@ -153,6 +174,9 @@ func getM4ADuration(r io.ReadSeeker) (float64, error) {
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to probe m4a/mp4 file")
 	}
+	if info.Timescale == 0 {
+		return 0, errors.New("invalid m4a/mp4 timescale")
+	}
 	// 时长 = Duration / Timescale
 	return float64(info.Duration) / float64(info.Timescale), nil
 }
@@ -173,6 +197,9 @@ func getOGGDuration(r io.ReadSeeker) (float64, error) {
 	// 需要读取整个文件来获取总采样数
 	channels := reader.Channels()
 	sampleRate := reader.SampleRate()
+	if channels <= 0 || sampleRate <= 0 {
+		return 0, errors.New("invalid ogg audio metadata")
+	}
 
 	// 估算方法：读取到文件结尾
 	var totalSamples int64
@@ -226,7 +253,11 @@ func getOpusDuration(r io.ReadSeeker) (float64, error) {
 		}
 
 		// 读取 granule position (字节 6-13, 小端序)
-		granulePos := int64(binary.LittleEndian.Uint64(buf[6:14]))
+		rawGranulePos := binary.LittleEndian.Uint64(buf[6:14])
+		if rawGranulePos > math.MaxInt64 {
+			return 0, errors.New("opus granule position is out of range")
+		}
+		granulePos := int64(rawGranulePos)
 		if granulePos > totalGranulePos {
 			totalGranulePos = granulePos
 		}

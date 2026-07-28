@@ -8,7 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -35,25 +34,16 @@ func uploadDifyFile(c *gin.Context, info *relaycommon.RelayInfo, user string, me
 			base64Data = base64Data[idx+1:]
 		}
 
-		// Decode base64 string
-		decodedData, err := base64.StdEncoding.DecodeString(base64Data)
+		maxFileBytes := common.BytesFromMegabytes(constant.MaxFileDownloadMB)
+		if maxFileBytes <= 0 {
+			maxFileBytes = 64 << 20
+		}
+		decodedData, err := service.ReadResponseBodyWithLimit(
+			base64.NewDecoder(base64.StdEncoding, strings.NewReader(base64Data)),
+			maxFileBytes,
+		)
 		if err != nil {
 			common.SysLog("failed to decode base64: " + err.Error())
-			return nil
-		}
-
-		// Create temporary file
-		tempFile, err := os.CreateTemp("", "dify-upload-*")
-		if err != nil {
-			common.SysLog("failed to create temp file: " + err.Error())
-			return nil
-		}
-		defer tempFile.Close()
-		defer os.Remove(tempFile.Name())
-
-		// Write decoded data to temp file
-		if _, err := tempFile.Write(decodedData); err != nil {
-			common.SysLog("failed to write to temp file: " + err.Error())
 			return nil
 		}
 
@@ -85,12 +75,15 @@ func uploadDifyFile(c *gin.Context, info *relaycommon.RelayInfo, user string, me
 			common.SysLog("failed to copy file content: " + err.Error())
 			return nil
 		}
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			common.SysLog("failed to finalize multipart upload: " + err.Error())
+			return nil
+		}
 
 		// Create HTTP request
 		req, err := http.NewRequestWithContext(info.GetRelayContext(c.Request.Context()), "POST", uploadUrl, body)
 		if err != nil {
-			common.SysLog("failed to create request: " + err.Error())
+			common.SysLog("failed to create request: " + service.SanitizeNetworkError(err).Error())
 			return nil
 		}
 
@@ -98,20 +91,37 @@ func uploadDifyFile(c *gin.Context, info *relaycommon.RelayInfo, user string, me
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", info.ApiKey))
 
 		// Send request
-		client := service.GetHttpClient()
-		resp, err := client.Do(req)
+		client, err := service.GetHttpClientWithProxy(info.ChannelSetting.Proxy)
+		if err != nil {
+			common.SysLog("failed to create Dify proxy client: " + err.Error())
+			return nil
+		}
+		resp, err := service.DoUpstreamRequest(client, req)
 		if err != nil {
 			common.SysLog("failed to send request: " + err.Error())
 			return nil
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			common.SysLog(fmt.Sprintf("Dify file upload failed with status %d", resp.StatusCode))
+			return nil
+		}
 
 		// Parse response
 		var result struct {
 			Id string `json:"id"`
 		}
-		if err := common.DecodeJson(resp.Body, &result); err != nil {
+		responseBody, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
+		if err != nil {
+			common.SysLog("failed to read upload response: " + err.Error())
+			return nil
+		}
+		if err := common.Unmarshal(responseBody, &result); err != nil {
 			common.SysLog("failed to decode response: " + err.Error())
+			return nil
+		}
+		if strings.TrimSpace(result.Id) == "" {
+			common.SysLog("Dify file upload response is missing id")
 			return nil
 		}
 
@@ -264,13 +274,14 @@ func difyStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 }
 
 func difyHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	var difyResponse DifyChatCompletionResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &difyResponse)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)

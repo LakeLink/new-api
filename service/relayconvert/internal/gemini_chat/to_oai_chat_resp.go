@@ -25,16 +25,25 @@ func UsageFromGeminiMetadata(metadata *dto.GeminiUsageMetadata, fallbackPromptTo
 	}
 
 	usage := &dto.Usage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount,
-		TotalTokens:      metadata.TotalTokenCount,
-		BillingUsage:     dto.CloneBillingUsage(metadata.BillingUsage),
+		PromptTokens:      promptTokens,
+		CompletionTokens:  metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount,
+		TotalTokens:       metadata.TotalTokenCount,
+		GeminiServiceTier: metadata.ServiceTier,
+		BillingUsage:      dto.CloneBillingUsage(metadata.BillingUsage),
 	}
 	if usage.BillingUsage == nil {
 		usage.BillingUsage = dto.NewGeminiChatBillingUsage(metadata)
 	}
 	usage.CompletionTokenDetails.ReasoningTokens = metadata.ThoughtsTokenCount
 	usage.PromptTokensDetails.CachedTokens = metadata.CachedContentTokenCount
+	for _, detail := range metadata.CacheTokensDetails {
+		switch detail.Modality {
+		case "AUDIO":
+			usage.GeminiCachedAudioInputTokens += detail.TokenCount
+		case "IMAGE":
+			usage.GeminiCachedImageInputTokens += detail.TokenCount
+		}
+	}
 
 	for _, detail := range metadata.PromptTokensDetails {
 		if detail.Modality == "AUDIO" {
@@ -82,6 +91,9 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 		Object:  "chat.completion",
 		Created: created,
 		Choices: make([]dto.OpenAITextResponseChoice, 0, len(response.Candidates)),
+	}
+	if metadata := response.GetUsageMetadata(); metadata != nil {
+		fullTextResponse.ServiceTier = metadata.ServiceTier
 	}
 	isToolCall := false
 	for _, candidate := range response.Candidates {
@@ -134,7 +146,7 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 					if call := geminiResponseToolCall(&part); call != nil {
 						toolCalls = append(toolCalls, *call)
 					}
-				} else if part.Thought {
+				} else if part.Thought != nil && *part.Thought {
 					choice.Message.ReasoningContent = &part.Text
 				} else {
 					if part.ExecutableCode != nil {
@@ -241,7 +253,7 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 					call.SetIndex(len(choice.Delta.ToolCalls))
 					choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, *call)
 				}
-			} else if part.Thought {
+			} else if part.Thought != nil && *part.Thought {
 				isThought = true
 				writeSep()
 				content.WriteString(part.Text)
@@ -278,6 +290,9 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 	response := dto.ChatCompletionsStreamResponse{
 		Object:  "chat.completion.chunk",
 		Choices: choices,
+	}
+	if metadata := geminiResponse.GetUsageMetadata(); metadata != nil {
+		response.ServiceTier = metadata.ServiceTier
 	}
 	return &response, isStop
 }

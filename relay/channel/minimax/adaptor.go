@@ -105,7 +105,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	if info.RelayMode != constant.RelayModeImagesGenerations {
 		return nil, fmt.Errorf("unsupported image relay mode: %d", info.RelayMode)
 	}
-	return oaiImage2MiniMaxImageRequest(request), nil
+	converted, err := oaiImage2MiniMaxImageRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {

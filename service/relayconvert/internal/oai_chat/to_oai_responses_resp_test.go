@@ -11,9 +11,10 @@ import (
 
 func TestChatCompletionsResponseToResponsesPreservesTextToolCallsAndUsage(t *testing.T) {
 	chat := &dto.OpenAITextResponse{
-		Id:      "chatcmpl_1",
-		Model:   "gpt-test",
-		Created: 456,
+		Id:          "chatcmpl_1",
+		Model:       "gpt-test",
+		Created:     456,
+		ServiceTier: "priority",
 		Choices: []dto.OpenAITextResponseChoice{
 			{
 				Message:      assistantMessageWithTool("I will call.", "call_1", "lookup", `{"q":"x"}`),
@@ -29,6 +30,7 @@ func TestChatCompletionsResponseToResponsesPreservesTextToolCallsAndUsage(t *tes
 
 	assert.Equal(t, "resp_1", resp.ID)
 	assert.Equal(t, "response", resp.Object)
+	assert.Equal(t, "priority", resp.ServiceTier)
 	assert.Equal(t, `"completed"`, string(resp.Status))
 	assert.Equal(t, 3, resp.Usage.InputTokens)
 	assert.Equal(t, 5, resp.Usage.OutputTokens)
@@ -114,7 +116,8 @@ func TestChatCompletionsStreamToResponsesEventsAggregatesUsageAndToolArgs(t *tes
 		},
 	})...)
 	events = append(events, mustResponsesEventsFromChatChunk(t, state, &dto.ChatCompletionsStreamResponse{
-		Usage: &dto.Usage{PromptTokens: 2, CompletionTokens: 4, TotalTokens: 6},
+		ServiceTier: "flex",
+		Usage:       &dto.Usage{PromptTokens: 2, CompletionTokens: 4, TotalTokens: 6},
 	})...)
 	events = append(events, FinalizeChatCompletionsStreamToResponses(state)...)
 
@@ -126,6 +129,7 @@ func TestChatCompletionsStreamToResponsesEventsAggregatesUsageAndToolArgs(t *tes
 	assert.Equal(t, `{"q":"x"}`, events[4].Payload.Delta)
 	assert.Equal(t, responsesEventCompleted, events[9].Type)
 	require.NotNil(t, events[9].Payload.Response)
+	assert.Equal(t, "flex", events[9].Payload.Response.ServiceTier)
 	assert.Equal(t, 6, events[9].Payload.Response.Usage.TotalTokens)
 	require.Len(t, events[9].Payload.Response.Output, 2)
 	assert.Equal(t, "hello", events[9].Payload.Response.Output[0].Content[0].Text)

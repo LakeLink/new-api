@@ -17,5 +17,5 @@ func init() {
 }
 
 func GetLegalSettings() *LegalSettings {
-	return &defaultLegalSettings
+	return config.Snapshot[LegalSettings]("legal")
 }

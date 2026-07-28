@@ -54,11 +54,13 @@ const (
 	ContextKeyUsingGroup  ContextKey = "group"
 	ContextKeyUserName    ContextKey = "username"
 
-	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
+	ContextKeyLocalCountTokens           ContextKey = "local_count_tokens"
+	ContextKeyGeminiGroundingSearchCount ContextKey = "gemini_grounding_search_count"
+	ContextKeyGeminiGroundingTool        ContextKey = "gemini_grounding_tool"
 
 	ContextKeySystemPromptOverride ContextKey = "system_prompt_override"
 
-	// ContextKeyFileSourcesToCleanup stores file sources that need cleanup when request ends
+	// ContextKeyFileSourcesToCleanup stores the request's file-source cleanup registry.
 	ContextKeyFileSourcesToCleanup ContextKey = "file_sources_to_cleanup"
 
 	// ContextKeyAdminRejectReason stores an admin-only reject/block reason extracted from upstream responses.

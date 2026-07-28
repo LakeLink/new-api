@@ -7,11 +7,57 @@ import (
 	"strings"
 	"testing"
 
+	rootcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTaskSubmitRequestRejectsMalformedDurationAndMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "overflow duration string", body: `{"duration":"999999999999999999999999999999"}`},
+		{name: "fractional duration", body: `{"duration":1.5}`},
+		{name: "empty duration string", body: `{"duration":""}`},
+		{name: "metadata array", body: `{"metadata":[]}`},
+		{name: "invalid encoded metadata", body: `{"metadata":"not-json"}`},
+		{name: "encoded metadata array", body: `{"metadata":"[]"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request TaskSubmitReq
+			require.Error(t, rootcommon.Unmarshal([]byte(test.body), &request))
+		})
+	}
+}
+
+func TestTaskSubmitRequestAcceptsCompatibleDurationAndMetadata(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantDuration int
+		wantMetadata map[string]interface{}
+	}{
+		{name: "integer duration", body: `{"duration":8}`, wantDuration: 8},
+		{name: "string duration", body: `{"duration":"8"}`, wantDuration: 8},
+		{name: "metadata object", body: `{"metadata":{"durationSeconds":8}}`, wantMetadata: map[string]interface{}{"durationSeconds": float64(8)}},
+		{name: "encoded metadata object", body: `{"metadata":"{\"durationSeconds\":8}"}`, wantMetadata: map[string]interface{}{"durationSeconds": float64(8)}},
+		{name: "null optional fields", body: `{"duration":null,"metadata":null}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request TaskSubmitReq
+			require.NoError(t, rootcommon.Unmarshal([]byte(test.body), &request))
+			assert.Equal(t, test.wantDuration, request.Duration)
+			assert.Equal(t, test.wantMetadata, request.Metadata)
+		})
+	}
+}
 
 func TestSanitizeURLForLogMasksSensitiveQueryValues(t *testing.T) {
 	rawURL := "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse&key=sk-secret&access_token=ya29-secret&api-version=2024-02-01"
@@ -54,6 +100,26 @@ func TestSanitizeURLForLogKeepsURLWithoutSensitiveQuery(t *testing.T) {
 	got := SanitizeURLForLog(rawURL)
 
 	assert.Equal(t, rawURL, got)
+}
+
+func TestSanitizeURLForLogRemovesUserInfoAndFragment(t *testing.T) {
+	rawURL := "https://api-user:api-password@example.test/v1/chat#access-token"
+
+	got := SanitizeURLForLog(rawURL)
+
+	assert.Equal(t, "https://example.test/v1/chat", got)
+	assert.NotContains(t, got, "api-user")
+	assert.NotContains(t, got, "api-password")
+	assert.NotContains(t, got, "access-token")
+}
+
+func TestSanitizeURLForLogDoesNotEchoInvalidURL(t *testing.T) {
+	rawURL := "https://example.test/\nforged-log-entry"
+
+	got := SanitizeURLForLog(rawURL)
+
+	assert.Equal(t, "[invalid URL]", got)
+	assert.NotContains(t, got, "forged-log-entry")
 }
 
 func TestValidateMultipartDirectNormalizesImageField(t *testing.T) {
@@ -104,6 +170,21 @@ func TestTaskDurationBounds(t *testing.T) {
 		{
 			name:    "huge seconds string is rejected",
 			body:    `{"model":"sora-2","prompt":"a cat","seconds":"9999999999"}`,
+			wantErr: true,
+		},
+		{
+			name:    "seconds integer overflow is rejected",
+			body:    `{"model":"sora-2","prompt":"a cat","seconds":"999999999999999999999999999999"}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid seconds cannot hide behind valid duration",
+			body:    `{"model":"sora-2","prompt":"a cat","duration":8,"seconds":"999999999999999999999999999999"}`,
+			wantErr: true,
+		},
+		{
+			name:    "explicit zero seconds is rejected",
+			body:    `{"model":"sora-2","prompt":"a cat","seconds":"0"}`,
 			wantErr: true,
 		},
 		{

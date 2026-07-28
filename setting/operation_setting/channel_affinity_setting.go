@@ -1,6 +1,17 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+	"math"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/QuantumNous/new-api/setting/config"
+	"golang.org/x/net/http/httpguts"
+)
+
+const maxChannelAffinityEntries = 1_000_000
 
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
@@ -149,10 +160,69 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	},
 }
 
+func (s ChannelAffinitySetting) Validate() error {
+	if s.MaxEntries < 1 || s.MaxEntries > maxChannelAffinityEntries {
+		return fmt.Errorf("channel affinity maximum entries must be in the range [1, %d]", maxChannelAffinityEntries)
+	}
+	maxTTLSeconds := int64(math.MaxInt64 / int64(time.Second))
+	if s.DefaultTTLSeconds < 1 || int64(s.DefaultTTLSeconds) > maxTTLSeconds {
+		return fmt.Errorf("channel affinity default TTL must be in the range [1, %d] seconds", maxTTLSeconds)
+	}
+	if len(s.Rules) > 10_000 {
+		return fmt.Errorf("channel affinity cannot contain more than 10000 rules")
+	}
+	ruleNames := make(map[string]struct{}, len(s.Rules))
+	for index, rule := range s.Rules {
+		name := strings.TrimSpace(rule.Name)
+		if name == "" {
+			return fmt.Errorf("channel affinity rule %d must have a name", index+1)
+		}
+		if _, exists := ruleNames[name]; exists {
+			return fmt.Errorf("channel affinity rule name %q is duplicated", name)
+		}
+		ruleNames[name] = struct{}{}
+		if rule.TTLSeconds < 0 || int64(rule.TTLSeconds) > maxTTLSeconds {
+			return fmt.Errorf("channel affinity rule %q TTL must be in the range [0, %d] seconds", name, maxTTLSeconds)
+		}
+		if len(rule.KeySources) == 0 {
+			return fmt.Errorf("channel affinity rule %q must have at least one key source", name)
+		}
+		for _, pattern := range append(append([]string(nil), rule.ModelRegex...), rule.PathRegex...) {
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("channel affinity rule %q contains invalid regex %q: %w", name, pattern, err)
+			}
+		}
+		if rule.ValueRegex != "" {
+			if _, err := regexp.Compile(rule.ValueRegex); err != nil {
+				return fmt.Errorf("channel affinity rule %q contains invalid value regex: %w", name, err)
+			}
+		}
+		for _, source := range rule.KeySources {
+			switch source.Type {
+			case "context_int", "context_string":
+				if strings.TrimSpace(source.Key) == "" {
+					return fmt.Errorf("channel affinity rule %q source %q requires a key", name, source.Type)
+				}
+			case "request_header":
+				if !httpguts.ValidHeaderFieldName(source.Key) {
+					return fmt.Errorf("channel affinity rule %q contains invalid request header %q", name, source.Key)
+				}
+			case "gjson":
+				if strings.TrimSpace(source.Path) == "" {
+					return fmt.Errorf("channel affinity rule %q gjson source requires a path", name)
+				}
+			default:
+				return fmt.Errorf("channel affinity rule %q contains unsupported key source %q", name, source.Type)
+			}
+		}
+	}
+	return nil
+}
+
 func init() {
 	config.GlobalConfig.Register("channel_affinity_setting", &channelAffinitySetting)
 }
 
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
-	return &channelAffinitySetting
+	return config.Snapshot[ChannelAffinitySetting]("channel_affinity_setting")
 }

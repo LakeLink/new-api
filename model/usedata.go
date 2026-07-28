@@ -1,12 +1,14 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // QuotaData 柱状图数据
@@ -23,6 +25,10 @@ type QuotaData struct {
 	TokenUsed int    `json:"token_used" gorm:"default:0"`
 	Count     int    `json:"count" gorm:"default:0"`
 	Quota     int    `json:"quota" gorm:"default:0"`
+	// BillingEventID is set only for durable, one-row-per-billing-event exports.
+	// Legacy/hourly cache rows keep it NULL, allowing their existing aggregation
+	// behavior while a unique non-NULL event ID makes crash replay idempotent.
+	BillingEventID *string `json:"-" gorm:"type:varchar(64);uniqueIndex"`
 }
 
 type QuotaDataLogParams struct {
@@ -40,11 +46,16 @@ type QuotaDataLogParams struct {
 
 func UpdateQuotaData() {
 	for {
-		if common.DataExportEnabled {
+		if common.GetLegacyOptionBool("DataExportEnabled", &common.DataExportEnabled) {
 			common.SysLog("正在更新数据看板数据...")
 			SaveQuotaDataCache()
 		}
-		time.Sleep(time.Duration(common.DataExportInterval) * time.Minute)
+		time.Sleep(common.SafeIntervalDuration(
+			common.GetLegacyOptionInt("DataExportInterval", &common.DataExportInterval),
+			time.Minute,
+			5*time.Minute,
+			"data export",
+		))
 	}
 }
 
@@ -52,6 +63,12 @@ var CacheQuotaData = make(map[string]*QuotaData)
 var CacheQuotaDataLock = sync.Mutex{}
 
 func logQuotaDataCache(quotaData *QuotaData) {
+	if quotaData == nil {
+		return
+	}
+	quotaData.Count = saturatingQuotaAggregate(0, quotaData.Count, "quota data request count")
+	quotaData.Quota = saturatingQuotaAggregate(0, quotaData.Quota, "quota data quota")
+	quotaData.TokenUsed = saturatingQuotaAggregate(0, quotaData.TokenUsed, "quota data token usage")
 	key := fmt.Sprintf("%d\x00%s\x00%s\x00%d\x00%s\x00%d\x00%d\x00%s",
 		quotaData.UserID,
 		quotaData.Username,
@@ -67,9 +84,9 @@ func logQuotaDataCache(quotaData *QuotaData) {
 	tokenUsed := quotaData.TokenUsed
 	cachedQuotaData, ok := CacheQuotaData[key]
 	if ok {
-		cachedQuotaData.Count += count
-		cachedQuotaData.Quota += quota
-		cachedQuotaData.TokenUsed += tokenUsed
+		cachedQuotaData.Count = saturatingQuotaAggregate(cachedQuotaData.Count, count, "quota data request count")
+		cachedQuotaData.Quota = saturatingQuotaAggregate(cachedQuotaData.Quota, quota, "quota data quota")
+		cachedQuotaData.TokenUsed = saturatingQuotaAggregate(cachedQuotaData.TokenUsed, tokenUsed, "quota data token usage")
 		quotaData = cachedQuotaData
 	}
 	CacheQuotaData[key] = quotaData
@@ -97,45 +114,127 @@ func LogQuotaData(params QuotaDataLogParams) {
 	logQuotaDataCache(quotaData)
 }
 
+// RecordQuotaDataEvent persists one analytics row behind the same deterministic
+// billing event ID used by the consume-log outbox. It is safe to call whether
+// the log was newly inserted or found during replay: a crash can no longer
+// leave a committed billing log with permanently missing quota analytics.
+func RecordQuotaDataEvent(eventID string, params QuotaDataLogParams) error {
+	if eventID == "" {
+		return errors.New("quota data billing event id is empty")
+	}
+	if len(eventID) > 64 {
+		return errors.New("quota data billing event id exceeds 64 bytes")
+	}
+	createdAt := params.CreatedAt
+	if createdAt <= 0 {
+		createdAt = common.GetTimestamp()
+	}
+	createdAt -= createdAt % 3600
+	event := QuotaData{
+		UserID:         params.UserID,
+		Username:       params.Username,
+		ModelName:      params.ModelName,
+		CreatedAt:      createdAt,
+		UseGroup:       params.UseGroup,
+		TokenID:        params.TokenID,
+		ChannelID:      params.ChannelID,
+		NodeName:       params.NodeName,
+		TokenUsed:      params.TokenUsed,
+		Count:          1,
+		Quota:          params.Quota,
+		BillingEventID: &eventID,
+	}
+	if err := DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "billing_event_id"}},
+		DoNothing: true,
+	}).Create(&event).Error; err != nil {
+		return err
+	}
+
+	var persisted QuotaData
+	if err := DB.Where("billing_event_id = ?", eventID).First(&persisted).Error; err != nil {
+		return err
+	}
+	if persisted.UserID != event.UserID ||
+		persisted.Username != event.Username ||
+		persisted.ModelName != event.ModelName ||
+		persisted.CreatedAt != event.CreatedAt ||
+		persisted.UseGroup != event.UseGroup ||
+		persisted.TokenID != event.TokenID ||
+		persisted.ChannelID != event.ChannelID ||
+		persisted.NodeName != event.NodeName ||
+		persisted.TokenUsed != event.TokenUsed ||
+		persisted.Count != event.Count ||
+		persisted.Quota != event.Quota {
+		return errors.New("quota data billing event id reused with different analytics")
+	}
+	return nil
+}
+
 func SaveQuotaDataCache() {
 	CacheQuotaDataLock.Lock()
-	defer CacheQuotaDataLock.Unlock()
-	size := len(CacheQuotaData)
+	pending := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+
+	size := len(pending)
+	failed := make(map[string]*QuotaData)
 	// 如果缓存中有数据，就保存到数据库中
 	// 1. 先查询数据库中是否有数据
 	// 2. 如果有数据，就更新数据
 	// 3. 如果没有数据，就插入数据
-	for _, quotaData := range CacheQuotaData {
+	for key, quotaData := range pending {
 		quotaDataDB := &QuotaData{}
-		DB.Table("quota_data").
+		query := DB.Table("quota_data").
 			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
 				quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
+			Where("billing_event_id IS NULL").
 			First(quotaDataDB)
+		var err error
 		if quotaDataDB.Id > 0 {
-			//quotaDataDB.Count += quotaData.Count
-			//quotaDataDB.Quota += quotaData.Quota
-			//DB.Table("quota_data").Save(quotaDataDB)
-			increaseQuotaData(quotaData)
+			err = increaseQuotaData(quotaDataDB.Id, quotaData)
+		} else if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+			err = DB.Table("quota_data").Create(quotaData).Error
 		} else {
-			DB.Table("quota_data").Create(quotaData)
+			err = query.Error
+		}
+		if err != nil {
+			failed[key] = quotaData
+			common.SysLog(fmt.Sprintf("save quota data cache error: %s", err))
 		}
 	}
-	CacheQuotaData = make(map[string]*QuotaData)
-	common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
+
+	// Logging continues while database I/O is in progress. Merge failed rows
+	// back into the live cache so neither those retries nor newly arrived
+	// counters are lost.
+	CacheQuotaDataLock.Lock()
+	for _, quotaData := range failed {
+		logQuotaDataCache(quotaData)
+	}
+	CacheQuotaDataLock.Unlock()
+	common.SysLog(fmt.Sprintf("保存数据看板数据完成，成功%d条，待重试%d条", size-len(failed), len(failed)))
 }
 
-func increaseQuotaData(quotaData *QuotaData) {
-	err := DB.Table("quota_data").
-		Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-			quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-		Updates(map[string]interface{}{
-			"count":      gorm.Expr("count + ?", quotaData.Count),
-			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
-			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
-		}).Error
-	if err != nil {
-		common.SysLog(fmt.Sprintf("increaseQuotaData error: %s", err))
+func increaseQuotaData(id int, quotaData *QuotaData) error {
+	if id <= 0 || quotaData == nil {
+		return errors.New("invalid quota data aggregate")
 	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var persisted QuotaData
+		if err := lockForUpdate(tx).
+			Where("id = ? AND billing_event_id IS NULL", id).
+			First(&persisted).Error; err != nil {
+			return err
+		}
+		count := saturatingQuotaAggregate(persisted.Count, quotaData.Count, "quota data request count")
+		quota := saturatingQuotaAggregate(persisted.Quota, quotaData.Quota, "quota data quota")
+		tokenUsed := saturatingQuotaAggregate(persisted.TokenUsed, quotaData.TokenUsed, "quota data token usage")
+		return tx.Model(&persisted).Updates(map[string]interface{}{
+			"count":      count,
+			"quota":      quota,
+			"token_used": tokenUsed,
+		}).Error
+	})
 }
 
 func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {

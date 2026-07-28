@@ -20,7 +20,7 @@ func GetAllRedemptions(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(redemptions)
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -35,7 +35,7 @@ func SearchRedemptions(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(redemptions)
 	common.ApiSuccess(c, pageInfo)
 	return

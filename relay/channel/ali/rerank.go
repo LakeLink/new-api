@@ -2,7 +2,6 @@ package ali
 
 import (
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -38,11 +37,12 @@ func ConvertRerankRequest(request dto.RerankRequest) (*AliRerankRequest, error) 
 }
 
 func RerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*types.NewAPIError, *dto.Usage) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 
 	var aliResponse AliRerankResponse
 	err = common.Unmarshal(responseBody, &aliResponse)

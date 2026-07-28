@@ -2,9 +2,11 @@ package hailuo
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +40,55 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+}
+
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
+}
+
+// EstimateBilling preserves the configured price for the provider's default
+// 768P/6s payload and scales documented higher-cost variants. MiniMax publishes
+// these SKU prices at https://platform.minimax.io/docs/guides/pricing-paygo.
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return nil
+	}
+	videoRequest, err := a.convertToRequestPayload(&req, info)
+	if err != nil || videoRequest.Duration == nil {
+		return nil
+	}
+
+	var basePrice, requestPrice float64
+	switch info.UpstreamModelName {
+	case "MiniMax-Hailuo-2.3-Fast":
+		basePrice = 0.19
+		switch {
+		case videoRequest.Resolution == Resolution768P && *videoRequest.Duration == 10:
+			requestPrice = 0.32
+		case videoRequest.Resolution == Resolution1080P && *videoRequest.Duration == 6:
+			requestPrice = 0.33
+		}
+	case "MiniMax-Hailuo-2.3", "MiniMax-Hailuo-02":
+		basePrice = 0.28
+		switch {
+		case videoRequest.Resolution == Resolution768P && *videoRequest.Duration == 10:
+			requestPrice = 0.56
+		case videoRequest.Resolution == Resolution1080P && *videoRequest.Duration == 6:
+			requestPrice = 0.49
+		}
+	}
+	if basePrice == 0 || requestPrice <= basePrice {
+		return nil
+	}
+	return map[string]float64{"provider_cost": requestPrice / basePrice}
 }
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
@@ -79,16 +130,21 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
 	}
-	_ = resp.Body.Close()
 
 	var hResp VideoResponse
 	if err := common.Unmarshal(responseBody, &hResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(
+			errors.Wrapf(err, "unmarshal %d-byte response body", len(responseBody)),
+			"unmarshal_response_body_failed",
+			http.StatusInternalServerError,
+		)
 		return
 	}
 
@@ -111,17 +167,23 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	return hResp.TaskID, responseBody, nil
 }
 
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+func (a *TaskAdaptor) FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
 	}
 
-	uri := fmt.Sprintf("%s%s?task_id=%s", baseUrl, QueryTaskEndpoint, taskID)
+	taskURL, err := url.Parse(strings.TrimRight(baseUrl, "/") + QueryTaskEndpoint)
+	if err != nil || taskURL.Scheme == "" || taskURL.Host == "" {
+		return nil, fmt.Errorf("invalid Hailuo task endpoint")
+	}
+	query := taskURL.Query()
+	query.Set("task_id", taskID)
+	taskURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, taskURL.String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -131,7 +193,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	return service.DoUpstreamRequest(client, req)
 }
 
 func (a *TaskAdaptor) GetModelList() []string {
@@ -159,8 +221,28 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 		Duration:   &duration,
 		Resolution: resolution,
 	}
-	if err := req.UnmarshalMetadata(&videoRequest); err != nil {
+	if len(req.Images) > 0 {
+		videoRequest.FirstFrameImage = req.Images[0]
+	}
+	if len(req.Images) > 1 {
+		videoRequest.LastFrameImage = req.Images[1]
+	}
+	if err := req.UnmarshalMetadata(videoRequest); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata to video request failed")
+	}
+	// Model routing determines the configured price; metadata may only provide
+	// provider-native options for that selected model.
+	videoRequest.Model = info.UpstreamModelName
+	if videoRequest.Duration == nil || *videoRequest.Duration < 1 || *videoRequest.Duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d seconds", relaycommon.MaxTaskDurationSeconds)
+	}
+	if contains(ModelList, info.UpstreamModelName) {
+		if !containsInt(modelConfig.SupportedDurations, *videoRequest.Duration) {
+			return nil, fmt.Errorf("duration %d is not supported by %s", *videoRequest.Duration, info.UpstreamModelName)
+		}
+		if !contains(modelConfig.SupportedResolutions, videoRequest.Resolution) {
+			return nil, fmt.Errorf("resolution %s is not supported by %s", videoRequest.Resolution, info.UpstreamModelName)
+		}
 	}
 
 	return videoRequest, nil
@@ -250,9 +332,17 @@ func (a *TaskAdaptor) buildVideoURL(_, fileID string) string {
 		return ""
 	}
 
-	url := fmt.Sprintf("%s/v1/files/retrieve?file_id=%s", a.baseURL, fileID)
+	retrieveURL, err := url.Parse(strings.TrimRight(a.baseURL, "/") + "/v1/files/retrieve")
+	if err != nil {
+		return ""
+	}
+	query := retrieveURL.Query()
+	query.Set("file_id", fileID)
+	retrieveURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, retrieveURL.String(), nil)
 	if err != nil {
 		return ""
 	}
@@ -260,13 +350,16 @@ func (a *TaskAdaptor) buildVideoURL(_, fileID string) string {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 
-	resp, err := service.GetHttpClient().Do(req)
+	resp, err := service.DoUpstreamRequest(service.GetHttpClientWithTimeout(20*time.Second), req)
 	if err != nil {
 		return ""
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return ""
+	}
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
 	if err != nil {
 		return ""
 	}

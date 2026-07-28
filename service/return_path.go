@@ -8,6 +8,6 @@ import (
 )
 
 func PaymentReturnURL(suffix string) string {
-	base := strings.TrimRight(system_setting.ServerAddress, "/")
+	base := strings.TrimRight(system_setting.GetServerAddress(), "/")
 	return base + common.ThemeAwarePath(suffix)
 }

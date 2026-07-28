@@ -1,10 +1,11 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -136,29 +137,28 @@ func GetClaudeAuthHeader(token string) http.Header {
 }
 
 func GetResponseBody(method, url string, channel *model.Channel, headers http.Header) ([]byte, error) {
-	req, err := http.NewRequest(method, url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create balance request: %s", common.MaskSensitiveInfo(err.Error()))
 	}
 	for k := range headers {
 		req.Header.Add(k, headers.Get(k))
 	}
 	client, err := service.NewProxyHttpClient(channel.GetSetting().Proxy)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create balance proxy client: %s", common.MaskSensitiveInfo(err.Error()))
 	}
-	res, err := client.Do(req)
+	res, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("balance request failed: %s", common.MaskSensitiveInfo(err.Error()))
 	}
+	defer service.CloseResponseBodyGracefully(res)
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code: %d", res.StatusCode)
 	}
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	err = res.Body.Close()
+	body, err := service.ReadUpstreamResponseBody(res.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +182,14 @@ func updateChannelCloseAIBalance(channel *model.Channel) (float64, error) {
 }
 
 func updateChannelOpenAISBBalance(channel *model.Channel) (float64, error) {
-	url := fmt.Sprintf("https://api.openai-sb.com/sb-api/user/status?api_key=%s", channel.Key)
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	endpoint, err := url.Parse("https://api.openai-sb.com/sb-api/user/status")
+	if err != nil {
+		return 0, err
+	}
+	query := endpoint.Query()
+	query.Set("api_key", channel.Key)
+	endpoint.RawQuery = query.Encode()
+	body, err := GetResponseBody("GET", endpoint.String(), channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -350,7 +356,8 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
 		return 0, fmt.Errorf("failed to update moonshot balance, status: %v, code: %d, scode: %s", response.Status, response.Code, response.Scode)
 	}
 	availableBalanceCny := response.Data.AvailableBalance
-	availableBalanceUsd := decimal.NewFromFloat(availableBalanceCny).Div(decimal.NewFromFloat(operation_setting.Price)).InexactFloat64()
+	price := operation_setting.GetLegacyPaymentSetting().Price
+	availableBalanceUsd := decimal.NewFromFloat(availableBalanceCny).Div(decimal.NewFromFloat(price)).InexactFloat64()
 	channel.UpdateBalance(availableBalanceUsd)
 	return availableBalanceUsd, nil
 }
@@ -455,6 +462,7 @@ func updateAllChannelsBalance() error {
 	if err != nil {
 		return err
 	}
+	var updateErrors []error
 	for _, channel := range channels {
 		if channel.Status != common.ChannelStatusEnabled {
 			continue
@@ -468,16 +476,17 @@ func updateAllChannelsBalance() error {
 		//}
 		balance, err := updateChannelBalance(channel)
 		if err != nil {
+			common.SysError(fmt.Sprintf("failed to update balance for channel %d: %v", channel.Id, err))
+			updateErrors = append(updateErrors, fmt.Errorf("channel %d balance update failed", channel.Id))
 			continue
-		} else {
-			// err is nil & balance <= 0 means quota is used up
-			if balance <= 0 {
-				service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan()), "余额不足")
-			}
+		}
+		// err is nil & balance <= 0 means quota is used up
+		if balance <= 0 {
+			service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan()), "余额不足")
 		}
 		time.Sleep(common.RequestInterval)
 	}
-	return nil
+	return errors.Join(updateErrors...)
 }
 
 func UpdateAllChannelsBalance(c *gin.Context) {
@@ -495,10 +504,15 @@ func UpdateAllChannelsBalance(c *gin.Context) {
 }
 
 func AutomaticallyUpdateChannels(frequency int) {
-	for {
-		time.Sleep(time.Duration(frequency) * time.Minute)
+	interval := common.SafeIntervalDuration(frequency, time.Minute, time.Minute, "channel balance update")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
 		common.SysLog("updating all channels")
-		_ = updateAllChannelsBalance()
-		common.SysLog("channels update done")
+		if err := updateAllChannelsBalance(); err != nil {
+			common.SysError("failed to update channel balances: " + err.Error())
+			continue
+		}
+		common.SysLog("channel balance update completed")
 	}
 }

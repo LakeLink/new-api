@@ -209,6 +209,49 @@ func TestOllamaCompletionStreamUsesTextChoices(t *testing.T) {
 	assert.Contains(t, body, "data: [DONE]")
 }
 
+func TestOllamaStreamEmitsUsageOnlyWhenRequested(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, test := range []struct {
+		name         string
+		relayMode    int
+		includeUsage bool
+	}{
+		{name: "chat omits usage by default", relayMode: relayconstant.RelayModeChatCompletions},
+		{name: "chat includes requested usage", relayMode: relayconstant.RelayModeChatCompletions, includeUsage: true},
+		{name: "completion omits usage by default", relayMode: relayconstant.RelayModeCompletions},
+		{name: "completion includes requested usage", relayMode: relayconstant.RelayModeCompletions, includeUsage: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					"{\"model\":\"llama3.2\",\"created_at\":\"2026-05-27T12:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"response\":\"hello\",\"done\":false}\n" +
+						"{\"model\":\"llama3.2\",\"created_at\":\"2026-05-27T12:00:01Z\",\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":2,\"eval_count\":1}\n",
+				)),
+			}
+			info := &relaycommon.RelayInfo{
+				RelayMode:          test.relayMode,
+				ShouldIncludeUsage: test.includeUsage,
+				ChannelMeta: &relaycommon.ChannelMeta{
+					UpstreamModelName: "llama3.2",
+				},
+			}
+
+			usage, apiErr := ollamaStreamHandler(c, info, resp)
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 3, usage.TotalTokens)
+			assert.Equal(t, test.includeUsage, strings.Contains(w.Body.String(), `"prompt_tokens":2`))
+		})
+	}
+}
+
 func TestOllamaStreamSurfacesUpstreamErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

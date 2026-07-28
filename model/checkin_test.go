@@ -1,7 +1,8 @@
 package model
 
 import (
-	"fmt"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,9 +15,11 @@ import (
 
 func setupCheckinTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:checkin-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "checkin.db")), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&User{}, &Checkin{}))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
 
 	oldDB := DB
 	oldRedisEnabled := common.RedisEnabled
@@ -28,6 +31,7 @@ func setupCheckinTestDB(t *testing.T) *gorm.DB {
 		*setting = oldSetting
 		DB = oldDB
 		common.RedisEnabled = oldRedisEnabled
+		require.NoError(t, sqlDB.Close())
 	})
 	return db
 }
@@ -89,4 +93,26 @@ func TestUserCheckinCreditsQuotaExactlyOnce(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&Checkin{}).Count(&count).Error)
 	assert.Equal(t, int64(1), count)
+}
+
+func TestGetUserCheckinStatsPropagatesAggregateQueryErrors(t *testing.T) {
+	db := setupCheckinTestDB(t)
+	user := User{
+		Username: "checkin-stats-error",
+		Password: "password",
+		AffCode:  "checkin-stats-error-aff",
+	}
+	require.NoError(t, db.Create(&user).Error)
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(
+		"test:fail_checkin_count",
+		func(tx *gorm.DB) {
+			if _, ok := tx.Statement.Dest.(*int64); ok {
+				_ = tx.AddError(errors.New("injected check-in aggregate failure"))
+			}
+		},
+	))
+
+	stats, err := GetUserCheckinStats(user.Id, "2026-07")
+	require.ErrorContains(t, err, "injected check-in aggregate failure")
+	assert.Nil(t, stats)
 }

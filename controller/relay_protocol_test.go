@@ -111,3 +111,27 @@ func TestFastTokenCountMetaAccountsForAllChatChoices(t *testing.T) {
 
 	require.Equal(t, 200, meta.MaxTokens)
 }
+
+func TestFastTokenCountMetaAccountsForGeminiCandidates(t *testing.T) {
+	maxTokens := uint(50)
+	candidateCount := 4
+	request := &dto.GeminiChatRequest{
+		GenerationConfig: dto.GeminiChatGenerationConfig{
+			MaxOutputTokens: &maxTokens,
+			CandidateCount:  &candidateCount,
+		},
+	}
+
+	meta := fastTokenCountMetaForPricing(request)
+
+	require.Equal(t, 200, meta.MaxTokens)
+}
+
+func TestFastTokenCountMetaAccountsForLegacyClaudeLimit(t *testing.T) {
+	maxTokensToSample := uint(4096)
+	request := &dto.ClaudeRequest{MaxTokensToSample: &maxTokensToSample}
+
+	meta := fastTokenCountMetaForPricing(request)
+
+	require.Equal(t, 4096, meta.MaxTokens)
+}

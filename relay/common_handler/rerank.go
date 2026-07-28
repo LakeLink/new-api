@@ -1,7 +1,7 @@
 package common_handler
 
 import (
-	"io"
+	"fmt"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -17,12 +17,18 @@ import (
 )
 
 func RerankHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
-	logger.LogDebug(c, "reranker response body: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"reranker response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
 	var jinaResp dto.RerankResponse
 	if info.ChannelType == constant.ChannelTypeXinference {
 		var xinRerankResponse xinference.XinRerankResponse
@@ -32,6 +38,14 @@ func RerankHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		}
 		jinaRespResults := make([]dto.RerankResponseResult, len(xinRerankResponse.Results))
 		for i, result := range xinRerankResponse.Results {
+			if info.ReturnDocuments && (result.Index < 0 || result.Index >= len(info.Documents)) {
+				err := fmt.Errorf(
+					"upstream rerank result index %d is outside document range [0,%d)",
+					result.Index,
+					len(info.Documents),
+				)
+				return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+			}
 			respResult := dto.RerankResponseResult{
 				Index:          result.Index,
 				RelevanceScore: result.RelevanceScore,

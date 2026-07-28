@@ -3,6 +3,7 @@ package relay
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,7 +119,11 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
+	if err := validateConvertedRequest(convertedRequest); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
 	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
+	finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 
 	jsonData, err := common.Marshal(convertedRequest)
 	if err != nil {
@@ -128,6 +133,10 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 	jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	jsonData, err = refreshFinalRequestBilling(c, info, finalRequestFormat, jsonData)
+	if err != nil {
+		return nil, finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
 	}
 
 	body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
@@ -145,12 +154,15 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 	if resp == nil {
-		return nil, types.NewOpenAIError(nil, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+		return nil, types.NewOpenAIError(errors.New("empty upstream response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	httpResp = resp.(*http.Response)
+	httpResp, responseErr := adaptorHTTPResponse(resp)
+	if responseErr != nil {
+		return nil, responseErr
+	}
 	clientStream := info.IsStream
 	upstreamStream := isResponsesEventStream(httpResp)
 	info.IsStream = clientStream || upstreamStream

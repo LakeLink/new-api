@@ -37,19 +37,26 @@ func OpenAIResponsesRequestToGeminiChat(c *gin.Context, req *dto.OpenAIResponses
 	if err := ValidateRequestChatUnsupportedFields(req); err != nil {
 		return nil, err
 	}
+	if err := ValidateToolsForConversion(req.Tools, "Gemini generateContent"); err != nil {
+		return nil, err
+	}
 
 	geminiRequest := &dto.GeminiChatRequest{
 		GenerationConfig: dto.GeminiChatGenerationConfig{
-			Temperature: req.Temperature,
+			Temperature:     req.Temperature,
+			TopP:            req.TopP,
+			MaxOutputTokens: req.MaxOutputTokens,
 		},
 	}
-	if req.TopP != nil && *req.TopP > 0 {
-		geminiRequest.GenerationConfig.TopP = common.GetPointer(*req.TopP)
+	if serviceTier, ok := sharedgemini.OpenAIServiceTierToGemini(req.ServiceTier); ok {
+		geminiRequest.ServiceTier = common.GetPointer(serviceTier)
 	}
-	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
-		geminiRequest.GenerationConfig.MaxOutputTokens = common.GetPointer(*req.MaxOutputTokens)
+	if len(req.Store) > 0 {
+		var store bool
+		if err := common.Unmarshal(req.Store, &store); err == nil {
+			geminiRequest.Store = common.GetPointer(store)
+		}
 	}
-
 	upstreamModelName := req.Model
 	if modelName := relaymeta.RelayInfoUpstreamModelName(info); modelName != "" {
 		upstreamModelName = modelName
@@ -99,7 +106,11 @@ func OpenAIResponsesRequestToGeminiChat(c *gin.Context, req *dto.OpenAIResponses
 		return nil, err
 	}
 	if toolChoice != nil {
-		geminiRequest.ToolConfig = sharedgemini.OpenAIToolChoiceToConfig(toolChoice)
+		toolConfig, err := sharedgemini.OpenAIToolChoiceToConfig(toolChoice)
+		if err != nil {
+			return nil, err
+		}
+		geminiRequest.ToolConfig = toolConfig
 	}
 
 	systemTexts := make([]string, 0)
@@ -221,10 +232,10 @@ func responsesContentPartToGeminiParts(c *gin.Context, part map[string]any) ([]d
 		}
 		base64Data, mimeType, err := relaymedia.ResolveBase64Data(c, source, "formatting Responses input for Gemini")
 		if err != nil {
-			return nil, fmt.Errorf("get file data from '%s' failed: %w", source.GetIdentifier(), err)
+			return nil, fmt.Errorf("get file data from '%s' failed: %w", common.MaskSensitiveInfo(source.GetIdentifier()), err)
 		}
 		if _, ok := sharedgemini.SupportedMimeTypes[strings.ToLower(mimeType)]; !ok {
-			return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, source.GetIdentifier(), sharedgemini.SupportedMimeTypesList())
+			return nil, fmt.Errorf("mime type is not supported by Gemini: '%s', url: '%s', supported types are: %v", mimeType, common.MaskSensitiveInfo(source.GetIdentifier()), sharedgemini.SupportedMimeTypesList())
 		}
 		return []dto.GeminiPart{
 			{

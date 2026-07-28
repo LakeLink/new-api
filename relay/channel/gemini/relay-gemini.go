@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/relayconvert"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
@@ -50,15 +51,51 @@ func patchGeminiZeroCompletionUsage(c *gin.Context, info *relaycommon.RelayInfo,
 		return
 	}
 	estimated := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, usage.PromptTokens)
-	usage.CompletionTokens = estimated.CompletionTokens
-	if imageCount != 0 && usage.CompletionTokens == 0 {
-		usage.CompletionTokens = imageCount * 1400
+	textTokens := estimated.CompletionTokens
+	imageTokens := usage.CompletionTokenDetails.ImageTokens
+	if imageCount > 0 && imageTokens == 0 {
+		imageTokensPerOutput := 1400
+		if documentedMaximum, ok := ratio_setting.GetGeminiMaxImageOutputTokens(info.OriginModelName); ok {
+			imageTokensPerOutput = documentedMaximum
+		}
+		if imageCount > common.MaxTokensLimit/imageTokensPerOutput {
+			imageTokens = common.MaxTokensLimit
+		} else {
+			imageTokens = imageCount * imageTokensPerOutput
+		}
+		usage.CompletionTokenDetails.ImageTokens = imageTokens
+	}
+	if textTokens > common.MaxTokensLimit-imageTokens {
+		usage.CompletionTokens = common.MaxTokensLimit
+	} else {
+		usage.CompletionTokens = textTokens + imageTokens
 	}
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-	// Overwrite the metadata-derived billing usage: effectiveBillingUsage prefers
-	// BillingUsage during settlement, so keeping the prompt-only metadata there
-	// would still bill zero completion tokens.
-	usage.BillingUsage = dto.NewEstimatedGeminiChatBillingUsage(usage)
+	// effectiveBillingUsage prefers BillingUsage during settlement. Patch the
+	// estimated completion into the provider metadata while preserving actual
+	// cache modality and service-tier fields used for input settlement.
+	billingUsage := dto.CloneBillingUsage(usage.BillingUsage)
+	if billingUsage != nil && billingUsage.GeminiUsageMetadata != nil {
+		billingUsage.Estimated = true
+		billingUsage.GeminiUsageMetadata.CandidatesTokenCount = usage.CompletionTokens
+		billingUsage.GeminiUsageMetadata.TotalTokenCount = usage.TotalTokens
+		hasImageDetail := false
+		for _, detail := range billingUsage.GeminiUsageMetadata.CandidatesTokensDetails {
+			if strings.EqualFold(detail.Modality, "IMAGE") && detail.TokenCount > 0 {
+				hasImageDetail = true
+				break
+			}
+		}
+		if imageTokens > 0 && !hasImageDetail {
+			billingUsage.GeminiUsageMetadata.CandidatesTokensDetails = append(
+				billingUsage.GeminiUsageMetadata.CandidatesTokensDetails,
+				dto.GeminiPromptTokensDetails{Modality: "IMAGE", TokenCount: imageTokens},
+			)
+		}
+		usage.BillingUsage = billingUsage
+	} else {
+		usage.BillingUsage = dto.NewEstimatedGeminiChatBillingUsage(usage)
+	}
 }
 
 func geminiResponseUsageText(response *dto.GeminiChatResponse) string {
@@ -77,14 +114,19 @@ func geminiResponseUsageText(response *dto.GeminiChatResponse) string {
 }
 
 func buildUsageFromGeminiResponse(c *gin.Context, info *relaycommon.RelayInfo, response *dto.GeminiChatResponse) dto.Usage {
+	groundingUsage := newGeminiGroundingUsage()
+	groundingUsage.addResponse(response)
+	groundingUsage.setBillingContext(c, info.OriginModelName)
 	metadata := response.GetUsageMetadata()
 	if dto.HasGeminiUsageMetadataTokens(metadata) {
 		usage := buildUsageFromGeminiMetadata(metadata, info.GetEstimatePromptTokens())
 		patchGeminiZeroCompletionUsage(c, info, &usage, geminiResponseUsageText(response), geminiResponseInlineImageCount(response))
+		applyGeminiUsagePricing(info, &usage)
 		return usage
 	}
 	usage := service.ResponseText2Usage(c, geminiResponseUsageText(response), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	attachEstimatedGeminiBillingUsage(usage)
+	applyGeminiUsagePricing(info, usage)
 	return *usage
 }
 
@@ -137,6 +179,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var imageCount int
 	var hasBillableUsageMetadata bool
 	responseText := strings.Builder{}
+	groundingUsage := newGeminiGroundingUsage()
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var geminiResponse dto.GeminiChatResponse
@@ -148,6 +191,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
 		}
+		groundingUsage.addResponse(&geminiResponse)
 
 		// 统计图片数量
 		for _, candidate := range geminiResponse.Candidates {
@@ -188,6 +232,8 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	} else {
 		patchGeminiZeroCompletionUsage(c, info, usage, responseText.String(), imageCount)
 	}
+	applyGeminiUsagePricing(info, usage)
+	groundingUsage.setBillingContext(c, info.OriginModelName)
 
 	return usage, nil
 }
@@ -285,6 +331,7 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	}
 
 	response := helper.GenerateFinalUsageResponse(id, createAt, info.UpstreamModelName, *usage)
+	response.ServiceTier = usage.GeminiServiceTier
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil && !info.ClaudeConvertInfo.Done {
 		response = helper.GenerateStopResponse(id, createAt, info.UpstreamModelName, finishReason)
 		response.Usage = usage
@@ -297,12 +344,18 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 }
 
 func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
-	logger.LogDebug(c, "Gemini response body: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"Gemini response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
 	var geminiResponse dto.GeminiChatResponse
 	err = common.Unmarshal(responseBody, &geminiResponse)
 	if err != nil {
@@ -377,7 +430,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, readErr := io.ReadAll(resp.Body)
+	responseBody, readErr := service.ReadUpstreamResponseBody(resp.Body)
 	if readErr != nil {
 		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -420,12 +473,12 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 }
 
 func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, readErr := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, readErr := service.ReadUpstreamResponseBody(resp.Body)
 	if readErr != nil {
 		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	_ = resp.Body.Close()
-
 	var geminiResponse dto.GeminiImageResponse
 	if jsonErr := common.Unmarshal(responseBody, &geminiResponse); jsonErr != nil {
 		return nil, types.NewOpenAIError(jsonErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -460,14 +513,12 @@ func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	_, _ = c.Writer.Write(jsonResponse)
 
 	// https://github.com/google-gemini/cookbook/blob/719a27d752aac33f39de18a8d3cb42a70874917e/quickstarts/Counting_Tokens.ipynb
-	// each image has fixed 258 tokens
-	const imageTokens = 258
 	generatedImages := len(openAIResponse.Data)
 
 	usage := &dto.Usage{
-		PromptTokens:     imageTokens * generatedImages, // each generated image has fixed 258 tokens
-		CompletionTokens: 0,                             // image generation does not calculate completion tokens
-		TotalTokens:      imageTokens * generatedImages,
+		PromptTokens:     relaycommon.ImagenTokensPerImage * generatedImages,
+		CompletionTokens: 0, // image generation does not calculate completion tokens
+		TotalTokens:      relaycommon.ImagenTokensPerImage * generatedImages,
 	}
 
 	return usage, nil
@@ -478,7 +529,10 @@ type GeminiModelsResponse struct {
 	NextPageToken string            `json:"nextPageToken"`
 }
 
-func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
+func FetchGeminiModels(parentCtx context.Context, baseURL, apiKey, proxyURL string) ([]string, error) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	client, err := service.GetHttpClientWithProxy(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("创建HTTP客户端失败: %v", err)
@@ -487,36 +541,46 @@ func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 	allModels := make([]string, 0)
 	nextPageToken := ""
 	maxPages := 100 // Safety limit to prevent infinite loops
+	modelsURL, err := url.Parse(strings.TrimRight(baseURL, "/") + "/v1beta/models")
+	if err != nil || modelsURL.Scheme == "" || modelsURL.Host == "" {
+		return nil, fmt.Errorf("Gemini 模型地址无效")
+	}
 
 	for page := 0; page < maxPages; page++ {
-		url := fmt.Sprintf("%s/v1beta/models", baseURL)
+		pageURL := *modelsURL
+		query := pageURL.Query()
 		if nextPageToken != "" {
-			url = fmt.Sprintf("%s?pageToken=%s", url, nextPageToken)
+			query.Set("pageToken", nextPageToken)
 		}
+		pageURL.RawQuery = query.Encode()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+		request, err := http.NewRequestWithContext(ctx, "GET", pageURL.String(), nil)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("创建请求失败: %v", err)
+			return nil, fmt.Errorf("创建请求失败: %v", service.SanitizeNetworkError(err))
 		}
 
 		request.Header.Set("x-goog-api-key", apiKey)
 
-		response, err := client.Do(request)
+		response, err := service.DoUpstreamRequest(client, request)
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("请求失败: %v", err)
 		}
 
 		if response.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(response.Body)
+			body, _ := service.ReadResponseBodyWithLimit(response.Body, 1<<20)
 			response.Body.Close()
 			cancel()
-			return nil, fmt.Errorf("服务器返回错误 %d: %s", response.StatusCode, string(body))
+			return nil, fmt.Errorf(
+				"服务器返回错误 %d（响应体 %d 字节）",
+				response.StatusCode,
+				len(body),
+			)
 		}
 
-		body, err := io.ReadAll(response.Body)
+		body, err := service.ReadUpstreamResponseBody(response.Body)
 		response.Body.Close()
 		cancel()
 		if err != nil {

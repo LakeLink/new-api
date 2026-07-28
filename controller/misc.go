@@ -3,7 +3,9 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -43,8 +45,6 @@ func TestStatus(c *gin.Context) {
 func GetStatus(c *gin.Context) {
 
 	cs := console_setting.GetConsoleSetting()
-	common.OptionMapRWMutex.RLock()
-	defer common.OptionMapRWMutex.RUnlock()
 
 	passkeySetting := system_setting.GetPasskeySettings()
 	legalSetting := system_setting.GetLegalSettings()
@@ -52,51 +52,51 @@ func GetStatus(c *gin.Context) {
 	data := gin.H{
 		"version":                     common.Version,
 		"start_time":                  common.StartTime,
-		"email_verification":          common.EmailVerificationEnabled,
-		"github_oauth":                common.GitHubOAuthEnabled,
-		"github_client_id":            common.GitHubClientId,
+		"email_verification":          common.GetLegacyOptionBool("EmailVerificationEnabled", &common.EmailVerificationEnabled),
+		"github_oauth":                common.GetLegacyOptionBool("GitHubOAuthEnabled", &common.GitHubOAuthEnabled),
+		"github_client_id":            common.GetLegacyOptionString("GitHubClientId", &common.GitHubClientId),
 		"discord_oauth":               system_setting.GetDiscordSettings().Enabled,
 		"discord_client_id":           system_setting.GetDiscordSettings().ClientId,
-		"linuxdo_oauth":               common.LinuxDOOAuthEnabled,
-		"linuxdo_client_id":           common.LinuxDOClientId,
-		"linuxdo_minimum_trust_level": common.LinuxDOMinimumTrustLevel,
-		"telegram_oauth":              common.TelegramOAuthEnabled,
-		"telegram_bot_name":           common.TelegramBotName,
+		"linuxdo_oauth":               common.GetLegacyOptionBool("LinuxDOOAuthEnabled", &common.LinuxDOOAuthEnabled),
+		"linuxdo_client_id":           common.GetLegacyOptionString("LinuxDOClientId", &common.LinuxDOClientId),
+		"linuxdo_minimum_trust_level": common.GetLegacyOptionInt("LinuxDOMinimumTrustLevel", &common.LinuxDOMinimumTrustLevel),
+		"telegram_oauth":              common.GetLegacyOptionBool("TelegramOAuthEnabled", &common.TelegramOAuthEnabled),
+		"telegram_bot_name":           common.GetLegacyOptionString("TelegramBotName", &common.TelegramBotName),
 		"theme":                       system_setting.GetThemeSettings().Frontend,
-		"system_name":                 common.SystemName,
-		"logo":                        common.Logo,
-		"footer_html":                 common.Footer,
-		"wechat_qrcode":               common.WeChatAccountQRCodeImageURL,
-		"wechat_login":                common.WeChatAuthEnabled,
-		"server_address":              system_setting.ServerAddress,
-		"turnstile_check":             common.TurnstileCheckEnabled,
-		"turnstile_site_key":          common.TurnstileSiteKey,
+		"system_name":                 common.GetLegacyOptionString("SystemName", &common.SystemName),
+		"logo":                        common.GetLegacyOptionString("Logo", &common.Logo),
+		"footer_html":                 common.GetLegacyOptionString("Footer", &common.Footer),
+		"wechat_qrcode":               common.GetLegacyOptionString("WeChatAccountQRCodeImageURL", &common.WeChatAccountQRCodeImageURL),
+		"wechat_login":                common.GetLegacyOptionBool("WeChatAuthEnabled", &common.WeChatAuthEnabled),
+		"server_address":              common.GetLegacyOptionString("ServerAddress", &system_setting.ServerAddress),
+		"turnstile_check":             common.GetLegacyOptionBool("TurnstileCheckEnabled", &common.TurnstileCheckEnabled),
+		"turnstile_site_key":          common.GetLegacyOptionString("TurnstileSiteKey", &common.TurnstileSiteKey),
 		"docs_link":                   operation_setting.GetGeneralSetting().DocsLink,
-		"quota_per_unit":              common.QuotaPerUnit,
+		"quota_per_unit":              common.GetLegacyOptionFloat64("QuotaPerUnit", &common.QuotaPerUnit),
 		// 兼容旧前端：保留 display_in_currency，同时提供新的 quota_display_type
 		"display_in_currency":           operation_setting.IsCurrencyDisplay(),
 		"quota_display_type":            operation_setting.GetQuotaDisplayType(),
 		"custom_currency_symbol":        operation_setting.GetGeneralSetting().CustomCurrencySymbol,
 		"custom_currency_exchange_rate": operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate,
 		"enable_batch_update":           common.BatchUpdateEnabled,
-		"enable_drawing":                common.DrawingEnabled,
-		"enable_task":                   common.TaskEnabled,
-		"enable_data_export":            common.DataExportEnabled,
-		"data_export_default_time":      common.DataExportDefaultTime,
-		"log_export_permission":         common.LogExportPermission,
-		"default_collapse_sidebar":      common.DefaultCollapseSidebar,
-		"mj_notify_enabled":             setting.MjNotifyEnabled,
-		"chats":                         setting.Chats,
-		"demo_site_enabled":             operation_setting.DemoSiteEnabled,
-		"self_use_mode_enabled":         operation_setting.SelfUseModeEnabled,
-		"register_enabled":              common.RegisterEnabled,
-		"password_login_enabled":        common.PasswordLoginEnabled,
-		"password_register_enabled":     common.PasswordRegisterEnabled,
-		"default_use_auto_group":        setting.DefaultUseAutoGroup,
+		"enable_drawing":                common.GetLegacyOptionBool("DrawingEnabled", &common.DrawingEnabled),
+		"enable_task":                   common.GetLegacyOptionBool("TaskEnabled", &common.TaskEnabled),
+		"enable_data_export":            common.GetLegacyOptionBool("DataExportEnabled", &common.DataExportEnabled),
+		"data_export_default_time":      common.GetLegacyOptionString("DataExportDefaultTime", &common.DataExportDefaultTime),
+		"log_export_permission":         common.GetLegacyOptionInt("LogExportPermission", &common.LogExportPermission),
+		"default_collapse_sidebar":      common.GetLegacyOptionBool("DefaultCollapseSidebar", &common.DefaultCollapseSidebar),
+		"mj_notify_enabled":             common.GetLegacyOptionBool("MjNotifyEnabled", &setting.MjNotifyEnabled),
+		"chats":                         setting.GetChats(),
+		"demo_site_enabled":             common.GetLegacyOptionBool("DemoSiteEnabled", &operation_setting.DemoSiteEnabled),
+		"self_use_mode_enabled":         common.GetLegacyOptionBool("SelfUseModeEnabled", &operation_setting.SelfUseModeEnabled),
+		"register_enabled":              common.GetLegacyOptionBool("RegisterEnabled", &common.RegisterEnabled),
+		"password_login_enabled":        common.GetLegacyOptionBool("PasswordLoginEnabled", &common.PasswordLoginEnabled),
+		"password_register_enabled":     common.GetLegacyOptionBool("PasswordRegisterEnabled", &common.PasswordRegisterEnabled),
+		"default_use_auto_group":        common.GetLegacyOptionBool("DefaultUseAutoGroup", &setting.DefaultUseAutoGroup),
 
-		"usd_exchange_rate": operation_setting.USDExchangeRate,
-		"price":             operation_setting.Price,
-		"stripe_unit_price": setting.StripeUnitPrice,
+		"usd_exchange_rate": common.GetLegacyOptionFloat64("USDExchangeRate", &operation_setting.USDExchangeRate),
+		"price":             common.GetLegacyOptionFloat64("Price", &operation_setting.Price),
+		"stripe_unit_price": common.GetLegacyOptionFloat64("StripeUnitPrice", &setting.StripeUnitPrice),
 
 		// 面板启用开关
 		"api_info_enabled":      cs.ApiInfoEnabled,
@@ -105,8 +105,8 @@ func GetStatus(c *gin.Context) {
 		"faq_enabled":           cs.FAQEnabled,
 
 		// 模块管理配置
-		"HeaderNavModules":    common.OptionMap["HeaderNavModules"],
-		"SidebarModulesAdmin": common.OptionMap["SidebarModulesAdmin"],
+		"HeaderNavModules":    common.GetOptionString("HeaderNavModules", ""),
+		"SidebarModulesAdmin": common.GetOptionString("SidebarModulesAdmin", ""),
 
 		"oidc_enabled":                system_setting.GetOIDCSettings().Enabled,
 		"oidc_client_id":              system_setting.GetOIDCSettings().ClientId,
@@ -118,7 +118,7 @@ func GetStatus(c *gin.Context) {
 		"passkey_allow_insecure":      passkeySetting.AllowInsecureOrigin,
 		"passkey_user_verification":   passkeySetting.UserVerification,
 		"passkey_attachment":          passkeySetting.AttachmentPreference,
-		"setup":                       constant.Setup,
+		"setup":                       constant.Setup.Load(),
 		"user_agreement_enabled":      legalSetting.UserAgreement != "",
 		"privacy_policy_enabled":      legalSetting.PrivacyPolicy != "",
 		"checkin_enabled":             operation_setting.GetCheckinSetting().Enabled,
@@ -234,7 +234,14 @@ func GetHomePageContent(c *gin.Context) {
 }
 
 func SendEmailVerification(c *gin.Context) {
-	email := model.NormalizeEmail(c.Query("email"))
+	var request struct {
+		Email string `json:"email"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	email := model.NormalizeEmail(request.Email)
 	if err := common.Validate.Var(email, "required,email"); err != nil {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -249,9 +256,9 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	localPart := parts[0]
 	domainPart := parts[1]
-	if common.EmailDomainRestrictionEnabled {
+	if common.GetLegacyOptionBool("EmailDomainRestrictionEnabled", &common.EmailDomainRestrictionEnabled) {
 		allowed := false
-		for _, domain := range common.EmailDomainWhitelist {
+		for _, domain := range common.GetEmailDomainWhitelist() {
 			if domainPart == domain {
 				allowed = true
 				break
@@ -265,7 +272,7 @@ func SendEmailVerification(c *gin.Context) {
 			return
 		}
 	}
-	if common.EmailAliasRestrictionEnabled {
+	if common.GetLegacyOptionBool("EmailAliasRestrictionEnabled", &common.EmailAliasRestrictionEnabled) {
 		containsSpecialSymbols := strings.Contains(localPart, "+") || strings.Contains(localPart, ".")
 		if containsSpecialSymbols {
 			c.JSON(http.StatusOK, gin.H{
@@ -276,22 +283,54 @@ func SendEmailVerification(c *gin.Context) {
 		}
 	}
 
-	if model.IsEmailAlreadyTaken(email) {
-		common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
+	emailCount, err := model.CountUsersByEmail(email)
+	if err != nil {
+		logger.LogError(
+			c.Request.Context(),
+			fmt.Sprintf(
+				"failed to check email availability for verification request: %s",
+				err.Error(),
+			),
+		)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+		return
+	}
+	if emailCount > 0 {
+		// Keep the public response indistinguishable from a new address. The
+		// registration endpoint remains authoritative if the client continues.
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
 	}
 	code := common.GenerateVerificationCode(6)
 	if err := common.RegisterVerificationCodeWithKey(email, code, common.EmailVerificationPurpose); err != nil {
-		common.ApiError(c, err)
+		logger.LogError(
+			c.Request.Context(),
+			fmt.Sprintf(
+				"failed to store email verification code for %s: %s",
+				common.MaskEmail(email),
+				err.Error(),
+			),
+		)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
 	}
-	subject := fmt.Sprintf("%s邮箱验证邮件", common.SystemName)
+	systemName := common.GetLegacyOptionString("SystemName", &common.SystemName)
+	subject := fmt.Sprintf("%s邮箱验证邮件", systemName)
+	escapedSystemName := html.EscapeString(systemName)
 	content := fmt.Sprintf("<p>您好，你正在进行%s邮箱验证。</p>"+
 		"<p>您的验证码为: <strong>%s</strong></p>"+
-		"<p>验证码 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.SystemName, code, common.VerificationValidMinutes)
-	err := common.SendEmail(subject, email, content)
+		"<p>验证码 %d 分钟内有效，如果不是本人操作，请忽略。</p>", escapedSystemName, code, common.VerificationValidMinutes)
+	err = common.SendEmail(subject, email, content)
 	if err != nil {
-		common.ApiError(c, err)
+		logger.LogError(
+			c.Request.Context(),
+			fmt.Sprintf(
+				"failed to send email verification message to %s: %s",
+				common.MaskEmail(email),
+				err.Error(),
+			),
+		)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -302,7 +341,14 @@ func SendEmailVerification(c *gin.Context) {
 }
 
 func SendPasswordResetEmail(c *gin.Context) {
-	email := model.NormalizeEmail(c.Query("email"))
+	var request struct {
+		Email string `json:"email"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	email := model.NormalizeEmail(request.Email)
 	if err := common.Validate.Var(email, "required,email"); err != nil {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
@@ -310,22 +356,29 @@ func SendPasswordResetEmail(c *gin.Context) {
 	if _, err := model.GetUniqueUserByEmail(email); err == nil {
 		code := common.GenerateVerificationCode(0)
 		if err := common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to store password reset code for %s: %s", email, err.Error()))
+			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to store password reset code for %s: %s", common.MaskEmail(email), err.Error()))
 			c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 			return
 		}
-		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
-		subject := fmt.Sprintf("%s密码重置", common.SystemName)
+		query := url.Values{
+			"email": {email},
+			"token": {code},
+		}
+		link := fmt.Sprintf("%s/user/reset?%s", strings.TrimRight(system_setting.GetServerAddress(), "/"), query.Encode())
+		escapedLink := html.EscapeString(link)
+		systemName := common.GetLegacyOptionString("SystemName", &common.SystemName)
+		escapedSystemName := html.EscapeString(systemName)
+		subject := fmt.Sprintf("%s密码重置", systemName)
 		content := fmt.Sprintf("<p>您好，你正在进行%s密码重置。</p>"+
 			"<p>点击 <a href='%s'>此处</a> 进行密码重置。</p>"+
 			"<p>如果链接无法点击，请尝试点击下面的链接或将其复制到浏览器中打开：<br> %s </p>"+
-			"<p>重置链接 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.SystemName, link, link, common.VerificationValidMinutes)
+			"<p>重置链接 %d 分钟内有效，如果不是本人操作，请忽略。</p>", escapedSystemName, escapedLink, escapedLink, common.VerificationValidMinutes)
 		err := common.SendEmail(subject, email, content)
 		if err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to send password reset email to %s: %s", email, err.Error()))
+			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to send password reset email to %s: %s", common.MaskEmail(email), err.Error()))
 		}
 	} else if err != nil && !errors.Is(err, model.ErrEmailNotFound) {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("skip password reset email for %s: %s", email, err.Error()))
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("skip password reset email for %s: %s", common.MaskEmail(email), err.Error()))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

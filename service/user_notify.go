@@ -14,8 +14,13 @@ import (
 )
 
 func NotifyRootUser(t string, subject string, content string) {
-	user := model.GetRootUser().ToBaseUser()
-	err := NotifyUser(user.Id, user.Email, user.GetSetting(), dto.NewNotify(t, subject, content, nil))
+	root, err := model.GetRootUser()
+	if err != nil {
+		common.SysLog("failed to notify root user: " + err.Error())
+		return
+	}
+	user := root.ToBaseUser()
+	err = NotifyUser(user.Id, user.Email, user.GetSetting(), dto.NewNotify(t, subject, content, nil))
 	if err != nil {
 		common.SysLog(fmt.Sprintf("failed to notify root user: %s", err.Error()))
 	}
@@ -101,7 +106,7 @@ func NotifyUser(userId int, userEmail string, userSetting dto.UserSetting, data 
 		}
 		return sendGotifyNotify(gotifyUrl, gotifyToken, userSetting.GotifyPriority, data)
 	}
-	return nil
+	return fmt.Errorf("unsupported notification type %q", notifyType)
 }
 
 func sendEmailNotify(userEmail string, data dto.Notify) error {
@@ -134,7 +139,7 @@ func sendBarkNotify(barkURL string, data dto.Notify) error {
 		// 使用worker发送请求
 		workerReq := &WorkerRequest{
 			URL:    finalURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    system_setting.GetWorkerSetting().ValidKey,
 			Method: http.MethodGet,
 			Headers: map[string]string{
 				"User-Agent": "OneAPI-Bark-Notify/1.0",
@@ -160,7 +165,7 @@ func sendBarkNotify(barkURL string, data dto.Notify) error {
 		// 直接发送请求
 		req, err = http.NewRequest(http.MethodGet, finalURL, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create bark request: %v", err)
+			return fmt.Errorf("failed to create bark request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 
 		// 设置User-Agent
@@ -168,9 +173,9 @@ func sendBarkNotify(barkURL string, data dto.Notify) error {
 
 		// 发送请求
 		client := GetSSRFProtectedHTTPClient()
-		resp, err = client.Do(req)
+		resp, err = DoUpstreamRequest(client, req)
 		if err != nil {
-			return fmt.Errorf("failed to send bark request: %v", err)
+			return fmt.Errorf("failed to send bark request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 		defer resp.Body.Close()
 
@@ -225,7 +230,7 @@ func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data d
 		// 使用worker发送请求
 		workerReq := &WorkerRequest{
 			URL:    finalURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    system_setting.GetWorkerSetting().ValidKey,
 			Method: http.MethodPost,
 			Headers: map[string]string{
 				"Content-Type": "application/json; charset=utf-8",
@@ -253,7 +258,7 @@ func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data d
 		// 直接发送请求
 		req, err = http.NewRequest(http.MethodPost, finalURL, bytes.NewBuffer(payloadBytes))
 		if err != nil {
-			return fmt.Errorf("failed to create gotify request: %v", err)
+			return fmt.Errorf("failed to create gotify request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 
 		// 设置请求头
@@ -262,9 +267,9 @@ func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data d
 
 		// 发送请求
 		client := GetSSRFProtectedHTTPClient()
-		resp, err = client.Do(req)
+		resp, err = DoUpstreamRequest(client, req)
 		if err != nil {
-			return fmt.Errorf("failed to send gotify request: %v", err)
+			return fmt.Errorf("failed to send gotify request: %s", common.MaskSensitiveInfo(err.Error()))
 		}
 		defer resp.Body.Close()
 

@@ -25,7 +25,7 @@ type EmbeddingRequest struct {
 	EncodingFormat   string   `json:"encoding_format,omitempty"`
 	Dimensions       *int     `json:"dimensions,omitempty"`
 	User             string   `json:"user,omitempty"`
-	Seed             *float64 `json:"seed,omitempty"`
+	Seed             *int64   `json:"seed,omitempty"`
 	Temperature      *float64 `json:"temperature,omitempty"`
 	TopP             *float64 `json:"top_p,omitempty"`
 	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`

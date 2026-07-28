@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"math"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -60,4 +62,46 @@ func TestBuildStripeTopUpQuoteRejectsUnrepresentableCredit(t *testing.T) {
 
 	_, err := buildStripeTopUpQuote(5000, "default")
 	require.Error(t, err)
+}
+
+func TestBuildStripeTopUpQuoteRejectsInvalidQuotaUnit(t *testing.T) {
+	common.OptionMapRWMutex.Lock()
+	optionMapWasNil := common.OptionMap == nil
+	if optionMapWasNil {
+		common.OptionMap = make(map[string]string)
+	}
+	originalValue, hadOriginalValue := common.OptionMap["QuotaPerUnit"]
+	common.OptionMapRWMutex.Unlock()
+	originalUnitPrice := setting.StripeUnitPrice
+	originalDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		if optionMapWasNil {
+			common.OptionMap = nil
+		} else if hadOriginalValue {
+			common.OptionMap["QuotaPerUnit"] = originalValue
+		} else {
+			delete(common.OptionMap, "QuotaPerUnit")
+		}
+		common.OptionMapRWMutex.Unlock()
+		setting.StripeUnitPrice = originalUnitPrice
+		operation_setting.GetGeneralSetting().QuotaDisplayType = originalDisplayType
+	})
+
+	setting.StripeUnitPrice = 1
+	operation_setting.GetGeneralSetting().QuotaDisplayType = operation_setting.QuotaDisplayTypeTokens
+	for _, quotaPerUnit := range []float64{
+		0,
+		-1,
+		math.NaN(),
+		math.Inf(1),
+		float64(common.MaxQuota) + 1,
+	} {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap["QuotaPerUnit"] = strconv.FormatFloat(quotaPerUnit, 'g', -1, 64)
+		common.OptionMapRWMutex.Unlock()
+
+		_, err := buildStripeTopUpQuote(10, "default")
+		require.Error(t, err)
+	}
 }

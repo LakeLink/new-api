@@ -37,12 +37,12 @@ func init() {
 
 // GetQwenSettings
 func GetQwenSettings() *QwenSettings {
-	return &qwenSettings
+	return config.Snapshot[QwenSettings]("qwen")
 }
 
 // IsSyncImageModel
 func IsSyncImageModel(model string) bool {
-	for _, m := range qwenSettings.SyncImageModels {
+	for _, m := range GetQwenSettings().SyncImageModels {
 		if strings.Contains(model, m) {
 			return true
 		}

@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,12 +20,17 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 读取响应体
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	logger.LogDebug(c, "Gemini native response body: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"Gemini native response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
 
 	// 解析为 Gemini 原生响应格式
 	var geminiResponse dto.GeminiChatResponse
@@ -50,12 +54,17 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 func NativeGeminiEmbeddingHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	logger.LogDebug(c, "Gemini native embedding response body: %s", responseBody)
+	logger.LogDebug(
+		c,
+		"Gemini native embedding response received: status=%d bytes=%d",
+		resp.StatusCode,
+		len(responseBody),
+	)
 
 	usage := service.ResponseText2Usage(c, "", info.UpstreamModelName, info.GetEstimatePromptTokens())
 

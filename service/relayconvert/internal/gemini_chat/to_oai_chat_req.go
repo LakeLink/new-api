@@ -1,6 +1,7 @@
 package geminichat
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,30 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 	openaiRequest := &dto.GeneralOpenAIRequest{
 		Model:  modelName,
 		Stream: common.GetPointer(isStream),
+	}
+	if geminiRequest.ServiceTier != nil {
+		serviceTier, ok := dto.NormalizeGeminiServiceTier(*geminiRequest.ServiceTier)
+		if !ok {
+			return nil, fmt.Errorf("invalid Gemini serviceTier %q", *geminiRequest.ServiceTier)
+		}
+		switch serviceTier {
+		case dto.GeminiServiceTierUnspecified:
+			serviceTier = "auto"
+		case dto.GeminiServiceTierStandard:
+			serviceTier = "default"
+		}
+		encodedServiceTier, err := common.Marshal(serviceTier)
+		if err != nil {
+			return nil, fmt.Errorf("encode OpenAI service_tier: %w", err)
+		}
+		openaiRequest.ServiceTier = encodedServiceTier
+	}
+	if geminiRequest.Store != nil {
+		encodedStore, err := common.Marshal(*geminiRequest.Store)
+		if err != nil {
+			return nil, fmt.Errorf("encode OpenAI store: %w", err)
+		}
+		openaiRequest.Store = encodedStore
 	}
 
 	var messages []dto.Message
@@ -93,23 +118,21 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 
 	openaiRequest.Messages = messages
 
-	if geminiRequest.GenerationConfig.Temperature != nil {
-		openaiRequest.Temperature = geminiRequest.GenerationConfig.Temperature
+	openaiRequest.Temperature = geminiRequest.GenerationConfig.Temperature
+	openaiRequest.TopP = geminiRequest.GenerationConfig.TopP
+	openaiRequest.TopK = geminiRequest.GenerationConfig.TopK
+	openaiRequest.MaxTokens = geminiRequest.GenerationConfig.MaxOutputTokens
+	openaiRequest.N = geminiRequest.GenerationConfig.CandidateCount
+	openaiRequest.LogProbs = geminiRequest.GenerationConfig.ResponseLogprobs
+	openaiRequest.Seed = geminiRequest.GenerationConfig.Seed
+	if geminiRequest.GenerationConfig.Logprobs != nil {
+		topLogProbs := int(*geminiRequest.GenerationConfig.Logprobs)
+		openaiRequest.TopLogProbs = &topLogProbs
 	}
-	if geminiRequest.GenerationConfig.TopP != nil && *geminiRequest.GenerationConfig.TopP > 0 {
-		openaiRequest.TopP = common.GetPointer(*geminiRequest.GenerationConfig.TopP)
-	}
-	if geminiRequest.GenerationConfig.TopK != nil && *geminiRequest.GenerationConfig.TopK > 0 {
-		openaiRequest.TopK = common.GetPointer(int(*geminiRequest.GenerationConfig.TopK))
-	}
-	if geminiRequest.GenerationConfig.MaxOutputTokens != nil && *geminiRequest.GenerationConfig.MaxOutputTokens > 0 {
-		openaiRequest.MaxTokens = common.GetPointer(*geminiRequest.GenerationConfig.MaxOutputTokens)
-	}
+	openaiRequest.PresencePenalty = geminiRequest.GenerationConfig.PresencePenalty
+	openaiRequest.FrequencyPenalty = geminiRequest.GenerationConfig.FrequencyPenalty
 	if len(geminiRequest.GenerationConfig.StopSequences) > 0 {
 		openaiRequest.Stop = geminiRequest.GenerationConfig.StopSequences[:min(len(geminiRequest.GenerationConfig.StopSequences), 4)]
-	}
-	if geminiRequest.GenerationConfig.CandidateCount != nil && *geminiRequest.GenerationConfig.CandidateCount > 0 {
-		openaiRequest.N = common.GetPointer(*geminiRequest.GenerationConfig.CandidateCount)
 	}
 
 	if len(geminiRequest.GetTools()) > 0 {
@@ -137,6 +160,71 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 		}
 		if len(tools) > 0 {
 			openaiRequest.Tools = tools
+		}
+	}
+
+	if toolConfig := geminiRequest.ToolConfig; toolConfig != nil && toolConfig.FunctionCallingConfig != nil {
+		functionConfig := toolConfig.FunctionCallingConfig
+		mode := strings.ToUpper(strings.TrimSpace(string(functionConfig.Mode)))
+		declaredFunctions := make(map[string]struct{}, len(openaiRequest.Tools))
+		for _, tool := range openaiRequest.Tools {
+			if tool.Type == "function" && tool.Function.Name != "" {
+				declaredFunctions[tool.Function.Name] = struct{}{}
+			}
+		}
+
+		allowedNames := make([]string, 0, len(functionConfig.AllowedFunctionNames))
+		for index, name := range functionConfig.AllowedFunctionNames {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return nil, fmt.Errorf("toolConfig.functionCallingConfig.allowedFunctionNames[%d] is empty", index)
+			}
+			if _, exists := declaredFunctions[name]; !exists {
+				return nil, fmt.Errorf(
+					"toolConfig.functionCallingConfig.allowedFunctionNames[%d] references undeclared function %q",
+					index,
+					name,
+				)
+			}
+			allowedNames = append(allowedNames, name)
+		}
+
+		if len(allowedNames) > 0 && mode != "ANY" && mode != "VALIDATED" {
+			return nil, errors.New("allowedFunctionNames is only valid for ANY or VALIDATED function calling mode")
+		}
+
+		switch mode {
+		case "":
+		case "AUTO":
+			openaiRequest.ToolChoice = "auto"
+		case "NONE":
+			openaiRequest.ToolChoice = "none"
+		case "ANY", "VALIDATED":
+			if len(declaredFunctions) == 0 {
+				return nil, fmt.Errorf("function calling mode %s requires at least one function declaration", mode)
+			}
+			openAIMode := "required"
+			if mode == "VALIDATED" {
+				openAIMode = "auto"
+			}
+			if len(allowedNames) == 0 {
+				openaiRequest.ToolChoice = openAIMode
+				break
+			}
+			allowedTools := make([]map[string]any, 0, len(allowedNames))
+			for _, name := range allowedNames {
+				allowedTools = append(allowedTools, map[string]any{
+					"type": "function",
+					"name": name,
+				})
+			}
+			openaiRequest.ToolChoice = map[string]any{
+				"type":  "allowed_tools",
+				"mode":  openAIMode,
+				"tools": allowedTools,
+			}
+		default:
+			return nil, fmt.Errorf("unsupported Gemini function calling mode %q", functionConfig.Mode)
 		}
 	}
 

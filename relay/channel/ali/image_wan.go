@@ -32,9 +32,9 @@ func oaiFormEdit2WanxImageEdit(c *gin.Context, info *relaycommon.RelayInfo, requ
 	//}
 	imageRequest.Input = wanInput
 	imageRequest.Parameters = AliImageParameters{
-		N: int(lo.FromPtrOr(request.N, uint(1))),
+		N: common.GetPointer(int(lo.FromPtrOr(request.N, uint(1)))),
 	}
-	info.PriceData.AddOtherRatio("n", float64(imageRequest.Parameters.N))
+	info.PriceData.AddOtherRatio("n", float64(*imageRequest.Parameters.N))
 
 	return &imageRequest, nil
 }

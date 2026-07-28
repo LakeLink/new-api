@@ -140,6 +140,10 @@ func TestOpenRouterCacheCreationInferenceRejectsInvalidArithmetic(t *testing.T) 
 
 	usage.Cost = math.Inf(1)
 	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
+	usage.Cost = nil
+	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
+	usage.Cost = "15"
+	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
 	priceData.ModelRatio = 0
 	require.Equal(t, -1, CalcOpenRouterCacheCreateTokens(usage, priceData))
 }

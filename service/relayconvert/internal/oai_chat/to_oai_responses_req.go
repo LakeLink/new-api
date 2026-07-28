@@ -368,16 +368,6 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 
 	textRaw := convertChatResponseFormatToResponsesText(req.ResponseFormat, req.Verbosity)
 
-	maxOutputTokens := lo.FromPtrOr(req.MaxTokens, uint(0))
-	maxCompletionTokens := lo.FromPtrOr(req.MaxCompletionTokens, uint(0))
-	if maxCompletionTokens > maxOutputTokens {
-		maxOutputTokens = maxCompletionTokens
-	}
-	// OpenAI Responses API rejects max_output_tokens < 16 when explicitly provided.
-	//if maxOutputTokens > 0 && maxOutputTokens < 16 {
-	//	maxOutputTokens = 16
-	//}
-
 	var topP *float64
 	if req.TopP != nil {
 		topP = common.GetPointer(lo.FromPtr(req.TopP))
@@ -432,8 +422,9 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 		Metadata:             req.Metadata,
 		Reasoning:            reasoning,
 	}
-	if req.MaxTokens != nil || req.MaxCompletionTokens != nil {
-		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
+	if requestedMaxTokens := req.GetMaxTokensPointer(); requestedMaxTokens != nil {
+		maxOutputTokens := *requestedMaxTokens
+		out.MaxOutputTokens = &maxOutputTokens
 	}
 
 	return out, nil

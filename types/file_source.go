@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	"image"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ type FileSource interface {
 
 	IsRegistered() bool
 	SetRegistered(registered bool)
+	ClaimCleanupRegistration() bool
 	Mu() *sync.Mutex
 }
 
@@ -31,36 +33,63 @@ type baseFileSource struct {
 	cachedData  *CachedFileData
 	cacheLoaded bool
 	registered  bool
+	stateMu     sync.RWMutex
 	mu          sync.Mutex
 }
 
 func (b *baseFileSource) SetCache(data *CachedFileData) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
 	b.cachedData = data
-	b.cacheLoaded = true
+	b.cacheLoaded = data != nil
 }
 
 func (b *baseFileSource) GetCache() *CachedFileData {
+	b.stateMu.RLock()
+	defer b.stateMu.RUnlock()
 	return b.cachedData
 }
 
 func (b *baseFileSource) HasCache() bool {
+	b.stateMu.RLock()
+	defer b.stateMu.RUnlock()
 	return b.cacheLoaded && b.cachedData != nil
 }
 
 func (b *baseFileSource) ClearCache() {
-	if b.cachedData != nil {
-		b.cachedData.Close()
-	}
+	b.stateMu.Lock()
+	cachedData := b.cachedData
 	b.cachedData = nil
 	b.cacheLoaded = false
+	b.stateMu.Unlock()
+
+	if cachedData != nil {
+		_ = cachedData.Close()
+	}
 }
 
 func (b *baseFileSource) IsRegistered() bool {
+	b.stateMu.RLock()
+	defer b.stateMu.RUnlock()
 	return b.registered
 }
 
 func (b *baseFileSource) SetRegistered(registered bool) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
 	b.registered = registered
+}
+
+// ClaimCleanupRegistration atomically marks this source as registered for
+// request cleanup. It returns false when another caller already registered it.
+func (b *baseFileSource) ClaimCleanupRegistration() bool {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	if b.registered {
+		return false
+	}
+	b.registered = true
+	return true
 }
 
 func (b *baseFileSource) Mu() *sync.Mutex {
@@ -79,10 +108,13 @@ type URLSource struct {
 func (u *URLSource) IsURL() bool { return true }
 
 func (u *URLSource) GetIdentifier() string {
-	if len(u.URL) > 100 {
-		return u.URL[:100] + "..."
+	parsed, err := url.Parse(u.URL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "url:[invalid]"
 	}
-	return u.URL
+	// Identifiers are used in logs and errors. Paths, user information,
+	// fragments, and signed query strings can all contain credentials.
+	return "url:" + strings.ToLower(parsed.Scheme) + "://" + parsed.Host
 }
 
 func (u *URLSource) GetRawData() string { return u.URL }
@@ -102,10 +134,8 @@ type Base64Source struct {
 func (b *Base64Source) IsURL() bool { return false }
 
 func (b *Base64Source) GetIdentifier() string {
-	if len(b.Base64Data) > 50 {
-		return "base64:" + b.Base64Data[:50] + "..."
-	}
-	return "base64:" + b.Base64Data
+	// Never include inline media bytes in an error or debug log.
+	return fmt.Sprintf("base64:[%d encoded bytes]", len(b.Base64Data))
 }
 
 func (b *Base64Source) GetRawData() string { return b.Base64Data }
@@ -152,8 +182,8 @@ type CachedFileData struct {
 
 	diskPath        string     // 磁盘缓存文件路径（大文件）
 	isDisk          bool       // 是否使用磁盘缓存
-	diskMu          sync.Mutex // 磁盘操作锁（保护磁盘文件的读取和删除）
-	diskClosed      bool       // 是否已关闭/清理
+	mu              sync.Mutex // 保护缓存内容与关闭状态
+	closed          bool       // 是否已关闭/清理
 	statDecremented bool       // 是否已扣减统计
 
 	OnClose func(size int64)
@@ -178,15 +208,14 @@ func NewDiskCachedData(diskPath string, mimeType string, size int64) *CachedFile
 }
 
 func (c *CachedFileData) GetBase64Data() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return "", fmt.Errorf("file cache already closed")
+	}
 	if !c.isDisk {
 		return c.base64Data, nil
-	}
-
-	c.diskMu.Lock()
-	defer c.diskMu.Unlock()
-
-	if c.diskClosed {
-		return "", fmt.Errorf("disk cache already closed")
 	}
 
 	data, err := os.ReadFile(c.diskPath)
@@ -197,7 +226,9 @@ func (c *CachedFileData) GetBase64Data() (string, error) {
 }
 
 func (c *CachedFileData) SetBase64Data(data string) {
-	if !c.isDisk {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.isDisk && !c.closed {
 		c.base64Data = data
 	}
 }
@@ -206,20 +237,26 @@ func (c *CachedFileData) IsDisk() bool {
 	return c.isDisk
 }
 
+func (c *CachedFileData) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 func (c *CachedFileData) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
+
+	c.closed = true
 	if !c.isDisk {
 		c.base64Data = ""
 		return nil
 	}
 
-	c.diskMu.Lock()
-	defer c.diskMu.Unlock()
-
-	if c.diskClosed {
-		return nil
-	}
-
-	c.diskClosed = true
 	if c.diskPath != "" {
 		err := os.Remove(c.diskPath)
 		if err == nil && !c.statDecremented && c.OnClose != nil {

@@ -49,16 +49,73 @@ type ClaudeConvertInfo struct {
 type RerankerInfo struct {
 	Documents       []any
 	ReturnDocuments bool
+	// CohereSearchUnits is validated provider billing metadata. It remains nil
+	// for all other rerank providers.
+	CohereSearchUnits *float64
 }
 
 type BuildInToolInfo struct {
 	ToolName          string
 	CallCount         int
 	SearchContextSize string
+	// Image-generation settings are frozen from the exact outbound request.
+	// Response settlement must not read the pre-override client payload.
+	ImageModel         string
+	ImageQuality       string
+	ImageSize          string
+	ImagePartialImages int
+	ImageOutputs       []ImageGenerationOutputInfo
+	ImagePartialCount  int
+}
+
+type ImageGenerationOutputInfo struct {
+	Quality string
+	Size    string
 }
 
 type ResponsesUsageInfo struct {
 	BuiltInTools map[string]*BuildInToolInfo
+	// SeenOutputItems prevents a duplicated streaming output-item event from
+	// charging the same provider-side call more than once. Some compatible
+	// providers retry SSE frames even though OpenAI emits one done event per
+	// output item.
+	SeenOutputItems map[string]struct{}
+	// SeenPartialImages deduplicates retried partial-image SSE frames.
+	SeenPartialImages map[string]struct{}
+	// MaxToolCalls is the cap from the exact outbound Responses payload after
+	// channel filtering and parameter overrides. Settlement must not validate
+	// provider counters against the stale client request.
+	MaxToolCalls *uint
+}
+
+// WebSearchTool returns the single configured Responses web-search tool.
+// A response web_search_call does not identify which request definition ran,
+// so multiple current/preview definitions are ambiguous for billing.
+func (r *ResponsesUsageInfo) WebSearchTool() (string, *BuildInToolInfo, error) {
+	if r == nil {
+		return "", nil, nil
+	}
+
+	configuredType := ""
+	var configuredTool *BuildInToolInfo
+	for toolType, tool := range r.BuiltInTools {
+		_, recognized := dto.ResponsesWebSearchPricingKey(toolType)
+		if !recognized {
+			if strings.HasPrefix(toolType, "web_search") {
+				return "", nil, fmt.Errorf("unsupported Responses web-search tool type %q", toolType)
+			}
+			continue
+		}
+		if configuredType != "" {
+			return "", nil, fmt.Errorf("multiple Responses web-search tools are ambiguous: %q and %q", configuredType, toolType)
+		}
+		if tool == nil {
+			return "", nil, fmt.Errorf("Responses web-search tool %q has no usage counter", toolType)
+		}
+		configuredType = toolType
+		configuredTool = tool
+	}
+	return configuredType, configuredTool, nil
 }
 
 type ChannelMeta struct {
@@ -172,6 +229,16 @@ type RelayInfo struct {
 	// int32 bound (or NaN fallback) while computing this request's charge.
 	// It is surfaced onto the consume/task log's admin_info for auditing.
 	QuotaClamp *common.QuotaClamp
+	// MaxServerToolReservationQuota is the largest conservative server-tool
+	// component included in a preflight reservation across channel retries. It
+	// is not actual usage and must be excluded from invalid-usage fallback
+	// settlement; verified response counters are charged separately.
+	MaxServerToolReservationQuota int
+	// FinalRequestEstimateReady indicates that PriceData and any tiered snapshot
+	// describe the exact outbound request for the successful attempt. This
+	// prevents a larger reservation retained from an earlier retry from becoming
+	// the fallback charge when the final provider returns malformed usage.
+	FinalRequestEstimateReady bool
 
 	// TieredBillingSnapshot is a frozen snapshot of tiered billing rules
 	// captured at pre-consume time. Non-nil only when billing mode is "tiered_expr".
@@ -183,6 +250,10 @@ type RelayInfo struct {
 	// RequestConversionChain records request format conversions in order, e.g.
 	// ["openai", "openai_responses"] or ["openai", "claude"].
 	RequestConversionChain []types.RelayFormat
+	// EffectiveClaudeWebSearchMaxUses preserves the max_uses limit in the
+	// converted Claude request so settlement can validate provider-reported
+	// server-tool usage against the request that was actually sent upstream.
+	EffectiveClaudeWebSearchMaxUses *uint
 	// 最终请求到上游的格式。可由 adaptor 显式设置；
 	// 若为空，调用 GetFinalRequestRelayFormat 会回退到 RequestConversionChain 的最后一项或 RelayFormat。
 	FinalRequestRelayFormat types.RelayFormat
@@ -319,7 +390,7 @@ func (info *RelayInfo) ToString() string {
 	if info.ChannelMeta != nil {
 		cm := info.ChannelMeta
 		fmt.Fprintf(b, "ChannelMeta{ Type: %d, Id: %d, IsMultiKey: %t, MultiKeyIndex: %d, BaseURL: %q, ApiType: %d, ApiVersion: %q, Organization: %q, CreateTime: %d, UpstreamModelName: %q, IsModelMapped: %t, SupportStreamOptions: %t, ApiKey: ***masked*** }, ",
-			cm.ChannelType, cm.ChannelId, cm.ChannelIsMultiKey, cm.ChannelMultiKeyIndex, cm.ChannelBaseUrl, cm.ApiType, cm.ApiVersion, cm.Organization, cm.ChannelCreateTime, cm.UpstreamModelName, cm.IsModelMapped, cm.SupportStreamOptions)
+			cm.ChannelType, cm.ChannelId, cm.ChannelIsMultiKey, cm.ChannelMultiKeyIndex, SanitizeURLForLog(cm.ChannelBaseUrl), cm.ApiType, cm.ApiVersion, cm.Organization, cm.ChannelCreateTime, cm.UpstreamModelName, cm.IsModelMapped, cm.SupportStreamOptions)
 	}
 
 	// Responses usage info (non-sensitive)
@@ -415,28 +486,63 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 	info := genBaseRelayInfo(c, request)
 	info.RelayMode = relayconstant.RelayModeResponses
 	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.ResponsesUsageInfo = NewResponsesUsageInfo(request)
+	return info
+}
 
-	info.ResponsesUsageInfo = &ResponsesUsageInfo{
-		BuiltInTools: make(map[string]*BuildInToolInfo),
+// NewResponsesUsageInfo captures the billable tool definitions from the
+// request that will actually be sent upstream. Callers rebuild this after
+// channel parameter overrides so response call counters cannot be associated
+// with a stale client request.
+func NewResponsesUsageInfo(request *dto.OpenAIResponsesRequest) *ResponsesUsageInfo {
+	usageInfo := &ResponsesUsageInfo{
+		BuiltInTools:      make(map[string]*BuildInToolInfo),
+		SeenOutputItems:   make(map[string]struct{}),
+		SeenPartialImages: make(map[string]struct{}),
 	}
-	if len(request.Tools) > 0 {
+	if request != nil && request.MaxToolCalls != nil {
+		maxToolCalls := *request.MaxToolCalls
+		usageInfo.MaxToolCalls = &maxToolCalls
+	}
+	if request != nil && len(request.Tools) > 0 {
 		for _, tool := range request.GetToolsMap() {
 			toolType := common.Interface2String(tool["type"])
-			info.ResponsesUsageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
+			if toolType == "" {
+				continue
+			}
+			usageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
 				ToolName:  toolType,
 				CallCount: 0,
 			}
-			switch toolType {
-			case dto.BuildInToolWebSearchPreview:
+			if _, isWebSearch := dto.ResponsesWebSearchPricingKey(toolType); isWebSearch {
 				searchContextSize := common.Interface2String(tool["search_context_size"])
 				if searchContextSize == "" {
 					searchContextSize = "medium"
 				}
-				info.ResponsesUsageInfo.BuiltInTools[toolType].SearchContextSize = searchContextSize
+				usageInfo.BuiltInTools[toolType].SearchContextSize = searchContextSize
+			}
+			if toolType == "image_generation" {
+				imageTool := usageInfo.BuiltInTools[toolType]
+				imageTool.ImageModel = common.Interface2String(tool["model"])
+				if imageTool.ImageModel == "" {
+					imageTool.ImageModel = "gpt-image-1"
+				}
+				imageTool.ImageQuality = common.Interface2String(tool["quality"])
+				if imageTool.ImageQuality == "" {
+					imageTool.ImageQuality = "auto"
+				}
+				imageTool.ImageSize = common.Interface2String(tool["size"])
+				if imageTool.ImageSize == "" {
+					imageTool.ImageSize = "auto"
+				}
+				if partial, ok := tool["partial_images"].(float64); ok &&
+					partial >= 0 && partial <= dto.MaxOpenAIImagePartialImages {
+					imageTool.ImagePartialImages = int(partial)
+				}
 			}
 		}
 	}
-	return info
+	return usageInfo
 }
 
 func GenRelayInfoGemini(c *gin.Context, request dto.Request) *RelayInfo {
@@ -708,6 +814,22 @@ type TaskRelayInfo struct {
 	// a specific channel (e.g., remix on origin task's channel). Stored as any
 	// to avoid an import cycle with model; callers type-assert to *model.Channel.
 	LockedChannel any
+	// LockedChannelKey pins a remix to the exact provider account that owns the
+	// origin task. Provider task IDs are generally account-scoped, so rotating
+	// to another key on the same logical channel cannot safely service a remix.
+	LockedChannelKey       string
+	LockedChannelKeyIndex  int
+	LockedChannelKeyPinned bool
+	// OriginTaskUpstreamModelName detects a changed channel model mapping before
+	// a remix can be submitted and billed under a different upstream model.
+	OriginTaskUpstreamModelName string
+
+	// OriginTaskBillingRatios is the immutable billing input copied from the
+	// origin task before the retry loop starts. Each submission attempt rebuilds
+	// PriceData from this snapshot so provider-specific ratios left by an
+	// earlier failed attempt cannot leak into a later retry.
+	OriginTaskBillingRatios            map[string]float64
+	OriginTaskBillingRatiosInitialized bool
 }
 
 type TaskSubmitReq struct {
@@ -746,33 +868,56 @@ func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 	}
 
 	if len(aux.Duration) > 0 {
-		var durationInt int
-		if err := common.Unmarshal(aux.Duration, &durationInt); err == nil {
-			t.Duration = durationInt
+		if strings.TrimSpace(string(aux.Duration)) == "null" {
+			aux.Duration = nil
 		} else {
-			var durationStr string
-			if err := common.Unmarshal(aux.Duration, &durationStr); err == nil && durationStr != "" {
-				if v, err := strconv.Atoi(durationStr); err == nil {
-					t.Duration = v
+			var durationInt int
+			if err := common.Unmarshal(aux.Duration, &durationInt); err == nil {
+				t.Duration = durationInt
+			} else {
+				var durationStr string
+				if err := common.Unmarshal(aux.Duration, &durationStr); err != nil || strings.TrimSpace(durationStr) == "" {
+					return fmt.Errorf("duration must be an integer or integer string")
 				}
+				value, err := strconv.Atoi(durationStr)
+				if err != nil {
+					return fmt.Errorf("duration must be an integer or integer string: %w", err)
+				}
+				t.Duration = value
 			}
 		}
 	}
 
 	if len(aux.Metadata) > 0 {
+		if strings.TrimSpace(string(aux.Metadata)) == "null" {
+			t.Metadata = nil
+			return nil
+		}
 		var metadataStr string
-		if err := common.Unmarshal(aux.Metadata, &metadataStr); err == nil && metadataStr != "" {
-			var metadataObj map[string]interface{}
-			if err := common.Unmarshal([]byte(metadataStr), &metadataObj); err == nil {
-				t.Metadata = metadataObj
+		if err := common.Unmarshal(aux.Metadata, &metadataStr); err == nil {
+			if strings.TrimSpace(metadataStr) == "" {
+				t.Metadata = nil
 				return nil
 			}
+			var metadataObj map[string]interface{}
+			if err := common.Unmarshal([]byte(metadataStr), &metadataObj); err != nil {
+				return fmt.Errorf("metadata string must contain a JSON object: %w", err)
+			}
+			if metadataObj == nil {
+				return fmt.Errorf("metadata string must contain a JSON object")
+			}
+			t.Metadata = metadataObj
+			return nil
 		}
 
 		var metadataObj map[string]interface{}
-		if err := common.Unmarshal(aux.Metadata, &metadataObj); err == nil {
-			t.Metadata = metadataObj
+		if err := common.Unmarshal(aux.Metadata, &metadataObj); err != nil {
+			return fmt.Errorf("metadata must be a JSON object or an encoded JSON object: %w", err)
 		}
+		if metadataObj == nil {
+			return fmt.Errorf("metadata must be a JSON object")
+		}
+		t.Metadata = metadataObj
 	}
 
 	return nil
@@ -812,10 +957,10 @@ func FailTaskInfo(reason string) *TaskInfo {
 }
 
 // RemoveDisabledFields 从请求 JSON 数据中移除渠道设置中禁用的字段
-// service_tier: 服务层级字段，可能导致额外计费（OpenAI、Claude、Responses API 支持）
+// service_tier/serviceTier: 服务层级字段，可能导致额外计费（OpenAI、Claude、Responses、Gemini API 支持）
 // inference_geo: Claude 数据驻留推理区域字段（仅 Claude 支持，默认过滤）
 // speed: Claude 推理速度模式字段（仅 Claude 支持，默认过滤）
-// store: 数据存储授权字段，涉及用户隐私（仅 OpenAI、Responses API 支持，默认允许透传，禁用后可能导致 Codex 无法使用）
+// store: 数据存储授权字段，涉及用户隐私（OpenAI、Responses、Gemini API 支持，默认允许透传，禁用后可能导致 Codex 无法使用）
 // safety_identifier: 安全标识符，用于向 OpenAI 报告违规用户（仅 OpenAI 支持，涉及用户隐私）
 // stream_options.include_obfuscation: 响应流混淆控制字段（仅 OpenAI Responses API 支持）
 func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOtherSettings, channelPassThroughEnabled bool) ([]byte, error) {
@@ -836,6 +981,9 @@ func RemoveDisabledFields(jsonData []byte, channelOtherSettings dto.ChannelOther
 	if !channelOtherSettings.AllowServiceTier {
 		if _, exists := data["service_tier"]; exists {
 			delete(data, "service_tier")
+		}
+		if _, exists := data["serviceTier"]; exists {
+			delete(data, "serviceTier")
 		}
 	}
 
@@ -900,9 +1048,10 @@ func hasRemovableDisabledField(jsonData []byte, channelOtherSettings dto.Channel
 		"store",
 		"safety_identifier",
 		"stream_options.include_obfuscation",
+		"serviceTier",
 	)
 
-	return (!channelOtherSettings.AllowServiceTier && values[0].Exists()) ||
+	return (!channelOtherSettings.AllowServiceTier && (values[0].Exists() || values[6].Exists())) ||
 		(!channelOtherSettings.AllowInferenceGeo && values[1].Exists()) ||
 		(!channelOtherSettings.AllowSpeed && values[2].Exists()) ||
 		(channelOtherSettings.DisableStore && values[3].Exists()) ||

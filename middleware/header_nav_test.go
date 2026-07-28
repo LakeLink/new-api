@@ -4,8 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -39,17 +41,20 @@ func withHeaderNavModules(t *testing.T, raw string) {
 
 func performHeaderNavRequest(t *testing.T, handler gin.HandlerFunc, authenticated bool) *httptest.ResponseRecorder {
 	t.Helper()
+	var browserSessionID string
 	if authenticated {
 		oldDB := model.DB
 		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 		require.NoError(t, err)
-		require.NoError(t, db.AutoMigrate(&model.User{}))
+		require.NoError(t, db.AutoMigrate(&model.User{}, &model.BrowserSession{}))
 		model.DB = db
 		t.Cleanup(func() { model.DB = oldDB })
 		require.NoError(t, db.Create(&model.User{
 			Id: 1, Username: "tester", Role: common.RoleCommonUser,
 			Status: common.UserStatusEnabled, Group: "default",
 		}).Error)
+		browserSessionID, err = model.CreateBrowserSession(1, time.Now().Unix())
+		require.NoError(t, err)
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -62,6 +67,7 @@ func performHeaderNavRequest(t *testing.T, handler gin.HandlerFunc, authenticate
 		session.Set("id", 1)
 		session.Set("status", common.UserStatusEnabled)
 		session.Set("group", "default")
+		session.Set(constant.SessionKeyBrowserSessionID, browserSessionID)
 		if err := session.Save(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"success": false})
 			return

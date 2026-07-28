@@ -46,6 +46,19 @@ func TestChatCompletionsRequestToResponsesRequestRejectsMultipleChoices(t *testi
 	assert.Contains(t, err.Error(), "n>1")
 }
 
+func TestChatCompletionsRequestToResponsesPreservesExplicitZeroMaxCompletionTokens(t *testing.T) {
+	legacyMax := uint(4096)
+	explicitZero := uint(0)
+	got, err := ChatCompletionsRequestToResponsesRequest(&dto.GeneralOpenAIRequest{
+		Model:               "gpt-test",
+		MaxTokens:           &legacyMax,
+		MaxCompletionTokens: &explicitZero,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got.MaxOutputTokens)
+	assert.Zero(t, *got.MaxOutputTokens)
+}
+
 func assistantMessageWithTool(content string, id string, name string, args string) dto.Message {
 	msg := dto.Message{Role: "assistant", Content: content}
 	msg.SetToolCalls([]dto.ToolCallRequest{

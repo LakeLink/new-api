@@ -64,34 +64,52 @@ func TestResetStatusCode(t *testing.T) {
 	}
 }
 
-func TestRelayErrorHandlerTruncatesInvalidJSONBodyInLog(t *testing.T) {
-	withDebugEnabled(t, false)
+func TestRelayErrorHandlerNeverLogsInvalidUpstreamBody(t *testing.T) {
+	for _, debugEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug=%t", debugEnabled), func(t *testing.T) {
+			withDebugEnabled(t, debugEnabled)
 
-	body := strings.Repeat("b", common.LocalLogContentLimit+256)
-	var logBuffer bytes.Buffer
+			body := "upstream-secret-" +
+				strings.Repeat("b", common.LocalLogContentLimit+256)
+			var logBuffer bytes.Buffer
 
-	common.LogWriterMu.Lock()
-	oldWriter := gin.DefaultErrorWriter
-	gin.DefaultErrorWriter = &logBuffer
-	common.LogWriterMu.Unlock()
-	t.Cleanup(func() {
-		common.LogWriterMu.Lock()
-		gin.DefaultErrorWriter = oldWriter
-		common.LogWriterMu.Unlock()
-	})
+			common.LogWriterMu.Lock()
+			oldWriter := gin.DefaultErrorWriter
+			gin.DefaultErrorWriter = &logBuffer
+			common.LogWriterMu.Unlock()
+			t.Cleanup(func() {
+				common.LogWriterMu.Lock()
+				gin.DefaultErrorWriter = oldWriter
+				common.LogWriterMu.Unlock()
+			})
 
-	resp := &http.Response{
-		StatusCode: http.StatusInternalServerError,
-		Body:       io.NopCloser(strings.NewReader(body)),
+			resp := &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+
+			newAPIError := RelayErrorHandler(
+				context.Background(),
+				resp,
+				false,
+			)
+
+			require.NotNil(t, newAPIError)
+			require.Equal(
+				t,
+				"bad response status code 500",
+				newAPIError.Error(),
+			)
+			require.Contains(t, logBuffer.String(), "unparseable")
+			require.Contains(
+				t,
+				logBuffer.String(),
+				fmt.Sprintf("%d-byte body", len(body)),
+			)
+			require.NotContains(t, logBuffer.String(), "upstream-secret")
+			require.NotContains(t, logBuffer.String(), strings.Repeat("b", 64))
+		})
 	}
-
-	newAPIError := RelayErrorHandler(context.Background(), resp, false)
-
-	require.NotNil(t, newAPIError)
-	require.Equal(t, "bad response status code 500", newAPIError.Error())
-	require.Contains(t, logBuffer.String(), "[truncated")
-	require.Contains(t, logBuffer.String(), fmt.Sprintf("original_length=%d", len(body)))
-	require.NotContains(t, logBuffer.String(), strings.Repeat("b", common.LocalLogContentLimit+1))
 }
 
 func TestRelayErrorHandlerKeepsStructuredErrorMessage(t *testing.T) {
@@ -120,34 +138,6 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 
 	require.NotNil(t, newAPIError)
 	require.Equal(t, message, newAPIError.Error())
-}
-
-func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
-	withDebugEnabled(t, true)
-
-	body := strings.Repeat("e", common.LocalLogContentLimit+256)
-	var logBuffer bytes.Buffer
-
-	common.LogWriterMu.Lock()
-	oldWriter := gin.DefaultErrorWriter
-	gin.DefaultErrorWriter = &logBuffer
-	common.LogWriterMu.Unlock()
-	t.Cleanup(func() {
-		common.LogWriterMu.Lock()
-		gin.DefaultErrorWriter = oldWriter
-		common.LogWriterMu.Unlock()
-	})
-
-	resp := &http.Response{
-		StatusCode: http.StatusInternalServerError,
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
-
-	newAPIError := RelayErrorHandler(context.Background(), resp, false)
-
-	require.NotNil(t, newAPIError)
-	require.NotContains(t, logBuffer.String(), "[truncated")
-	require.Contains(t, logBuffer.String(), body)
 }
 
 func withDebugEnabled(t *testing.T, enabled bool) {

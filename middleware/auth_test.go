@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -22,13 +23,15 @@ func TestUserAuthWritesSessionGroupToRelayContextKeys(t *testing.T) {
 	oldDB := model.DB
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.BrowserSession{}))
 	model.DB = db
 	t.Cleanup(func() { model.DB = oldDB })
 	require.NoError(t, db.Create(&model.User{
 		Id: 1, Username: "admin", Role: common.RoleAdminUser,
 		Status: common.UserStatusEnabled, Group: "user:admin",
 	}).Error)
+	sessionID, err := model.CreateBrowserSession(1, time.Now().Unix())
+	require.NoError(t, err)
 
 	router := gin.New()
 	router.Use(sessions.Sessions("session", cookie.NewStore([]byte("test-secret"))))
@@ -41,6 +44,7 @@ func TestUserAuthWritesSessionGroupToRelayContextKeys(t *testing.T) {
 			session.Set("id", 1)
 			session.Set("status", common.UserStatusEnabled)
 			session.Set("group", "user:admin")
+			session.Set(constant.SessionKeyBrowserSessionID, sessionID)
 			require.NoError(t, session.Save())
 			c.Next()
 		},
@@ -65,13 +69,15 @@ func TestUserAuthRejectsRevokedCookieSession(t *testing.T) {
 	oldDB := model.DB
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.BrowserSession{}))
 	model.DB = db
 	t.Cleanup(func() { model.DB = oldDB })
 	require.NoError(t, db.Create(&model.User{
 		Id: 7, Username: "revoked", Role: common.RoleCommonUser,
 		Status: common.UserStatusEnabled, Group: "default", SessionVersion: 2,
 	}).Error)
+	sessionID, err := model.CreateBrowserSession(7, time.Now().Unix())
+	require.NoError(t, err)
 
 	handlerCalled := false
 	router := gin.New()
@@ -84,6 +90,7 @@ func TestUserAuthRejectsRevokedCookieSession(t *testing.T) {
 		session.Set("status", common.UserStatusEnabled)
 		session.Set("group", "default")
 		session.Set("session_version", int64(1))
+		session.Set(constant.SessionKeyBrowserSessionID, sessionID)
 		require.NoError(t, session.Save())
 		c.Next()
 	}, UserAuth(), func(c *gin.Context) { handlerCalled = true })
@@ -102,7 +109,7 @@ func TestAdminAuthRejectsDemotedCookieSessionUsingCurrentDatabaseRole(t *testing
 	oldDB := model.DB
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.BrowserSession{}))
 	model.DB = db
 	t.Cleanup(func() { model.DB = oldDB })
 	require.NoError(t, db.Create(&model.User{
@@ -112,6 +119,8 @@ func TestAdminAuthRejectsDemotedCookieSessionUsingCurrentDatabaseRole(t *testing
 		Status:   common.UserStatusEnabled,
 		Group:    "default",
 	}).Error)
+	sessionID, err := model.CreateBrowserSession(42, time.Now().Unix())
+	require.NoError(t, err)
 
 	handlerCalled := false
 	router := gin.New()
@@ -125,6 +134,7 @@ func TestAdminAuthRejectsDemotedCookieSessionUsingCurrentDatabaseRole(t *testing
 			session.Set("id", 42)
 			session.Set("status", common.UserStatusEnabled)
 			session.Set("group", "default")
+			session.Set(constant.SessionKeyBrowserSessionID, sessionID)
 			require.NoError(t, session.Save())
 			c.Next()
 		},

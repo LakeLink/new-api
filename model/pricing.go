@@ -50,7 +50,7 @@ var (
 	vendorsList          []PricingVendor
 	supportedEndpointMap map[string]common.EndpointInfo
 	lastGetPricingTime   time.Time
-	updatePricingLock    sync.Mutex
+	updatePricingLock    sync.RWMutex
 
 	// 缓存映射：模型名 -> 启用分组 / 计费类型
 	modelEnableGroups     = make(map[string][]string)
@@ -64,17 +64,63 @@ var (
 )
 
 func GetPricing() []Pricing {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		updatePricingLock.Lock()
-		defer updatePricingLock.Unlock()
-		// Double check after acquiring the lock
-		if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-			modelSupportEndpointsLock.Lock()
-			defer modelSupportEndpointsLock.Unlock()
-			updatePricing()
+	updatePricingLock.RLock()
+	if time.Since(lastGetPricingTime) <= time.Minute && len(pricingMap) > 0 {
+		defer updatePricingLock.RUnlock()
+		return clonePricingSnapshotLocked()
+	}
+	updatePricingLock.RUnlock()
+
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+	refreshPricingCacheLocked()
+	return clonePricingSnapshotLocked()
+}
+
+// refreshPricingCacheLocked refreshes all related pricing snapshots together.
+// The caller must hold updatePricingLock for writing.
+func refreshPricingCacheLocked() {
+	if time.Since(lastGetPricingTime) <= time.Minute && len(pricingMap) > 0 {
+		return
+	}
+	modelSupportEndpointsLock.Lock()
+	defer modelSupportEndpointsLock.Unlock()
+	updatePricing()
+}
+
+// clonePricingSnapshotLocked returns a caller-owned view of the pricing cache.
+// The caller must hold updatePricingLock for reading or writing.
+func clonePricingSnapshotLocked() []Pricing {
+	snapshot := make([]Pricing, len(pricingMap))
+	for i := range pricingMap {
+		snapshot[i] = pricingMap[i]
+		snapshot[i].EnableGroup = append([]string(nil), pricingMap[i].EnableGroup...)
+		snapshot[i].SupportedEndpointTypes = append(
+			[]constant.EndpointType(nil),
+			pricingMap[i].SupportedEndpointTypes...,
+		)
+		if pricingMap[i].CacheRatio != nil {
+			value := *pricingMap[i].CacheRatio
+			snapshot[i].CacheRatio = &value
+		}
+		if pricingMap[i].CreateCacheRatio != nil {
+			value := *pricingMap[i].CreateCacheRatio
+			snapshot[i].CreateCacheRatio = &value
+		}
+		if pricingMap[i].ImageRatio != nil {
+			value := *pricingMap[i].ImageRatio
+			snapshot[i].ImageRatio = &value
+		}
+		if pricingMap[i].AudioRatio != nil {
+			value := *pricingMap[i].AudioRatio
+			snapshot[i].AudioRatio = &value
+		}
+		if pricingMap[i].AudioCompletionRatio != nil {
+			value := *pricingMap[i].AudioCompletionRatio
+			snapshot[i].AudioCompletionRatio = &value
 		}
 	}
-	return pricingMap
+	return snapshot
 }
 
 func InvalidatePricingCache() {
@@ -88,11 +134,17 @@ func InvalidatePricingCache() {
 
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		// 保证先刷新一次
-		GetPricing()
+	updatePricingLock.RLock()
+	if time.Since(lastGetPricingTime) <= time.Minute && len(pricingMap) > 0 {
+		defer updatePricingLock.RUnlock()
+		return append([]PricingVendor(nil), vendorsList...)
 	}
-	return vendorsList
+	updatePricingLock.RUnlock()
+
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+	refreshPricingCacheLocked()
+	return append([]PricingVendor(nil), vendorsList...)
 }
 
 func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
@@ -102,7 +154,7 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 	modelSupportEndpointsLock.RLock()
 	defer modelSupportEndpointsLock.RUnlock()
 	if endpoints, ok := modelSupportEndpointTypes[model]; ok {
-		return endpoints
+		return append([]constant.EndpointType(nil), endpoints...)
 	}
 	return make([]constant.EndpointType, 0)
 }
@@ -186,7 +238,10 @@ func updatePricing() {
 	}
 	// 预加载模型元数据与供应商一次，避免循环查询
 	var allMeta []Model
-	_ = DB.Find(&allMeta).Error
+	if err := DB.Find(&allMeta).Error; err != nil {
+		common.SysLog(fmt.Sprintf("load pricing model metadata error: %v", err))
+		return
+	}
 	metaMap := make(map[string]*Model)
 	prefixList := make([]*Model, 0)
 	suffixList := make([]*Model, 0)
@@ -238,14 +293,20 @@ func updatePricing() {
 
 	// 预加载供应商
 	var vendors []Vendor
-	_ = DB.Find(&vendors).Error
+	if err := DB.Find(&vendors).Error; err != nil {
+		common.SysLog(fmt.Sprintf("load pricing vendors error: %v", err))
+		return
+	}
 	vendorMap := make(map[int]*Vendor)
 	for i := range vendors {
 		vendorMap[vendors[i].Id] = &vendors[i]
 	}
 
 	// 初始化默认供应商映射
-	initDefaultVendorMapping(metaMap, vendorMap, enableAbilities)
+	if err := initDefaultVendorMapping(metaMap, vendorMap, enableAbilities); err != nil {
+		common.SysLog(fmt.Sprintf("load pricing default vendors error: %v", err))
+		return
+	}
 
 	// 构建对前端友好的供应商列表
 	vendorsList = make([]PricingVendor, 0, len(vendorMap))
@@ -429,5 +490,23 @@ func updatePricing() {
 
 // GetSupportedEndpointMap 返回全局端点到路径的映射
 func GetSupportedEndpointMap() map[string]common.EndpointInfo {
-	return supportedEndpointMap
+	updatePricingLock.RLock()
+	if time.Since(lastGetPricingTime) <= time.Minute && len(pricingMap) > 0 {
+		defer updatePricingLock.RUnlock()
+		snapshot := make(map[string]common.EndpointInfo, len(supportedEndpointMap))
+		for endpoint, info := range supportedEndpointMap {
+			snapshot[endpoint] = info
+		}
+		return snapshot
+	}
+	updatePricingLock.RUnlock()
+
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+	refreshPricingCacheLocked()
+	snapshot := make(map[string]common.EndpointInfo, len(supportedEndpointMap))
+	for endpoint, info := range supportedEndpointMap {
+		snapshot[endpoint] = info
+	}
+	return snapshot
 }

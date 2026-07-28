@@ -27,11 +27,23 @@ func DecodeBase64ImageData(base64String string) (image.Config, string, string, e
 		return image.Config{}, "", "", errors.New("base64 string is empty")
 	}
 
-	// 将base64字符串解码为字节切片
-	decodedData, err := base64.StdEncoding.DecodeString(base64String)
+	maxImageBytes := common.BytesFromMegabytes(constant.MaxFileDownloadMB)
+	if maxImageBytes <= 0 {
+		maxImageBytes = 64 << 20
+	}
+
+	// Stream through a bounded decoder so an oversized inline image cannot
+	// allocate its full decoded representation before the file limit is
+	// enforced.
+	decodedData, err := io.ReadAll(io.LimitReader(
+		base64.NewDecoder(base64.StdEncoding, strings.NewReader(base64String)),
+		common.ReadLimitWithOverrunByte(maxImageBytes),
+	))
 	if err != nil {
-		fmt.Println("Error: Failed to decode base64 string")
 		return image.Config{}, "", "", fmt.Errorf("failed to decode base64 string: %s", err.Error())
+	}
+	if int64(len(decodedData)) > maxImageBytes {
+		return image.Config{}, "", "", fmt.Errorf("image size exceeds maximum allowed size of %d bytes", maxImageBytes)
 	}
 
 	// 创建一个bytes.Buffer用于存储解码后的数据
@@ -82,7 +94,10 @@ func GetImageFromUrl(url string) (mimeType string, data string, err error) {
 	if contentType != "application/octet-stream" && !strings.HasPrefix(contentType, "image/") {
 		return "", "", fmt.Errorf("invalid content type: %s, required image/*", contentType)
 	}
-	maxImageSize := int64(constant.MaxFileDownloadMB * 1024 * 1024)
+	maxImageSize := common.BytesFromMegabytes(constant.MaxFileDownloadMB)
+	if maxImageSize <= 0 {
+		maxImageSize = 64 << 20
+	}
 
 	// Check Content-Length if available
 	if resp.ContentLength > maxImageSize {
@@ -90,14 +105,14 @@ func GetImageFromUrl(url string) (mimeType string, data string, err error) {
 	}
 
 	// Use LimitReader to prevent reading oversized images
-	limitReader := io.LimitReader(resp.Body, maxImageSize)
+	limitReader := io.LimitReader(resp.Body, common.ReadLimitWithOverrunByte(maxImageSize))
 	buffer := &bytes.Buffer{}
 
 	written, err := io.Copy(buffer, limitReader)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read image data: %w", err)
 	}
-	if written >= maxImageSize {
+	if written > maxImageSize {
 		return "", "", fmt.Errorf("image size exceeds maximum allowed size of %d bytes", maxImageSize)
 	}
 
@@ -141,17 +156,17 @@ func DecodeUrlImageData(imageUrl string) (image.Config, string, error) {
 
 		// 从response.Body读取更多的数据直到达到当前的限制
 		additionalData := make([]byte, limit-int64(len(readData)))
-		n, _ := io.ReadFull(response.Body, additionalData)
+		n, readErr := io.ReadFull(response.Body, additionalData)
 		readData = append(readData, additionalData[:n]...)
-
-		// 使用io.MultiReader组合已经读取的数据和response.Body
-		limitReader := io.MultiReader(bytes.NewReader(readData), response.Body)
 
 		var config image.Config
 		var format string
-		config, format, err = getImageConfig(limitReader)
+		config, format, err = getImageConfig(bytes.NewReader(readData))
 		if err == nil {
 			return config, format, nil
+		}
+		if readErr != nil {
+			break
 		}
 	}
 

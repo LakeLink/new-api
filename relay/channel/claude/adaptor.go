@@ -26,7 +26,15 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
-	return request, nil
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	converted := *request
+	if converted.MaxTokens == nil {
+		converted.MaxTokens = converted.MaxTokensToSample
+	}
+	converted.MaxTokensToSample = nil
+	return &converted, nil
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {

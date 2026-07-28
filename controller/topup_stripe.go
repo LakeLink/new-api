@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -56,16 +57,21 @@ func buildStripeTopUpQuote(amount int64, group string) (*stripeTopUpQuote, error
 	if err != nil {
 		return nil, err
 	}
-	if setting.StripeUnitPrice <= 0 || math.IsNaN(setting.StripeUnitPrice) || math.IsInf(setting.StripeUnitPrice, 0) {
+	stripeSetting := setting.GetStripeSettings()
+	if stripeSetting.UnitPrice <= 0 || math.IsNaN(stripeSetting.UnitPrice) || math.IsInf(stripeSetting.UnitPrice, 0) {
 		return nil, errors.New("Stripe 单价配置错误")
 	}
 
 	payUnits := decimal.NewFromInt(amount)
 	if amountIsTokens {
-		if common.QuotaPerUnit <= 0 {
+		quotaPerUnit := common.CurrentQuotaPerUnit()
+		if quotaPerUnit <= 0 ||
+			math.IsNaN(quotaPerUnit) ||
+			math.IsInf(quotaPerUnit, 0) ||
+			quotaPerUnit > float64(common.MaxQuota) {
 			return nil, errors.New("额度单位配置错误")
 		}
-		payUnits = payUnits.Div(decimal.NewFromFloat(common.QuotaPerUnit))
+		payUnits = payUnits.Div(decimal.NewFromFloat(quotaPerUnit))
 	}
 	topupGroupRatio := common.GetTopupGroupRatio(group)
 	if topupGroupRatio <= 0 {
@@ -75,14 +81,14 @@ func buildStripeTopUpQuote(amount int64, group string) (*stripeTopUpQuote, error
 		return nil, errors.New("充值分组倍率配置错误")
 	}
 	discount := 1.0
-	if configured, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(amount)]; ok && configured > 0 {
+	if configured, ok := lookupPaymentAmountDiscount(operation_setting.GetPaymentSetting().AmountDiscount, amount); ok && configured > 0 {
 		if math.IsNaN(configured) || math.IsInf(configured, 0) {
 			return nil, errors.New("充值折扣配置错误")
 		}
 		discount = configured
 	}
 	payCentsDecimal := payUnits.
-		Mul(decimal.NewFromFloat(setting.StripeUnitPrice)).
+		Mul(decimal.NewFromFloat(stripeSetting.UnitPrice)).
 		Mul(decimal.NewFromFloat(topupGroupRatio)).
 		Mul(decimal.NewFromFloat(discount)).
 		Mul(decimal.NewFromInt(100)).
@@ -215,7 +221,7 @@ func RequestStripePay(c *gin.Context) {
 func StripeWebhook(c *gin.Context) {
 	ctx := c.Request.Context()
 	if !isStripeWebhookEnabled() {
-		logger.LogWarn(ctx, fmt.Sprintf("Stripe webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
+		logger.LogWarn(ctx, fmt.Sprintf("Stripe webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.URL.Path, c.ClientIP()))
 		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
@@ -223,24 +229,38 @@ func StripeWebhook(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, paymentWebhookMaxBodyBytes)
 	payload, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("Stripe webhook 读取请求体失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+		logger.LogError(ctx, fmt.Sprintf("Stripe webhook 读取请求体失败 path=%q client_ip=%s error=%q", c.Request.URL.Path, c.ClientIP(), err.Error()))
+		if isPaymentWebhookBodyTooLarge(err) {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return
+		}
 		c.AbortWithStatus(http.StatusServiceUnavailable)
 		return
 	}
 
 	signature := c.GetHeader("Stripe-Signature")
-	event, err := webhook.ConstructEventWithOptions(payload, signature, setting.StripeWebhookSecret, webhook.ConstructEventOptions{
+	stripeSetting := setting.GetStripeSettings()
+	event, err := webhook.ConstructEventWithOptions(payload, signature, stripeSetting.WebhookSecret, webhook.ConstructEventOptions{
 		IgnoreAPIVersionMismatch: true,
 	})
 
 	if err != nil {
-		logger.LogWarn(ctx, fmt.Sprintf("Stripe webhook 验签失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+		logger.LogWarn(ctx, fmt.Sprintf("Stripe webhook 验签失败 path=%q client_ip=%s error=%q", c.Request.URL.Path, c.ClientIP(), err.Error()))
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	if event.ID == "" || event.Created <= 0 {
+		logger.LogWarn(ctx, fmt.Sprintf(
+			"Stripe webhook 缺少有效事件标识或时间 event_id=%q created=%d",
+			event.ID,
+			event.Created,
+		))
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
 
 	callerIp := c.ClientIP()
-	logger.LogInfo(ctx, fmt.Sprintf("Stripe webhook 验签成功 event_type=%s client_ip=%s path=%q", string(event.Type), callerIp, c.Request.RequestURI))
+	logger.LogInfo(ctx, fmt.Sprintf("Stripe webhook 验签成功 event_type=%s client_ip=%s path=%q", string(event.Type), callerIp, c.Request.URL.Path))
 	var processingErr error
 	switch event.Type {
 	case stripe.EventTypeCheckoutSessionCompleted:
@@ -283,7 +303,7 @@ func sessionCompleted(ctx context.Context, event stripe.Event, callerIp string) 
 	}
 
 	paymentStatus := event.GetObjectValue("payment_status")
-	if paymentStatus != "paid" && !(setting.StripePromotionCodesEnabled && paymentStatus == "no_payment_required") {
+	if paymentStatus != "paid" && !(setting.GetStripeSettings().PromotionCodesEnabled && paymentStatus == "no_payment_required") {
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe Checkout 支付未完成，等待异步结果 trade_no=%s payment_status=%s client_ip=%s", referenceId, paymentStatus, callerIp))
 		return nil
 	}
@@ -315,10 +335,13 @@ func sessionAsyncPaymentFailed(ctx context.Context, event stripe.Event, callerIp
 	LockOrder(referenceId)
 	defer UnlockOrder(referenceId)
 
-	topUp := model.GetTopUpByTradeNo(referenceId)
-	if topUp == nil {
+	topUp, err := model.FindTopUpByTradeNo(referenceId)
+	if errors.Is(err, model.ErrTopUpNotFound) {
 		logger.LogWarn(ctx, fmt.Sprintf("Stripe 异步支付失败但本地订单不存在 trade_no=%s client_ip=%s", referenceId, callerIp))
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	if topUp.PaymentProvider != model.PaymentProviderStripe {
@@ -357,39 +380,75 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 		"event_type":   string(event.Type),
 	}
 	if subscriptionId := event.GetObjectValue("subscription"); subscriptionId != "" {
-		if err := model.SetSubscriptionOrderProviderIdentifiers(
+		order, err := model.FindSubscriptionOrderByTradeNo(referenceId)
+		if err != nil {
+			return err
+		}
+		if order.PaymentProvider != model.PaymentProviderStripe {
+			return model.ErrPaymentMethodMismatch
+		}
+		amountTotal, err := strconv.ParseInt(event.GetObjectValue("amount_total"), 10, 64)
+		if err != nil || amountTotal < 0 || !strings.EqualFold(event.GetObjectValue("currency"), "USD") {
+			return errors.New("Stripe subscription checkout amount or currency is invalid")
+		}
+		expectedCents := decimal.NewFromFloat(order.Money).Mul(decimal.NewFromInt(100)).Round(0)
+		if !expectedCents.IsPositive() ||
+			expectedCents.GreaterThan(decimal.NewFromInt(math.MaxInt64)) ||
+			amountTotal != expectedCents.IntPart() {
+			return fmt.Errorf(
+				"Stripe subscription checkout amount mismatch: expected=%s actual=%d",
+				expectedCents.String(),
+				amountTotal,
+			)
+		}
+		if err := model.SetSubscriptionOrderProviderIdentifiersAt(
 			referenceId,
 			model.PaymentProviderStripe,
 			customerId,
 			subscriptionId,
 			event.GetObjectValue("payment_intent"),
 			"active",
+			event.Created,
 			common.GetJsonString(payload),
-		); err != nil && !errors.Is(err, model.ErrSubscriptionOrderNotFound) {
+		); err != nil {
 			return err
 		}
-	}
-	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, ""); err == nil {
+		if err := model.CompleteSubscriptionOrder(
+			referenceId,
+			common.GetJsonString(payload),
+			model.PaymentProviderStripe,
+			"",
+		); err != nil {
+			return err
+		}
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe 订阅订单处理成功 trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
 		return nil
-	} else if err != nil && !errors.Is(err, model.ErrSubscriptionOrderNotFound) {
-		logger.LogError(ctx, fmt.Sprintf("Stripe 订阅订单处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
+	}
+	topUp, err := model.FindTopUpByTradeNo(referenceId)
+	if err != nil {
 		return err
 	}
-	topUp := model.GetTopUpByTradeNo(referenceId)
-	if topUp == nil || topUp.PaymentProvider != model.PaymentProviderStripe {
-		return model.ErrTopUpNotFound
+	if topUp.PaymentProvider != model.PaymentProviderStripe {
+		return model.ErrPaymentMethodMismatch
 	}
 	amountTotal, err := strconv.ParseInt(event.GetObjectValue("amount_total"), 10, 64)
 	if err != nil || amountTotal < 0 || !strings.EqualFold(event.GetObjectValue("currency"), "USD") {
 		return errors.New("Stripe checkout amount or currency is invalid")
 	}
-	expectedCents := decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromInt(100)).Round(0).IntPart()
-	if amountTotal > expectedCents || (!setting.StripePromotionCodesEnabled && amountTotal != expectedCents) {
+	if math.IsNaN(topUp.Money) || math.IsInf(topUp.Money, 0) || topUp.Money <= 0 {
+		return errors.New("Stripe checkout quote is invalid")
+	}
+	expectedCentsDecimal := decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromInt(100)).Round(0)
+	if !expectedCentsDecimal.IsPositive() ||
+		expectedCentsDecimal.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
+		return errors.New("Stripe checkout quote is invalid")
+	}
+	expectedCents := expectedCentsDecimal.IntPart()
+	if amountTotal > expectedCents || (!setting.GetStripeSettings().PromotionCodesEnabled && amountTotal != expectedCents) {
 		return fmt.Errorf("Stripe checkout amount mismatch: expected=%d actual=%d", expectedCents, amountTotal)
 	}
 
-	err = model.Recharge(referenceId, customerId, event.GetObjectValue("payment_intent"), callerIp)
+	err = model.Recharge(referenceId, customerId, event.GetObjectValue("payment_intent"), amountTotal, callerIp)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("Stripe 充值处理失败 trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
 		return err
@@ -399,6 +458,109 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 	currency := strings.ToUpper(event.GetObjectValue("currency"))
 	logger.LogInfo(ctx, fmt.Sprintf("Stripe 充值成功 trade_no=%s amount_total=%.2f currency=%s event_type=%s client_ip=%s", referenceId, total/100, currency, string(event.Type), callerIp))
 	return nil
+}
+
+type stripeInvoicePaymentsPayload struct {
+	Payments struct {
+		HasMore bool `json:"has_more"`
+		Data    []struct {
+			AmountPaid int64  `json:"amount_paid"`
+			IsDefault  bool   `json:"is_default"`
+			Status     string `json:"status"`
+			Payment    struct {
+				PaymentIntent json.RawMessage `json:"payment_intent"`
+				Charge        json.RawMessage `json:"charge"`
+				PaymentRecord json.RawMessage `json:"payment_record"`
+			} `json:"payment"`
+		} `json:"data"`
+	} `json:"payments"`
+}
+
+func stripeExpandableObjectID(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var id string
+	if err := common.Unmarshal(raw, &id); err == nil {
+		return id
+	}
+	var object struct {
+		ID string `json:"id"`
+	}
+	if err := common.Unmarshal(raw, &object); err != nil {
+		return ""
+	}
+	return object.ID
+}
+
+// stripeInvoicePaymentIdentifiers supports both legacy
+// invoice.payment_intent payloads and Basil/Clover invoice.payments payloads.
+func stripeInvoicePaymentIdentifiers(event stripe.Event, invoice *stripe.Invoice) ([]string, bool) {
+	if invoice == nil {
+		return nil, false
+	}
+	identifiers := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	appendIdentifier := func(identifier string) {
+		if identifier == "" {
+			return
+		}
+		if _, exists := seen[identifier]; exists {
+			return
+		}
+		seen[identifier] = struct{}{}
+		identifiers = append(identifiers, identifier)
+	}
+	if invoice.PaymentIntent != nil && invoice.PaymentIntent.ID != "" {
+		appendIdentifier(invoice.PaymentIntent.ID)
+	}
+	if invoice.Charge != nil && invoice.Charge.ID != "" {
+		appendIdentifier(invoice.Charge.ID)
+	}
+	if event.Data == nil {
+		return identifiers, false
+	}
+	var payload stripeInvoicePaymentsPayload
+	if err := common.Unmarshal(event.Data.Raw, &payload); err != nil {
+		return identifiers, false
+	}
+	defaultIdentifiers := make([]string, 0, len(payload.Payments.Data))
+	otherIdentifiers := make([]string, 0, len(payload.Payments.Data))
+	for _, invoicePayment := range payload.Payments.Data {
+		if invoicePayment.Status != "paid" || invoicePayment.AmountPaid <= 0 {
+			continue
+		}
+		id := stripeExpandableObjectID(invoicePayment.Payment.PaymentIntent)
+		if id == "" {
+			id = stripeExpandableObjectID(invoicePayment.Payment.Charge)
+		}
+		if id == "" {
+			id = stripeExpandableObjectID(invoicePayment.Payment.PaymentRecord)
+		}
+		if id == "" {
+			continue
+		}
+		if invoicePayment.IsDefault {
+			defaultIdentifiers = append(defaultIdentifiers, id)
+		} else {
+			otherIdentifiers = append(otherIdentifiers, id)
+		}
+	}
+	for _, identifier := range defaultIdentifiers {
+		appendIdentifier(identifier)
+	}
+	for _, identifier := range otherIdentifiers {
+		appendIdentifier(identifier)
+	}
+	return identifiers, payload.Payments.HasMore
+}
+
+func stripeInvoicePaymentIdentifier(event stripe.Event, invoice *stripe.Invoice) string {
+	identifiers, _ := stripeInvoicePaymentIdentifiers(event, invoice)
+	if len(identifiers) == 0 {
+		return ""
+	}
+	return identifiers[0]
 }
 
 func handleStripeInvoicePaid(event stripe.Event) error {
@@ -416,9 +578,19 @@ func handleStripeInvoicePaid(event stripe.Event) error {
 	if subscriptionId == "" {
 		return nil
 	}
+	if invoice.AmountPaid <= 0 || !strings.EqualFold(string(invoice.Currency), "USD") {
+		return errors.New("Stripe subscription invoice amount or currency is invalid")
+	}
+	paymentIDs, hasMorePayments := stripeInvoicePaymentIdentifiers(event, &invoice)
+	if hasMorePayments {
+		return errors.New("Stripe invoice contains more payment references than the webhook payload")
+	}
 	paymentId := ""
-	if invoice.PaymentIntent != nil {
-		paymentId = invoice.PaymentIntent.ID
+	if len(paymentIDs) > 0 {
+		paymentId = paymentIDs[0]
+	}
+	if paymentId == "" {
+		return errors.New("Stripe paid subscription invoice has no traceable payment reference")
 	}
 	payload := common.GetJsonString(map[string]interface{}{
 		"event_id": event.ID, "event_type": string(event.Type), "invoice_id": invoice.ID,
@@ -426,17 +598,34 @@ func handleStripeInvoicePaid(event stripe.Event) error {
 		"currency": strings.ToUpper(string(invoice.Currency)),
 	})
 	if string(invoice.BillingReason) == "subscription_create" {
-		return model.SetProviderSubscriptionPayment(model.PaymentProviderStripe, subscriptionId, paymentId, "active", payload)
+		if err := model.SetProviderSubscriptionPaymentAt(
+			model.PaymentProviderStripe,
+			subscriptionId,
+			paymentId,
+			"active",
+			event.Created,
+			payload,
+		); err != nil {
+			return err
+		}
+		return model.BindSubscriptionProviderPayments(
+			model.PaymentProviderStripe,
+			subscriptionId,
+			"",
+			paymentIDs,
+		)
 	}
 	if string(invoice.BillingReason) != "subscription_cycle" {
 		return nil
 	}
-	return model.RenewProviderSubscription(
+	return model.RenewProviderSubscriptionWithPaymentsAt(
 		model.PaymentProviderStripe,
 		subscriptionId,
 		invoice.ID,
 		paymentId,
+		paymentIDs,
 		float64(invoice.AmountPaid)/100,
+		event.Created,
 		payload,
 	)
 }
@@ -459,7 +648,13 @@ func handleStripeInvoicePaymentFailed(event stripe.Event) error {
 	payload := common.GetJsonString(map[string]interface{}{
 		"event_id": event.ID, "event_type": string(event.Type), "invoice_id": invoice.ID,
 	})
-	return model.UpdateProviderSubscriptionStatus(model.PaymentProviderStripe, subscriptionId, "past_due", payload)
+	return model.UpdateProviderSubscriptionStatusAt(
+		model.PaymentProviderStripe,
+		subscriptionId,
+		"past_due",
+		event.Created,
+		payload,
+	)
 }
 
 func handleStripeSubscriptionLifecycle(event stripe.Event) error {
@@ -473,9 +668,21 @@ func handleStripeSubscriptionLifecycle(event stripe.Event) error {
 	})
 	switch status {
 	case "canceled", "unpaid", "incomplete_expired", "paused":
-		return model.CancelProviderSubscription(model.PaymentProviderStripe, subscription.ID, status, payload)
+		return model.CancelProviderSubscriptionAt(
+			model.PaymentProviderStripe,
+			subscription.ID,
+			status,
+			event.Created,
+			payload,
+		)
 	default:
-		return model.UpdateProviderSubscriptionStatus(model.PaymentProviderStripe, subscription.ID, status, payload)
+		return model.UpdateProviderSubscriptionStatusAt(
+			model.PaymentProviderStripe,
+			subscription.ID,
+			status,
+			event.Created,
+			payload,
+		)
 	}
 }
 
@@ -489,20 +696,54 @@ func handleStripeChargeRefunded(event stripe.Event) error {
 		paymentId = charge.PaymentIntent.ID
 	}
 	if paymentId == "" {
-		return nil
+		paymentId = charge.ID
+	}
+	invoiceID := ""
+	if charge.Invoice != nil {
+		invoiceID = charge.Invoice.ID
 	}
 	full := charge.Refunded
-	err := model.ReverseTopUpByProviderPayment(model.PaymentProviderStripe, paymentId, float64(charge.AmountRefunded)/100, full)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, model.ErrTopUpNotFound) {
-		return err
+	if paymentId != "" {
+		err := model.ReverseTopUpByProviderPayment(model.PaymentProviderStripe, paymentId, float64(charge.AmountRefunded)/100, full)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, model.ErrTopUpNotFound) {
+			return err
+		}
 	}
 	payload := common.GetJsonString(map[string]interface{}{
 		"event_id": event.ID, "event_type": string(event.Type), "charge_id": charge.ID,
 	})
-	return model.CancelProviderSubscriptionByPayment(model.PaymentProviderStripe, paymentId, "refunded", payload)
+	refund := model.SubscriptionRefundInput{
+		EventID:           event.ID,
+		AmountMinor:       charge.AmountRefunded,
+		AmountMode:        model.ProviderRefundAmountCumulative,
+		AmountScope:       charge.ID,
+		ProviderEventTime: event.Created,
+		ProviderPayload:   payload,
+	}
+	// SubscriptionOrder.Money is the validated checkout/invoice total. Do not
+	// replace that invoice-wide threshold with charge.Amount: current Stripe
+	// invoices can be funded by multiple partial payments.
+	if paymentId != "" {
+		err := model.ApplySubscriptionRefundByProviderPayment(
+			model.PaymentProviderStripe,
+			paymentId,
+			refund,
+		)
+		if err == nil || !errors.Is(err, model.ErrSubscriptionOrderNotFound) || invoiceID == "" {
+			return err
+		}
+	}
+	if invoiceID != "" {
+		return model.ApplySubscriptionRefundByProviderInvoice(
+			model.PaymentProviderStripe,
+			invoiceID,
+			refund,
+		)
+	}
+	return nil
 }
 
 func handleStripeDisputeCreated(event stripe.Event) error {
@@ -516,20 +757,51 @@ func handleStripeDisputeCreated(event stripe.Event) error {
 	} else if dispute.Charge != nil && dispute.Charge.PaymentIntent != nil {
 		paymentId = dispute.Charge.PaymentIntent.ID
 	}
+	if paymentId == "" && dispute.Charge != nil {
+		paymentId = dispute.Charge.ID
+	}
 	if paymentId == "" {
-		return nil
+		if dispute.Charge == nil || dispute.Charge.Invoice == nil {
+			return nil
+		}
 	}
-	err := model.ReverseTopUpByProviderPayment(model.PaymentProviderStripe, paymentId, 0, true)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, model.ErrTopUpNotFound) {
-		return err
+	if paymentId != "" {
+		err := model.ReverseTopUpByProviderPayment(model.PaymentProviderStripe, paymentId, 0, true)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, model.ErrTopUpNotFound) {
+			return err
+		}
 	}
 	payload := common.GetJsonString(map[string]interface{}{
 		"event_id": event.ID, "event_type": string(event.Type), "dispute_id": dispute.ID,
 	})
-	return model.CancelProviderSubscriptionByPayment(model.PaymentProviderStripe, paymentId, "disputed", payload)
+	refund := model.SubscriptionRefundInput{
+		EventID:           event.ID,
+		AmountMinor:       dispute.Amount,
+		AmountMode:        model.ProviderRefundAmountCumulative,
+		AmountScope:       paymentId,
+		Full:              true,
+		ProviderEventTime: event.Created,
+		ProviderPayload:   payload,
+	}
+	if paymentId != "" {
+		err := model.ApplySubscriptionRefundByProviderPayment(
+			model.PaymentProviderStripe,
+			paymentId,
+			refund,
+		)
+		if err == nil || !errors.Is(err, model.ErrSubscriptionOrderNotFound) ||
+			dispute.Charge == nil || dispute.Charge.Invoice == nil {
+			return err
+		}
+	}
+	return model.ApplySubscriptionRefundByProviderInvoice(
+		model.PaymentProviderStripe,
+		dispute.Charge.Invoice.ID,
+		refund,
+	)
 }
 
 func sessionExpired(ctx context.Context, event stripe.Event) error {
@@ -583,11 +855,10 @@ func sessionExpired(ctx context.Context, event stripe.Event) error {
 //
 // Returns the checkout session URL or an error if the session creation fails.
 func genStripeLink(referenceId string, customerId string, email string, payCents int64, successURL string, cancelURL string) (string, error) {
-	if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
+	stripeSetting := setting.GetStripeSettings()
+	if !strings.HasPrefix(stripeSetting.APISecret, "sk_") && !strings.HasPrefix(stripeSetting.APISecret, "rk_") {
 		return "", fmt.Errorf("无效的Stripe API密钥")
 	}
-
-	stripe.Key = setting.StripeApiSecret
 
 	// Use custom URLs if provided, otherwise use defaults
 	if successURL == "" {
@@ -614,7 +885,7 @@ func genStripeLink(referenceId string, customerId string, email string, payCents
 			},
 		},
 		Mode:                stripe.String(string(stripe.CheckoutSessionModePayment)),
-		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled),
+		AllowPromotionCodes: stripe.Bool(stripeSetting.PromotionCodesEnabled),
 	}
 	params.AddMetadata("trade_no", referenceId)
 
@@ -628,7 +899,11 @@ func genStripeLink(referenceId string, customerId string, email string, payCents
 		params.Customer = stripe.String(customerId)
 	}
 
-	result, err := session.New(params)
+	stripeClient := session.Client{
+		B:   stripe.GetBackend(stripe.APIBackend),
+		Key: stripeSetting.APISecret,
+	}
+	result, err := stripeClient.New(params)
 	if err != nil {
 		return "", err
 	}
@@ -645,13 +920,9 @@ func getStripePayMoney(amount float64, group string) float64 {
 }
 
 func getStripeMinTopup() int64 {
-	minTopup := setting.StripeMinTopUp
+	minTopup := setting.GetStripeSettings().MinTopUp
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
-		value := decimal.NewFromInt(int64(minTopup)).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
-		if value.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
-			return int64(common.MaxQuota)
-		}
-		return value.Ceil().IntPart()
+		return tokenDisplayMinimum(int64(minTopup))
 	}
 	return int64(minTopup)
 }

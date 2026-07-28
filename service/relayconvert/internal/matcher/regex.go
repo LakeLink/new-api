@@ -15,8 +15,9 @@ func MatchAnyRegex(patterns []string, s string) bool {
 		if pattern == "" {
 			continue
 		}
-		re, ok := compiledRegexCache.Load(pattern)
-		if !ok {
+		cached, ok := compiledRegexCache.Load(pattern)
+		re, valid := cached.(*regexp.Regexp)
+		if !ok || !valid || re == nil {
 			compiled, err := regexp.Compile(pattern)
 			if err != nil {
 				// Treat invalid patterns as non-matching to avoid breaking runtime traffic.
@@ -25,7 +26,7 @@ func MatchAnyRegex(patterns []string, s string) bool {
 			re = compiled
 			compiledRegexCache.Store(pattern, re)
 		}
-		if re.(*regexp.Regexp).MatchString(s) {
+		if re.MatchString(s) {
 			return true
 		}
 	}

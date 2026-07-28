@@ -139,11 +139,10 @@ func resetFailClosedUsers() {
 // multi-node deployment would keep serving stale permissions (including not
 // honoring a revoked grant) until restart. Mirrors model.SyncOptions polling.
 func StartPolicySync(frequency int) {
-	if frequency <= 0 {
-		return
-	}
-	for {
-		time.Sleep(time.Duration(frequency) * time.Second)
+	interval := common.SafeIntervalDuration(frequency, time.Second, 60*time.Second, "authorization policy sync")
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
 		if err := ReloadPolicy(); err != nil {
 			common.SysError("failed to reload authz policy: " + err.Error())
 		}

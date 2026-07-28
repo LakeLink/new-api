@@ -5,8 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -31,7 +33,7 @@ func TestActiveRequestsRouteIsRegistered(t *testing.T) {
 	oldDB := model.DB
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.BrowserSession{}))
 	require.NoError(t, db.Create(&model.User{
 		Id:       1,
 		Username: "admin",
@@ -39,6 +41,8 @@ func TestActiveRequestsRouteIsRegistered(t *testing.T) {
 		Status:   common.UserStatusEnabled,
 	}).Error)
 	model.DB = db
+	browserSessionID, err := model.CreateBrowserSession(1, time.Now().Unix())
+	require.NoError(t, err)
 
 	t.Cleanup(func() {
 		service.GlobalActiveRequestTracker = oldTracker
@@ -54,6 +58,8 @@ func TestActiveRequestsRouteIsRegistered(t *testing.T) {
 		session.Set("role", common.RoleAdminUser)
 		session.Set("id", 1)
 		session.Set("status", common.UserStatusEnabled)
+		session.Set("session_version", int64(0))
+		session.Set(constant.SessionKeyBrowserSessionID, browserSessionID)
 		c.Next()
 	})
 	SetApiRouter(router)

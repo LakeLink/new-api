@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -36,10 +37,14 @@ type TaskAdaptor interface {
 
 	ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError
 
+	// ValidateFinalRequest validates provider-specific constraints against the
+	// model selected by channel mapping. It runs before pricing and pre-consume.
+	ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError
+
 	// ── Billing ──────────────────────────────────────────────────────
 
 	// EstimateBilling returns OtherRatios for pre-charge based on user request.
-	// Called after ValidateRequestAndSetAction, before price calculation.
+	// Called after ValidateFinalRequest, before price calculation.
 	// Adaptors should extract duration, resolution, etc. from the parsed request
 	// and return them as ratio multipliers (e.g. {"seconds": 5, "size": 1.666}).
 	// Return nil to use the base model price without extra ratios.
@@ -74,7 +79,7 @@ type TaskAdaptor interface {
 
 	// ── Polling ──────────────────────────────────────────────────────
 
-	FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error)
+	FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error)
 	ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error)
 }
 

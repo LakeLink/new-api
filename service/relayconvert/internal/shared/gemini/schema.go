@@ -1,8 +1,10 @@
 package gemini
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 )
 
@@ -213,9 +215,9 @@ func RemoveAdditionalProperties(schema interface{}, depth int) interface{} {
 	return value
 }
 
-func OpenAIToolChoiceToConfig(toolChoice any) *dto.ToolConfig {
+func OpenAIToolChoiceToConfig(toolChoice any) (*dto.ToolConfig, error) {
 	if toolChoice == nil {
-		return nil
+		return nil, nil
 	}
 
 	if toolChoiceStr, ok := toolChoice.(string); ok {
@@ -230,27 +232,65 @@ func OpenAIToolChoiceToConfig(toolChoice any) *dto.ToolConfig {
 		case "required":
 			config.FunctionCallingConfig.Mode = "ANY"
 		default:
-			config.FunctionCallingConfig.Mode = "AUTO"
+			return nil, fmt.Errorf("unsupported OpenAI tool_choice %q", toolChoiceStr)
 		}
-		return config
+		return config, nil
 	}
 
 	if toolChoiceMap, ok := toolChoice.(map[string]interface{}); ok {
-		if toolChoiceMap["type"] == "function" {
+		switch toolChoiceMap["type"] {
+		case "function":
 			config := &dto.ToolConfig{
 				FunctionCallingConfig: &dto.FunctionCallingConfig{
 					Mode: "ANY",
 				},
 			}
+			toolName := strings.TrimSpace(common.Interface2String(toolChoiceMap["name"]))
 			if function, ok := toolChoiceMap["function"].(map[string]interface{}); ok {
 				if name, ok := function["name"].(string); ok && name != "" {
-					config.FunctionCallingConfig.AllowedFunctionNames = []string{name}
+					toolName = name
 				}
 			}
-			return config
+			if toolName == "" {
+				return nil, fmt.Errorf("OpenAI function tool_choice requires a name")
+			}
+			config.FunctionCallingConfig.AllowedFunctionNames = []string{toolName}
+			return config, nil
+		case "allowed_tools":
+			mode := strings.ToLower(strings.TrimSpace(common.Interface2String(toolChoiceMap["mode"])))
+			config := &dto.ToolConfig{
+				FunctionCallingConfig: &dto.FunctionCallingConfig{},
+			}
+			switch mode {
+			case "auto":
+				config.FunctionCallingConfig.Mode = "VALIDATED"
+			case "required":
+				config.FunctionCallingConfig.Mode = "ANY"
+			default:
+				return nil, fmt.Errorf("OpenAI allowed_tools mode must be auto or required")
+			}
+			allowedTools, err := common.Any2Type[[]map[string]interface{}](toolChoiceMap["tools"])
+			if err != nil || len(allowedTools) == 0 {
+				return nil, fmt.Errorf("OpenAI allowed_tools requires at least one tool")
+			}
+			for index, allowedTool := range allowedTools {
+				if allowedTool["type"] != "function" {
+					return nil, fmt.Errorf("OpenAI allowed_tools.tools[%d] must be a function", index)
+				}
+				name := strings.TrimSpace(common.Interface2String(allowedTool["name"]))
+				if name == "" {
+					return nil, fmt.Errorf("OpenAI allowed_tools.tools[%d].name is required", index)
+				}
+				config.FunctionCallingConfig.AllowedFunctionNames = append(
+					config.FunctionCallingConfig.AllowedFunctionNames,
+					name,
+				)
+			}
+			return config, nil
+		default:
+			return nil, fmt.Errorf("unsupported OpenAI tool_choice type %q", toolChoiceMap["type"])
 		}
-		return nil
 	}
 
-	return nil
+	return nil, fmt.Errorf("OpenAI tool_choice must be a string or object")
 }

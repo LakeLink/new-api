@@ -19,7 +19,12 @@ var RedisEnabled = true
 var ErrRedisKeyNotFound = errors.New("redis key not found")
 
 func RedisKeyCacheSeconds() int {
-	return SyncFrequency
+	return int(SafeIntervalDuration(
+		SyncFrequency,
+		time.Second,
+		60*time.Second,
+		"Redis cache",
+	) / time.Second)
 }
 
 // InitRedisClient This function is called after init()
@@ -65,7 +70,7 @@ func ParseRedisOption() *redis.Options {
 
 func RedisSet(key string, value string, expiration time.Duration) error {
 	if DebugEnabled {
-		SysLog(fmt.Sprintf("Redis SET: key=%s, value=%s, expiration=%v", key, value, expiration))
+		SysLog(fmt.Sprintf("Redis SET: key=%s, expiration=%v", key, expiration))
 	}
 	ctx := context.Background()
 	return RDB.Set(ctx, key, value, expiration).Err()
@@ -107,15 +112,16 @@ func RedisDelKey(key string) error {
 }
 
 func RedisHSetObj(key string, obj interface{}, expiration time.Duration) error {
-	if DebugEnabled {
-		SysLog(fmt.Sprintf("Redis HSET: key=%s, obj=%+v, expiration=%v", key, obj, expiration))
-	}
 	ctx := context.Background()
 
 	data := make(map[string]interface{})
 
 	// 使用反射遍历结构体字段
-	v := reflect.ValueOf(obj).Elem()
+	valueOfObj := reflect.ValueOf(obj)
+	if valueOfObj.Kind() != reflect.Ptr || valueOfObj.IsNil() || valueOfObj.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("obj must be a non-nil pointer to a struct, got %T", obj)
+	}
+	v := valueOfObj.Elem()
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		field := t.Field(i)
@@ -143,6 +149,9 @@ func RedisHSetObj(key string, obj interface{}, expiration time.Duration) error {
 
 		// 其他类型直接转换为字符串
 		data[field.Name] = fmt.Sprintf("%v", value.Interface())
+	}
+	if DebugEnabled {
+		SysLog(fmt.Sprintf("Redis HSET: key=%s, fields=%d, expiration=%v", key, len(data), expiration))
 	}
 
 	txn := RDB.TxPipeline()
@@ -245,33 +254,10 @@ func RedisIncr(key string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis INCR: key=%s, delta=%d", key, delta))
 	}
-	// 检查键的剩余生存时间
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
-	}
-
-	// 只有在 key 存在且有 TTL 时才需要特殊处理
-	if ttl > 0 {
-		ctx := context.Background()
-		// 开始一个Redis事务
-		txn := RDB.TxPipeline()
-
-		// 减少余额
-		decrCmd := txn.IncrBy(ctx, key, delta)
-		if err := decrCmd.Err(); err != nil {
-			return err // 如果减少失败，则直接返回错误
-		}
-
-		// 重新设置过期时间，使用原来的过期时间
-		txn.Expire(ctx, key, ttl)
-
-		// 执行事务
-		_, err = txn.Exec(ctx)
-		return err
-	}
-	return nil
+	// INCRBY preserves an existing key's TTL. It also creates a missing key,
+	// which is the expected Redis counter behavior; the previous TTL probe
+	// silently reported success without changing missing or persistent keys.
+	return RDB.IncrBy(context.Background(), key, delta).Err()
 }
 
 func RedisHIncrBy(key, field string, delta int64) error {
@@ -300,27 +286,23 @@ return 1`
 
 func RedisHSetField(key, field string, value interface{}) error {
 	if DebugEnabled {
-		SysLog(fmt.Sprintf("Redis HSET field: key=%s, field=%s, value=%v", key, field, value))
+		SysLog(fmt.Sprintf("Redis HSET field: key=%s, field=%s", key, field))
 	}
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
+	// Do not create a one-field partial cache object on a miss. HSET preserves
+	// an existing key's TTL, including persistent keys, so the existence check
+	// and mutation only need to be atomic.
+	const script = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return 1`
+	updated, err := RDB.Eval(context.Background(), script, []string{key}, field, value).Int64()
+	if err != nil {
+		return fmt.Errorf("failed to update Redis hash field: %w", err)
 	}
-
-	if ttl > 0 {
-		ctx := context.Background()
-		txn := RDB.TxPipeline()
-
-		hsetCmd := txn.HSet(ctx, key, field, value)
-		if err := hsetCmd.Err(); err != nil {
-			return err
-		}
-
-		txn.Expire(ctx, key, ttl)
-
-		_, err = txn.Exec(ctx)
-		return err
+	if updated == 0 {
+		return fmt.Errorf("%w: %s", ErrRedisKeyNotFound, key)
 	}
 	return nil
 }

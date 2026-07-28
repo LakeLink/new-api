@@ -46,8 +46,10 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 	}
 	// Plan targets its own Pancake product, so we only require credentials
 	// here — not the gateway-level WaffoPancakeProductID.
-	if strings.TrimSpace(setting.WaffoPancakeMerchantID) == "" ||
-		strings.TrimSpace(setting.WaffoPancakePrivateKey) == "" {
+	waffoSetting := setting.GetWaffoSettings()
+	if strings.TrimSpace(waffoSetting.PancakeMerchantID) == "" ||
+		strings.TrimSpace(waffoSetting.PancakePrivateKey) == "" ||
+		strings.TrimSpace(waffoSetting.PancakeStoreID) == "" {
 		common.ApiErrorMsg(c, "Waffo Pancake 未配置或密钥无效")
 		return
 	}
@@ -88,6 +90,10 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 		PaymentProvider: model.PaymentProviderWaffoPancake,
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
+	}
+	if err := order.SetPlanSnapshot(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
 	}
 	if err := order.Insert(); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 订阅订单创建失败 user_id=%d plan_id=%d trade_no=%s error=%q", userId, plan.Id, tradeNo, err.Error()))

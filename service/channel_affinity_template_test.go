@@ -11,6 +11,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +33,21 @@ func TestApplyChannelAffinityOverrideTemplate_NoTemplate(t *testing.T) {
 	merged, applied := ApplyChannelAffinityOverrideTemplate(ctx, base)
 	require.False(t, applied)
 	require.Equal(t, base, merged)
+}
+
+func TestChannelAffinityRegexCacheRepairsInvalidEntry(t *testing.T) {
+	const pattern = "^gpt-"
+	channelAffinityRegexCache.Store(pattern, "invalid")
+	t.Cleanup(func() {
+		channelAffinityRegexCache.Delete(pattern)
+	})
+
+	require.NotPanics(t, func() {
+		assert.True(t, matchAnyRegexCached([]string{pattern}, "gpt-5"))
+	})
+	cached, ok := channelAffinityRegexCache.Load(pattern)
+	require.True(t, ok)
+	assert.NotEqual(t, "invalid", cached)
 }
 
 func TestApplyChannelAffinityOverrideTemplate_MergeTemplate(t *testing.T) {
@@ -234,6 +250,21 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
 	require.Equal(t, "request_header", meta.KeySourceType)
 	require.Equal(t, "X-Affinity-Key", meta.KeySourceKey)
 	require.Equal(t, buildChannelAffinityKeyHint(affinityValue), meta.KeyHint)
+}
+
+func TestChannelAffinityCacheIdentifiersDoNotExposeSourceValue(t *testing.T) {
+	affinityValue := "secret-tenant-token"
+	rule := operation_setting.ChannelAffinityRule{
+		Name:              "header-affinity",
+		IncludeRuleName:   true,
+		IncludeModelName:  true,
+		IncludeUsingGroup: true,
+	}
+
+	suffix := buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", affinityValue)
+	assert.NotContains(t, suffix, affinityValue)
+	assert.NotContains(t, affinityFingerprint(affinityValue), affinityValue)
+	assert.Len(t, affinityFingerprint(affinityValue), 16)
 }
 
 func TestClearCurrentChannelAffinityCache(t *testing.T) {

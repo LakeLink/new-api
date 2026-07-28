@@ -54,13 +54,15 @@ func GetTwoFAByUserId(userId int) (*TwoFA, error) {
 	return &twoFA, nil
 }
 
-// IsTwoFAEnabled 检查用户是否启用了2FA
-func IsTwoFAEnabled(userId int) bool {
+// IsTwoFAEnabled checks whether the user has enabled 2FA. Database errors are
+// returned to the caller so authentication can fail closed instead of silently
+// treating an unavailable 2FA record as an account without a second factor.
+func IsTwoFAEnabled(userId int) (bool, error) {
 	twoFA, err := GetTwoFAByUserId(userId)
-	if err != nil || twoFA == nil {
-		return false
+	if err != nil {
+		return false, err
 	}
-	return twoFA.IsEnabled
+	return twoFA != nil && twoFA.IsEnabled, nil
 }
 
 // CreateTwoFA 创建2FA设置

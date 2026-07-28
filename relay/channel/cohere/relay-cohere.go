@@ -19,18 +19,20 @@ import (
 )
 
 func requestOpenAI2Cohere(textRequest dto.GeneralOpenAIRequest) *CohereRequest {
+	maxTokens := textRequest.GetMaxTokensPointer()
+	if maxTokens == nil {
+		defaultMaxTokens := uint(4000)
+		maxTokens = &defaultMaxTokens
+	}
 	cohereReq := CohereRequest{
 		Model:       textRequest.Model,
 		ChatHistory: []ChatHistory{},
 		Message:     "",
 		Stream:      lo.FromPtrOr(textRequest.Stream, false),
-		MaxTokens:   textRequest.GetMaxTokens(),
+		MaxTokens:   maxTokens,
 	}
 	if common.CohereSafetySetting != "NONE" {
 		cohereReq.SafetyMode = common.CohereSafetySetting
-	}
-	if cohereReq.MaxTokens == 0 {
-		cohereReq.MaxTokens = 4000
 	}
 	for _, msg := range textRequest.Messages {
 		if msg.Role == "user" {
@@ -59,16 +61,23 @@ func requestConvertRerank2Cohere(rerankRequest dto.RerankRequest) (*CohereRerank
 	if !ok {
 		return nil, errors.New("cohere rerank query must be a non-empty string")
 	}
-	topN := lo.FromPtrOr(rerankRequest.TopN, 1)
-	if topN <= 0 {
-		topN = 1
+	if rerankRequest.TopN != nil && *rerankRequest.TopN <= 0 {
+		return nil, errors.New("cohere rerank top_n must be at least 1")
+	}
+	if rerankRequest.MaxChunksPerDoc != nil && rerankRequest.MaxChunkPerDoc != nil &&
+		*rerankRequest.MaxChunksPerDoc != *rerankRequest.MaxChunkPerDoc {
+		return nil, errors.New("cohere rerank max_chunks_per_doc conflicts with legacy max_chunk_per_doc")
+	}
+	if _, err := relaycommon.EstimateCohereRerankSearchUnits(&rerankRequest); err != nil {
+		return nil, err
 	}
 	cohereReq := CohereRerankRequest{
 		Query:           query,
 		Documents:       rerankRequest.Documents,
 		Model:           rerankRequest.Model,
-		TopN:            topN,
-		ReturnDocuments: true,
+		TopN:            rerankRequest.TopN,
+		ReturnDocuments: rerankRequest.ReturnDocuments,
+		MaxChunksPerDoc: rerankRequest.GetMaxChunksPerDoc(),
 	}
 	return &cohereReq, nil
 }
@@ -85,6 +94,8 @@ func stopReasonCohere2OpenAI(reason string) string {
 }
 
 func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	responseId := helper.GetResponseID(c)
 	createdTime := common.GetTimestamp()
 	usage := &dto.Usage{}
@@ -102,75 +113,65 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		return 0, nil, nil
 	})
-	dataChan := make(chan string)
-	stopChan := make(chan bool)
-	go func() {
-		for scanner.Scan() {
-			data := scanner.Text()
-			dataChan <- data
-		}
-		if err := scanner.Err(); err != nil {
-			common.SysLog("error reading stream: " + err.Error())
-		}
-		stopChan <- true
-	}()
 	helper.SetEventStreamHeaders(c)
 	isFirst := true
 	c.Stream(func(w io.Writer) bool {
-		select {
-		case data := <-dataChan:
-			if isFirst {
-				isFirst = false
-				info.FirstResponseTime = time.Now()
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				common.SysLog("error reading stream: " + err.Error())
 			}
-			data = strings.TrimSuffix(data, "\r")
-			var cohereResp CohereResponse
-			err := common.Unmarshal([]byte(data), &cohereResp)
-			if err != nil {
-				common.SysLog("error unmarshalling stream response: " + err.Error())
-				return true
-			}
-			var openaiResp dto.ChatCompletionsStreamResponse
-			openaiResp.Id = responseId
-			openaiResp.Created = createdTime
-			openaiResp.Object = "chat.completion.chunk"
-			openaiResp.Model = info.UpstreamModelName
-			if cohereResp.IsFinished {
-				finishReason := stopReasonCohere2OpenAI(cohereResp.FinishReason)
-				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
-					{
-						Delta:        dto.ChatCompletionsStreamResponseChoiceDelta{},
-						Index:        0,
-						FinishReason: &finishReason,
-					},
-				}
-				if cohereResp.Response != nil {
-					usage.PromptTokens = cohereResp.Response.Meta.BilledUnits.InputTokens
-					usage.CompletionTokens = cohereResp.Response.Meta.BilledUnits.OutputTokens
-				}
-			} else {
-				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
-					{
-						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
-							Role:    "assistant",
-							Content: &cohereResp.Text,
-						},
-						Index: 0,
-					},
-				}
-				responseText += cohereResp.Text
-			}
-			jsonStr, err := common.Marshal(openaiResp)
-			if err != nil {
-				common.SysLog("error marshalling stream response: " + err.Error())
-				return true
-			}
-			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
-			return true
-		case <-stopChan:
 			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
 			return false
 		}
+
+		if isFirst {
+			isFirst = false
+			info.FirstResponseTime = time.Now()
+		}
+		data := strings.TrimSuffix(scanner.Text(), "\r")
+		var cohereResp CohereResponse
+		err := common.Unmarshal([]byte(data), &cohereResp)
+		if err != nil {
+			common.SysLog("error unmarshalling stream response: " + err.Error())
+			return true
+		}
+		var openaiResp dto.ChatCompletionsStreamResponse
+		openaiResp.Id = responseId
+		openaiResp.Created = createdTime
+		openaiResp.Object = "chat.completion.chunk"
+		openaiResp.Model = info.UpstreamModelName
+		if cohereResp.IsFinished {
+			finishReason := stopReasonCohere2OpenAI(cohereResp.FinishReason)
+			openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
+				{
+					Delta:        dto.ChatCompletionsStreamResponseChoiceDelta{},
+					Index:        0,
+					FinishReason: &finishReason,
+				},
+			}
+			if cohereResp.Response != nil {
+				usage.PromptTokens = cohereResp.Response.Meta.BilledUnits.InputTokens
+				usage.CompletionTokens = cohereResp.Response.Meta.BilledUnits.OutputTokens
+			}
+		} else {
+			openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
+				{
+					Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+						Role:    "assistant",
+						Content: &cohereResp.Text,
+					},
+					Index: 0,
+				},
+			}
+			responseText += cohereResp.Text
+		}
+		jsonStr, err := common.Marshal(openaiResp)
+		if err != nil {
+			common.SysLog("error marshalling stream response: " + err.Error())
+			return true
+		}
+		c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
+		return true
 	})
 	if usage.PromptTokens == 0 {
 		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
@@ -179,12 +180,13 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 }
 
 func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+
 	createdTime := common.GetTimestamp()
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereResponseResult
 	err = common.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
@@ -221,16 +223,29 @@ func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 }
 
 func cohereRerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereRerankResponseResult
 	err = common.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	searchUnits := cohereResp.Meta.BilledUnits.SearchUnits
+	if searchUnits == nil {
+		return nil, types.NewError(errors.New("cohere rerank response is missing billed_units.search_units"), types.ErrorCodeBadResponseBody)
+	}
+	if err := relaycommon.ValidateCohereRerankSearchUnits(*searchUnits); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	if !info.PriceData.UsePrice {
+		return nil, types.NewError(errors.New("cohere rerank requires a fixed price per search unit"), types.ErrorCodeModelPriceError)
+	}
+	info.CohereSearchUnits = searchUnits
+	info.PriceData.AddOtherRatio(relaycommon.CohereRerankSearchUnitsRatioKey, *searchUnits)
 	usage := dto.Usage{}
 	if cohereResp.Meta.BilledUnits.InputTokens == 0 {
 		usage.PromptTokens = info.GetEstimatePromptTokens()

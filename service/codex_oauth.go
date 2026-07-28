@@ -57,12 +57,12 @@ func refreshCodexOAuthToken(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, SanitizeNetworkError(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := DoUpstreamRequest(client, req)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,11 @@ func refreshCodexOAuthToken(
 		ExpiresIn    int    `json:"expires_in"`
 	}
 
-	if err := common.DecodeJson(resp.Body, &payload); err != nil {
+	body, err := ReadResponseBodyWithLimit(resp.Body, 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	if err := common.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -84,11 +88,15 @@ func refreshCodexOAuthToken(
 	if strings.TrimSpace(payload.AccessToken) == "" || strings.TrimSpace(payload.RefreshToken) == "" || payload.ExpiresIn <= 0 {
 		return nil, errors.New("codex oauth refresh response missing fields")
 	}
+	expiresIn, ok := common.SafeOptionalDuration(payload.ExpiresIn, time.Second, "Codex OAuth access token expiry")
+	if !ok {
+		return nil, errors.New("codex oauth refresh response has invalid expires_in")
+	}
 
 	return &CodexOAuthTokenResult{
 		AccessToken:  strings.TrimSpace(payload.AccessToken),
 		RefreshToken: strings.TrimSpace(payload.RefreshToken),
-		ExpiresAt:    time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second),
+		ExpiresAt:    time.Now().Add(expiresIn),
 	}, nil
 }
 
@@ -98,11 +106,14 @@ func getCodexOAuthHTTPClient(proxyURL string) (*http.Client, error) {
 		return nil, err
 	}
 	if baseClient == nil {
-		return &http.Client{Timeout: defaultHTTPTimeout}, nil
+		return GetHttpClientWithTimeout(defaultHTTPTimeout), nil
 	}
-	clientCopy := *baseClient
-	clientCopy.Timeout = defaultHTTPTimeout
-	return &clientCopy, nil
+	return &http.Client{
+		Transport:     baseClient.Transport,
+		CheckRedirect: baseClient.CheckRedirect,
+		Jar:           baseClient.Jar,
+		Timeout:       defaultHTTPTimeout,
+	}, nil
 }
 
 func ExtractCodexAccountIDFromJWT(token string) (string, bool) {

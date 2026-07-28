@@ -44,11 +44,12 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "该套餐未配置 StripePriceId")
 		return
 	}
-	if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
+	stripeSetting := setting.GetStripeSettings()
+	if !strings.HasPrefix(stripeSetting.APISecret, "sk_") && !strings.HasPrefix(stripeSetting.APISecret, "rk_") {
 		common.ApiErrorMsg(c, "Stripe 未配置或密钥无效")
 		return
 	}
-	if setting.StripeWebhookSecret == "" {
+	if stripeSetting.WebhookSecret == "" {
 		common.ApiErrorMsg(c, "Stripe Webhook 未配置")
 		return
 	}
@@ -89,6 +90,10 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
 	}
+	if err := order.SetPlanSnapshot(plan); err != nil {
+		common.ApiErrorMsg(c, "套餐配置无效")
+		return
+	}
 	if err := order.Insert(); err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
@@ -112,7 +117,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 }
 
 func genStripeSubscriptionLink(referenceId string, customerId string, email string, priceId string) (string, error) {
-	stripe.Key = setting.StripeApiSecret
+	stripeSetting := setting.GetStripeSettings()
 
 	params := &stripe.CheckoutSessionParams{
 		ClientReferenceID: stripe.String(referenceId),
@@ -139,7 +144,11 @@ func genStripeSubscriptionLink(referenceId string, customerId string, email stri
 		params.Customer = stripe.String(customerId)
 	}
 
-	result, err := session.New(params)
+	stripeClient := session.Client{
+		B:   stripe.GetBackend(stripe.APIBackend),
+		Key: stripeSetting.APISecret,
+	}
+	result, err := stripeClient.New(params)
 	if err != nil {
 		return "", err
 	}

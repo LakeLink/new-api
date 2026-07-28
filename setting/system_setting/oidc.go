@@ -21,5 +21,5 @@ func init() {
 }
 
 func GetOIDCSettings() *OIDCSettings {
-	return &defaultOIDCSettings
+	return config.Snapshot[OIDCSettings]("oidc")
 }

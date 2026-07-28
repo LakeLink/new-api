@@ -1,6 +1,7 @@
 package oairesponses
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -10,11 +11,6 @@ import (
 const (
 	geminiResponsesInputTypeCustomToolCall       = "custom_tool_call"
 	geminiResponsesInputTypeCustomToolCallOutput = "custom_tool_call_output"
-	geminiResponsesInputTypeFunctionCallOutput   = "function_call_output"
-)
-
-const (
-	ResponsesInputTypeCustomToolCallOutput = geminiResponsesInputTypeCustomToolCallOutput
 )
 
 func PrepareOpenAIResponsesRequest(request dto.OpenAIResponsesRequest) (dto.OpenAIResponsesRequest, error) {
@@ -36,6 +32,9 @@ func PrepareOpenAIResponsesRequest(request dto.OpenAIResponsesRequest) (dto.Open
 func filterGeminiResponsesTools(raw []byte) ([]byte, error) {
 	if !geminiRawJSONPresent(raw) || common.GetJsonType(raw) != "array" {
 		return raw, nil
+	}
+	if err := ValidateToolsForConversion(raw, "Gemini generateContent"); err != nil {
+		return nil, err
 	}
 
 	var tools []map[string]any
@@ -66,31 +65,14 @@ func filterGeminiResponsesInput(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	skippedCustomCallIDs := make(map[string]struct{})
-	for _, item := range items {
-		if strings.TrimSpace(common.Interface2String(item["type"])) != geminiResponsesInputTypeCustomToolCall {
-			continue
-		}
-		if callID := strings.TrimSpace(common.Interface2String(item["call_id"])); callID != "" {
-			skippedCustomCallIDs[callID] = struct{}{}
-		}
-	}
-
-	filtered := make([]map[string]any, 0, len(items))
-	for _, item := range items {
+	for index, item := range items {
 		itemType := strings.TrimSpace(common.Interface2String(item["type"]))
 		switch itemType {
 		case geminiResponsesInputTypeCustomToolCall, geminiResponsesInputTypeCustomToolCallOutput:
-			continue
-		case geminiResponsesInputTypeFunctionCallOutput:
-			if _, ok := skippedCustomCallIDs[strings.TrimSpace(common.Interface2String(item["call_id"]))]; ok {
-				continue
-			}
+			return nil, fmt.Errorf("Responses input item type %q at input[%d] cannot be converted to Gemini without changing protocol semantics", itemType, index)
 		}
-		filtered = append(filtered, item)
 	}
-
-	return common.Marshal(filtered)
+	return raw, nil
 }
 
 func geminiRawJSONPresent(raw []byte) bool {

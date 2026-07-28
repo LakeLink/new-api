@@ -40,7 +40,10 @@ type ImageRequest struct {
 	Images            json.RawMessage `json:"images,omitempty"`
 	Mask              json.RawMessage `json:"mask,omitempty"`
 	InputFidelity     json.RawMessage `json:"input_fidelity,omitempty"`
-	Watermark         *bool           `json:"watermark,omitempty"`
+	// InputImageCount is derived from validated JSON references or multipart
+	// files. It is billing metadata and must never be forwarded upstream.
+	InputImageCount int   `json:"-"`
+	Watermark       *bool `json:"watermark,omitempty"`
 	// zhipu 4v
 	WatermarkEnabled json.RawMessage `json:"watermark_enabled,omitempty"`
 	UserId           json.RawMessage `json:"user_id,omitempty"`
@@ -165,15 +168,45 @@ func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	if i.N != nil && *i.N > 0 {
 		imageN = *i.N
 	}
+	maxTokens := 1584
+	imageInputTokens := 0
+	imageOutputTokens := 0
+	if imageTokens, ok := OpenAIImageOutputTokens(i.Model, i.Quality, i.Size); ok {
+		partialImages := 0
+		if len(i.PartialImages) > 0 && string(i.PartialImages) != "null" {
+			var parsed *uint
+			if common.Unmarshal(i.PartialImages, &parsed) == nil && parsed != nil &&
+				*parsed <= MaxOpenAIImagePartialImages {
+				partialImages = int(*parsed)
+			}
+		}
+		perImageTokens := imageTokens + partialImages*OpenAIImagePartialOutputTokens
+		if uint64(perImageTokens) <= uint64(^uint(0))/uint64(imageN) {
+			maxTokens = perImageTokens * int(imageN)
+			imageOutputTokens = maxTokens
+		}
+		if i.InputImageCount > 0 {
+			inputFidelity := ""
+			if len(i.InputFidelity) > 0 && string(i.InputFidelity) != "null" {
+				_ = common.Unmarshal(i.InputFidelity, &inputFidelity)
+			}
+			if perInputTokens, ok := OpenAIImageInputTokens(i.Model, inputFidelity); ok &&
+				perInputTokens <= int(^uint(0)>>1)/i.InputImageCount {
+				imageInputTokens = perInputTokens * i.InputImageCount
+			}
+		}
+	}
 
 	// Keep n separate from ImagePriceRatio so size/quality and count remain
 	// independent billing dimensions. Fixed-price pre-consume stores this on
 	// PriceData, and image settlement reuses or replaces the same "n" ratio.
 	return &types.TokenCountMeta{
-		CombineText:     i.Prompt,
-		MaxTokens:       1584,
-		ImagePriceRatio: sizeRatio * qualityRatio,
-		BillingRatios:   map[string]float64{"n": float64(imageN)},
+		CombineText:       i.Prompt,
+		MaxTokens:         maxTokens,
+		ImagePriceRatio:   sizeRatio * qualityRatio,
+		ImageInputTokens:  imageInputTokens,
+		ImageOutputTokens: imageOutputTokens,
+		BillingRatios:     map[string]float64{"n": float64(imageN)},
 	}
 }
 

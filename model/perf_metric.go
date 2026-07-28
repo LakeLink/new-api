@@ -1,7 +1,12 @@
 package model
 
 import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -9,43 +14,101 @@ import (
 
 // PerfMetric stores aggregated relay performance metrics for the model square.
 type PerfMetric struct {
-	Id             int    `json:"id" gorm:"primaryKey"`
-	ModelName      string `json:"model_name" gorm:"size:128;uniqueIndex:idx_perf_model_group_bucket,priority:1"`
-	Group          string `json:"group" gorm:"column:group;size:64;uniqueIndex:idx_perf_model_group_bucket,priority:2"`
-	BucketTs       int64  `json:"bucket_ts" gorm:"uniqueIndex:idx_perf_model_group_bucket,priority:3;index:idx_perf_bucket_ts"`
-	RequestCount   int64  `json:"-" gorm:"default:0"`
-	SuccessCount   int64  `json:"-" gorm:"default:0"`
-	TotalLatencyMs int64  `json:"-" gorm:"default:0"`
-	TtftSumMs      int64  `json:"-" gorm:"default:0"`
-	TtftCount      int64  `json:"-" gorm:"default:0"`
-	OutputTokens   int64  `json:"-" gorm:"default:0"`
-	GenerationMs   int64  `json:"-" gorm:"default:0"`
+	Id             int     `json:"id" gorm:"primaryKey"`
+	ModelName      string  `json:"model_name" gorm:"size:128;index:idx_perf_model_bucket,priority:1"`
+	Group          string  `json:"group" gorm:"column:group;size:64"`
+	BucketTs       int64   `json:"bucket_ts" gorm:"index:idx_perf_model_bucket,priority:2;index:idx_perf_bucket_ts"`
+	IdentityHash   *string `json:"-" gorm:"type:char(64);uniqueIndex:ux_perf_metric_identity_hash"`
+	RequestCount   int64   `json:"-" gorm:"default:0"`
+	SuccessCount   int64   `json:"-" gorm:"default:0"`
+	TotalLatencyMs int64   `json:"-" gorm:"default:0"`
+	TtftSumMs      int64   `json:"-" gorm:"default:0"`
+	TtftCount      int64   `json:"-" gorm:"default:0"`
+	OutputTokens   int64   `json:"-" gorm:"default:0"`
+	GenerationMs   int64   `json:"-" gorm:"default:0"`
 }
 
 func (PerfMetric) TableName() string {
 	return "perf_metrics"
 }
 
+func (metric *PerfMetric) BeforeCreate(_ *gorm.DB) error {
+	if metric.ModelName == "" || utf8.RuneCountInString(metric.ModelName) > 128 {
+		return errors.New("invalid performance metric model name")
+	}
+	if utf8.RuneCountInString(metric.Group) > 64 {
+		return errors.New("performance metric group is too long")
+	}
+	if err := validatePerfMetricCounters(metric); err != nil {
+		return err
+	}
+	identityHash := crossDatabaseIdentityHash(
+		metric.ModelName,
+		metric.Group,
+		strconv.FormatInt(metric.BucketTs, 10),
+	)
+	metric.IdentityHash = &identityHash
+	return nil
+}
+
 func UpsertPerfMetric(metric *PerfMetric) error {
-	if metric == nil || metric.RequestCount == 0 {
+	if metric == nil {
+		return nil
+	}
+	if err := validatePerfMetricCounters(metric); err != nil {
+		return err
+	}
+	if metric.RequestCount == 0 {
 		return nil
 	}
 	return DB.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
-			{Name: "model_name"},
-			{Name: "group"},
-			{Name: "bucket_ts"},
+			{Name: "identity_hash"},
 		},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"request_count":    gorm.Expr("perf_metrics.request_count + ?", metric.RequestCount),
-			"success_count":    gorm.Expr("perf_metrics.success_count + ?", metric.SuccessCount),
-			"total_latency_ms": gorm.Expr("perf_metrics.total_latency_ms + ?", metric.TotalLatencyMs),
-			"ttft_sum_ms":      gorm.Expr("perf_metrics.ttft_sum_ms + ?", metric.TtftSumMs),
-			"ttft_count":       gorm.Expr("perf_metrics.ttft_count + ?", metric.TtftCount),
-			"output_tokens":    gorm.Expr("perf_metrics.output_tokens + ?", metric.OutputTokens),
-			"generation_ms":    gorm.Expr("perf_metrics.generation_ms + ?", metric.GenerationMs),
+			"request_count":    saturatingPerfMetricUpdate("request_count", metric.RequestCount),
+			"success_count":    saturatingPerfMetricUpdate("success_count", metric.SuccessCount),
+			"total_latency_ms": saturatingPerfMetricUpdate("total_latency_ms", metric.TotalLatencyMs),
+			"ttft_sum_ms":      saturatingPerfMetricUpdate("ttft_sum_ms", metric.TtftSumMs),
+			"ttft_count":       saturatingPerfMetricUpdate("ttft_count", metric.TtftCount),
+			"output_tokens":    saturatingPerfMetricUpdate("output_tokens", metric.OutputTokens),
+			"generation_ms":    saturatingPerfMetricUpdate("generation_ms", metric.GenerationMs),
 		}),
 	}).Create(metric).Error
+}
+
+func validatePerfMetricCounters(metric *PerfMetric) error {
+	counters := map[string]int64{
+		"request_count":    metric.RequestCount,
+		"success_count":    metric.SuccessCount,
+		"total_latency_ms": metric.TotalLatencyMs,
+		"ttft_sum_ms":      metric.TtftSumMs,
+		"ttft_count":       metric.TtftCount,
+		"output_tokens":    metric.OutputTokens,
+		"generation_ms":    metric.GenerationMs,
+	}
+	for name, value := range counters {
+		if value < 0 {
+			return fmt.Errorf("performance metric %s cannot be negative", name)
+		}
+	}
+	if metric.SuccessCount > metric.RequestCount {
+		return errors.New("performance metric success count exceeds request count")
+	}
+	if metric.TtftCount > metric.RequestCount {
+		return errors.New("performance metric TTFT count exceeds request count")
+	}
+	return nil
+}
+
+func saturatingPerfMetricUpdate(column string, delta int64) clause.Expr {
+	qualifiedColumn := "perf_metrics." + column
+	return gorm.Expr(
+		"CASE WHEN "+qualifiedColumn+" > ? THEN ? ELSE "+qualifiedColumn+" + ? END",
+		math.MaxInt64-delta,
+		int64(math.MaxInt64),
+		delta,
+	)
 }
 
 func GetPerfMetrics(modelName string, group string, startTs int64, endTs int64) ([]PerfMetric, error) {
@@ -123,7 +186,7 @@ func DeletePerfMetricsBefore(cutoffTs int64) error {
 }
 
 func PerfMetricStartTime(hours int) int64 {
-	if hours <= 0 {
+	if hours <= 0 || int64(hours) > math.MaxInt64/int64(time.Hour) {
 		hours = 24
 	}
 	return time.Now().Add(-time.Duration(hours) * time.Hour).Unix()

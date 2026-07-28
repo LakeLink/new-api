@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 
@@ -259,7 +260,10 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			N:      lo.ToPtr(uint(1)),
 			Size:   "1024x1024",
 		}
-		if request.N != nil && *request.N > 0 {
+		if request.N != nil {
+			if *request.N < 1 || *request.N > relaycommon.MaxImagenImageCount {
+				return nil, fmt.Errorf("Imagen n must be an integer between 1 and %d", relaycommon.MaxImagenImageCount)
+			}
 			imgReq.N = lo.ToPtr(uint(*request.N))
 		}
 		if request.Size != "" {
@@ -267,26 +271,35 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		}
 		if len(request.ExtraBody) > 0 {
 			var extra map[string]any
-			if err := common.Unmarshal(request.ExtraBody, &extra); err == nil {
-				if n, ok := extra["n"].(float64); ok && n > 0 {
-					imgReq.N = lo.ToPtr(uint(n))
+			if err := common.Unmarshal(request.ExtraBody, &extra); err != nil {
+				return nil, fmt.Errorf("invalid Imagen extra_body: %w", err)
+			}
+			if rawN, exists := extra["n"]; exists {
+				n, ok := rawN.(float64)
+				if !ok || math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n || n < 1 || n > relaycommon.MaxImagenImageCount {
+					return nil, fmt.Errorf("Imagen n must be an integer between 1 and %d", relaycommon.MaxImagenImageCount)
 				}
-				if size, ok := extra["size"].(string); ok {
-					imgReq.Size = size
-				}
-				// accept aspectRatio in extra body (top-level or under parameters)
-				if ar, ok := extra["aspectRatio"].(string); ok && ar != "" {
+				imgReq.N = lo.ToPtr(uint(n))
+			}
+			if size, ok := extra["size"].(string); ok {
+				imgReq.Size = size
+			}
+			// accept aspectRatio in extra body (top-level or under parameters)
+			if ar, ok := extra["aspectRatio"].(string); ok && ar != "" {
+				imgReq.Size = ar
+			}
+			if params, ok := extra["parameters"].(map[string]any); ok {
+				if ar, ok := params["aspectRatio"].(string); ok && ar != "" {
 					imgReq.Size = ar
-				}
-				if params, ok := extra["parameters"].(map[string]any); ok {
-					if ar, ok := params["aspectRatio"].(string); ok && ar != "" {
-						imgReq.Size = ar
-					}
 				}
 			}
 		}
 		c.Set("request_model", request.Model)
-		return a.ConvertImageRequest(c, info, imgReq)
+		converted, err := a.ConvertImageRequest(c, info, imgReq)
+		if err != nil {
+			return nil, err
+		}
+		return converted, nil
 	}
 	if a.RequestMode == RequestModeClaude {
 		result, err := service.ConvertRequest(c, info, types.RelayFormatClaude, request)

@@ -43,7 +43,7 @@ func EnableChannel(channelId int, usingKey string, channelName string) {
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {
-	if !common.AutomaticDisableChannelEnabled {
+	if !common.GetLegacyOptionBool("AutomaticDisableChannelEnabled", &common.AutomaticDisableChannelEnabled) {
 		return false
 	}
 	if err == nil {
@@ -60,12 +60,12 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	}
 
 	lowerMessage := strings.ToLower(err.Error())
-	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords, true)
+	search, _ := AcSearch(lowerMessage, operation_setting.GetAutomaticDisableKeywords(), true)
 	return search
 }
 
 func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {
-	if !common.AutomaticEnableChannelEnabled {
+	if !common.GetLegacyOptionBool("AutomaticEnableChannelEnabled", &common.AutomaticEnableChannelEnabled) {
 		return false
 	}
 	if newAPIError != nil {

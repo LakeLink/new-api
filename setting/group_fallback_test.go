@@ -115,6 +115,15 @@ func TestUpdateGroupFallbackByJsonString_RejectsInvalidPayloadType(t *testing.T)
 	require.False(t, ok)
 }
 
+func TestUpdateGroupFallbackByJsonStringRejectsInvalidEnums(t *testing.T) {
+	require.Error(t, UpdateGroupFallbackByJsonString(
+		`{"vip":{"fallback":["default"],"pricing_mode":"invalid"}}`,
+	))
+	require.Error(t, UpdateGroupFallbackByJsonString(
+		`{"vip":{"fallback":["default"],"pricing_mode":"target","target_pricing_ratio_mode":"invalid"}}`,
+	))
+}
+
 func TestUpdateGroupFallbackByJsonString_ReplacesEntireMap(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, UpdateGroupFallbackByJsonString(`{}`))

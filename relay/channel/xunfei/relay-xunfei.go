@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -59,10 +60,11 @@ func requestOpenAI2Xunfei(request dto.GeneralOpenAIRequest, xunfeiAppId string, 
 	xunfeiRequest.Header.AppId = xunfeiAppId
 	xunfeiRequest.Parameter.Chat.Domain = domain
 	xunfeiRequest.Parameter.Chat.Temperature = request.Temperature
-	if request.TopK != nil {
-		xunfeiRequest.Parameter.Chat.TopK = *request.TopK
+	xunfeiRequest.Parameter.Chat.TopK = request.TopK
+	xunfeiRequest.Parameter.Chat.MaxTokens = request.MaxCompletionTokens
+	if xunfeiRequest.Parameter.Chat.MaxTokens == nil {
+		xunfeiRequest.Parameter.Chat.MaxTokens = request.MaxTokens
 	}
-	xunfeiRequest.Parameter.Chat.MaxTokens = request.GetMaxTokens()
 	xunfeiRequest.Payload.Message.Text = messages
 	return &xunfeiRequest
 }
@@ -114,16 +116,19 @@ func streamResponseXunfei2OpenAI(xunfeiResponse *XunfeiChatResponse) *dto.ChatCo
 	return &response
 }
 
-func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
+func buildXunfeiAuthURL(hostURL string, apiKey, apiSecret string) (string, error) {
 	HmacWithShaToBase64 := func(algorithm, data, key string) string {
 		mac := hmac.New(sha256.New, []byte(key))
 		mac.Write([]byte(data))
 		encodeData := mac.Sum(nil)
 		return base64.StdEncoding.EncodeToString(encodeData)
 	}
-	ul, err := url.Parse(hostUrl)
+	ul, err := url.Parse(hostURL)
 	if err != nil {
-		fmt.Println(err)
+		return "", fmt.Errorf("invalid Xunfei endpoint: %w", err)
+	}
+	if ul.Scheme != "wss" || ul.Host == "" || ul.User != nil || ul.RawQuery != "" || ul.Fragment != "" {
+		return "", errors.New("invalid Xunfei websocket endpoint")
 	}
 	date := time.Now().UTC().Format(time.RFC1123)
 	signString := []string{"host: " + ul.Host, "date: " + date, "GET " + ul.Path + " HTTP/1.1"}
@@ -136,12 +141,15 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 	v.Add("host", ul.Host)
 	v.Add("date", date)
 	v.Add("authorization", authorization)
-	callUrl := hostUrl + "?" + v.Encode()
-	return callUrl
+	callURL := hostURL + "?" + v.Encode()
+	return callURL, nil
 }
 
 func xunfeiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
-	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
+	domain, authUrl, err := getXunfeiAuthURL(c, apiKey, apiSecret, textRequest.Model)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest)
+	}
 	relayCtx := info.GetRelayContext(c.Request.Context())
 	resultChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
 	if err != nil {
@@ -211,7 +219,10 @@ func xunfeiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, textReques
 }
 
 func xunfeiHandler(c *gin.Context, info *relaycommon.RelayInfo, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
-	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
+	domain, authUrl, err := getXunfeiAuthURL(c, apiKey, apiSecret, textRequest.Model)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest)
+	}
 	relayCtx := info.GetRelayContext(c.Request.Context())
 	resultChan, err := xunfeiMakeRequest(relayCtx, textRequest, domain, authUrl, appId)
 	if err != nil {
@@ -281,7 +292,7 @@ func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		if conn != nil {
@@ -295,6 +306,7 @@ func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest
 		}
 		return nil, fmt.Errorf("xunfei websocket handshake returned status %d", resp.StatusCode)
 	}
+	helper.LimitUpstreamWebsocketMessages(conn)
 
 	data := requestOpenAI2Xunfei(textRequest, appId, domain)
 	requestBody, err := common.Marshal(data)
@@ -406,11 +418,14 @@ func apiVersion2domain(apiVersion string) string {
 	return "general" + apiVersion
 }
 
-func getXunfeiAuthUrl(c *gin.Context, apiKey string, apiSecret string, modelName string) (string, string) {
+func getXunfeiAuthURL(c *gin.Context, apiKey string, apiSecret string, modelName string) (string, string, error) {
 	apiVersion := getAPIVersion(c, modelName)
 	domain := apiVersion2domain(apiVersion)
-	authUrl := buildXunfeiAuthUrl(fmt.Sprintf("wss://spark-api.xf-yun.com/%s/chat", apiVersion), apiKey, apiSecret)
-	return domain, authUrl
+	authURL, err := buildXunfeiAuthURL(fmt.Sprintf("wss://spark-api.xf-yun.com/%s/chat", apiVersion), apiKey, apiSecret)
+	if err != nil {
+		return "", "", err
+	}
+	return domain, authURL, nil
 }
 
 func getAPIVersion(c *gin.Context, modelName string) string {

@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,8 +77,13 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
-	// Use the standard validation method for TaskSubmitReq
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionTextGenerate)
+	return geminitask.ValidateVeoTaskRequest(c, info, true, geminitask.MaxVeoSampleCount)
+}
+
+// ValidateFinalRequest rechecks model-specific capabilities after channel
+// model mapping, before the mapped model is priced or sent upstream.
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	return geminitask.ValidateVeoTaskRequest(c, info, true, geminitask.MaxVeoSampleCount)
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -88,7 +94,7 @@ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, erro
 	}
 	modelName := info.UpstreamModelName
 	if modelName == "" {
-		modelName = "veo-3.0-generate-001"
+		modelName = "veo-3.1-generate-001"
 	}
 
 	region := vertexcore.GetModelRegion(info.ApiVersion, modelName)
@@ -112,7 +118,7 @@ func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, info
 	if info != nil {
 		proxy = info.ChannelSetting.Proxy
 	}
-	token, err := vertexcore.AcquireAccessToken(*adc, proxy)
+	token, err := vertexcore.AcquireAccessToken(info.GetRelayContext(c.Request.Context()), *adc, proxy)
 	if err != nil {
 		return fmt.Errorf("failed to acquire access token: %w", err)
 	}
@@ -127,15 +133,24 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if !ok {
 		return nil
 	}
-	req := v.(relaycommon.TaskSubmitReq)
+	req, ok := v.(relaycommon.TaskSubmitReq)
+	if !ok {
+		return nil
+	}
 
 	seconds := geminitask.ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
 	resolution := geminitask.ResolveVeoResolution(req.Metadata, req.Size)
 	resRatio := geminitask.VeoResolutionRatio(info.UpstreamModelName, resolution)
+	generateAudio := true
+	if rawGenerateAudio, exists := req.Metadata["generateAudio"]; exists {
+		generateAudio, _ = rawGenerateAudio.(bool)
+	}
 
 	return map[string]float64{
 		"seconds":    float64(seconds),
 		"resolution": resRatio,
+		"audio":      vertexVeoAudioRatio(info.UpstreamModelName, resolution, generateAudio),
+		"outputs":    float64(geminitask.ParseVeoSampleCount(req.Metadata)),
 	}
 }
 
@@ -145,7 +160,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if !ok {
 		return nil, fmt.Errorf("request not found in context")
 	}
-	req := v.(relaycommon.TaskSubmitReq)
+	req, ok := v.(relaycommon.TaskSubmitReq)
+	if !ok {
+		return nil, fmt.Errorf("unexpected task_request type")
+	}
 
 	instance := geminitask.VeoInstance{Prompt: req.Prompt}
 	if img := geminitask.ExtractMultipartImage(c, info); img != nil {
@@ -161,17 +179,18 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, params); err != nil {
 		return nil, fmt.Errorf("unmarshal metadata failed: %w", err)
 	}
-	if params.DurationSeconds == 0 && req.Duration > 0 {
-		params.DurationSeconds = req.Duration
-	}
-	if params.Resolution == "" && req.Size != "" {
-		params.Resolution = geminitask.SizeToVeoResolution(req.Size)
+	// Keep the forwarded values identical to the validated billing inputs.
+	params.DurationSeconds = geminitask.ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
+	params.Resolution = geminitask.ResolveVeoResolution(req.Metadata, req.Size)
+	params.SampleCount = geminitask.ParseVeoSampleCount(req.Metadata)
+	if params.GenerateAudio == nil {
+		generateAudio := true
+		params.GenerateAudio = &generateAudio
 	}
 	if params.AspectRatio == "" && req.Size != "" {
 		params.AspectRatio = geminitask.SizeToVeoAspectRatio(req.Size)
 	}
 	params.Resolution = strings.ToLower(params.Resolution)
-	params.SampleCount = 1
 
 	body := geminitask.VeoRequestPayload{
 		Instances:  []geminitask.VeoInstance{instance},
@@ -192,11 +211,12 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
 		return "", nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
-	_ = resp.Body.Close()
 
 	var s submitResponse
 	if err := common.Unmarshal(responseBody, &s); err != nil {
@@ -217,10 +237,9 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 func (a *TaskAdaptor) GetModelList() []string {
 	return []string{
-		"veo-3.0-generate-001",
-		"veo-3.0-fast-generate-001",
-		"veo-3.1-generate-preview",
-		"veo-3.1-fast-generate-preview",
+		"veo-3.1-generate-001",
+		"veo-3.1-fast-generate-001",
+		"veo-3.1-lite-generate-001",
 	}
 }
 func (a *TaskAdaptor) GetChannelName() string { return "vertex" }
@@ -242,7 +261,7 @@ func buildFetchOperationURL(baseURL, upstreamName string) (string, error) {
 }
 
 // FetchTask fetch task status
-func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+func (a *TaskAdaptor) FetchTask(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -264,13 +283,13 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err := common.Unmarshal([]byte(key), adc); err != nil {
 		return nil, fmt.Errorf("failed to decode credentials: %w", err)
 	}
-	token, err := vertexcore.AcquireAccessToken(*adc, proxy)
+	token, err := vertexcore.AcquireAccessToken(ctx, *adc, proxy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire access token: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, service.SanitizeNetworkError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -280,7 +299,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	return service.DoUpstreamRequest(client, req)
 }
 
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
@@ -358,7 +377,7 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	}
 	modelName := extractModelFromOperationName(upstreamName)
 	if strings.TrimSpace(modelName) == "" {
-		modelName = "veo-3.0-generate-001"
+		modelName = "veo-3.1-generate-001"
 	}
 	v := dto.NewOpenAIVideo()
 	v.ID = task.TaskID

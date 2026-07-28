@@ -265,6 +265,9 @@ func NewError(err error, errorCode ErrorCode, ops ...NewAPIErrorOptions) *NewAPI
 }
 
 func NewOpenAIError(err error, errorCode ErrorCode, statusCode int, ops ...NewAPIErrorOptions) *NewAPIError {
+	if err == nil {
+		err = fmt.Errorf("%s", errorCode)
+	}
 	var newErr *NewAPIError
 	// 保留深层传递的 new err
 	if errors.As(err, &newErr) {
@@ -400,7 +403,11 @@ func ErrOptionWithStatusCode(statusCode int) NewAPIErrorOptions {
 func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		if common.DebugEnabled {
-			fmt.Printf("ErrOptionWithHideErrMsg: %s, origin error: %s", replaceStr, e.Err)
+			common.SysLog(fmt.Sprintf(
+				"upstream error hidden from client: replacement=%q origin_type=%T",
+				replaceStr,
+				e.Err,
+			))
 		}
 		e.Err = errors.New(replaceStr)
 	}

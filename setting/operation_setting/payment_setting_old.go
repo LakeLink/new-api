@@ -37,8 +37,12 @@ var PayMethods = []map[string]string{
 }
 
 func UpdatePayMethodsByJsonString(jsonString string) error {
-	PayMethods = make([]map[string]string, 0)
-	return common.Unmarshal([]byte(jsonString), &PayMethods)
+	var next []map[string]string
+	if err := common.Unmarshal([]byte(jsonString), &next); err != nil {
+		return err
+	}
+	PayMethods = next
+	return nil
 }
 
 func PayMethods2JsonString() string {
@@ -50,7 +54,7 @@ func PayMethods2JsonString() string {
 }
 
 func ContainsPayMethod(method string) bool {
-	for _, payMethod := range PayMethods {
+	for _, payMethod := range GetLegacyPaymentSetting().PayMethods {
 		if payMethod["type"] == method {
 			return true
 		}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/samber/lo"
@@ -30,6 +31,7 @@ import (
 
 const (
 	defaultTimeoutSeconds       = 10
+	maxTimeoutSeconds           = 300
 	defaultEndpoint             = "/api/pricing"
 	maxConcurrentFetches        = 8
 	maxRatioConfigBytes         = 10 << 20 // 10MB
@@ -149,19 +151,24 @@ func FetchUpstreamRatios(c *gin.Context) {
 
 	if req.Timeout <= 0 {
 		req.Timeout = defaultTimeoutSeconds
+	} else if req.Timeout > maxTimeoutSeconds {
+		req.Timeout = maxTimeoutSeconds
 	}
 
 	var upstreams []dto.UpstreamDTO
 
 	if len(req.Upstreams) > 0 {
 		for _, u := range req.Upstreams {
-			if strings.HasPrefix(u.BaseURL, "http") {
-				if u.Endpoint == "" {
-					u.Endpoint = defaultEndpoint
-				}
-				u.BaseURL = strings.TrimRight(u.BaseURL, "/")
-				upstreams = append(upstreams, u)
+			parsedBaseURL, err := url.Parse(strings.TrimSpace(u.BaseURL))
+			if err != nil || parsedBaseURL.Host == "" ||
+				(parsedBaseURL.Scheme != "http" && parsedBaseURL.Scheme != "https") {
+				continue
 			}
+			if u.Endpoint == "" {
+				u.Endpoint = defaultEndpoint
+			}
+			u.BaseURL = strings.TrimRight(parsedBaseURL.String(), "/")
+			upstreams = append(upstreams, u)
 		}
 	} else if len(req.ChannelIDs) > 0 {
 		intIds := make([]int, 0, len(req.ChannelIDs))
@@ -175,14 +182,17 @@ func FetchUpstreamRatios(c *gin.Context) {
 			return
 		}
 		for _, ch := range dbChannels {
-			if base := ch.GetBaseURL(); strings.HasPrefix(base, "http") {
-				upstreams = append(upstreams, dto.UpstreamDTO{
-					ID:       ch.Id,
-					Name:     ch.Name,
-					BaseURL:  strings.TrimRight(base, "/"),
-					Endpoint: "",
-				})
+			parsedBaseURL, parseErr := url.Parse(strings.TrimSpace(ch.GetBaseURL()))
+			if parseErr != nil || parsedBaseURL.Host == "" ||
+				(parsedBaseURL.Scheme != "http" && parsedBaseURL.Scheme != "https") {
+				continue
 			}
+			upstreams = append(upstreams, dto.UpstreamDTO{
+				ID:       ch.Id,
+				Name:     ch.Name,
+				BaseURL:  strings.TrimRight(parsedBaseURL.String(), "/"),
+				Endpoint: "",
+			})
 		}
 	}
 
@@ -216,6 +226,10 @@ func FetchUpstreamRatios(c *gin.Context) {
 		return dialer.DialContext(ctx, network, addr)
 	}
 	client := &http.Client{Transport: transport}
+	if relayClient := service.GetHttpClient(); relayClient != nil {
+		client.CheckRedirect = relayClient.CheckRedirect
+		client.Timeout = relayClient.Timeout
+	}
 
 	for _, chn := range upstreams {
 		wg.Add(1)
@@ -242,6 +256,12 @@ func FetchUpstreamRatios(c *gin.Context) {
 				fullURL = chItem.BaseURL + endpoint
 			}
 			isModelsDev := isModelsDevAPIEndpoint(fullURL)
+			parsedFullURL, parseErr := url.Parse(fullURL)
+			if parseErr != nil || parsedFullURL.Host == "" ||
+				(parsedFullURL.Scheme != "http" && parsedFullURL.Scheme != "https") {
+				ch <- upstreamResult{Name: chItem.Name, Err: "invalid upstream URL"}
+				return
+			}
 
 			uniqueName := chItem.Name
 			if chItem.ID != 0 {
@@ -253,8 +273,9 @@ func FetchUpstreamRatios(c *gin.Context) {
 
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 			if err != nil {
-				logger.LogWarn(c.Request.Context(), "build request failed: "+err.Error())
-				ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+				safeErr := service.SanitizeNetworkError(err)
+				logger.LogWarn(c.Request.Context(), "build request failed: "+safeErr.Error())
+				ch <- upstreamResult{Name: uniqueName, Err: safeErr.Error()}
 				return
 			}
 
@@ -284,7 +305,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 			var resp *http.Response
 			var lastErr error
 			for attempt := 0; attempt < 3; attempt++ {
-				resp, lastErr = client.Do(httpReq)
+				resp, lastErr = service.DoUpstreamRequest(client, httpReq)
 				if lastErr == nil {
 					break
 				}
@@ -306,8 +327,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 			if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
 				logger.LogWarn(c.Request.Context(), "unexpected content-type from "+chItem.Name+": "+ct)
 			}
-			limited := io.LimitReader(resp.Body, maxRatioConfigBytes)
-			bodyBytes, err := io.ReadAll(limited)
+			bodyBytes, err := service.ReadResponseBodyWithLimit(resp.Body, maxRatioConfigBytes)
 			if err != nil {
 				logger.LogWarn(c.Request.Context(), "read response failed from "+chItem.Name+": "+err.Error())
 				ch <- upstreamResult{Name: uniqueName, Err: err.Error()}

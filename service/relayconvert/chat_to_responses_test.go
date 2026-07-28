@@ -98,7 +98,7 @@ func TestChatCompletionsRequestToResponsesRequestPreservesOptions(t *testing.T) 
 		Model:                "gpt-test",
 		Messages:             []dto.Message{{Role: "user", Content: "hello"}},
 		Stream:               &stream,
-		StreamOptions:        &dto.StreamOptions{IncludeUsage: true},
+		StreamOptions:        &dto.StreamOptions{IncludeUsage: common.GetPointer(true)},
 		TopLogProbs:          &topLogProbs,
 		ServiceTier:          []byte(`"flex"`),
 		PromptCacheKey:       "cache-key",
@@ -114,7 +114,7 @@ func TestChatCompletionsRequestToResponsesRequestPreservesOptions(t *testing.T) 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if got.StreamOptions == nil || !got.StreamOptions.IncludeUsage {
+	if got.StreamOptions == nil || got.StreamOptions.IncludeUsage == nil || !*got.StreamOptions.IncludeUsage {
 		t.Fatalf("expected stream_options.include_usage=true, got %#v", got.StreamOptions)
 	}
 	if got.TopLogProbs == nil || *got.TopLogProbs != topLogProbs {

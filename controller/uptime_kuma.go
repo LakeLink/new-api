@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/console_setting"
 
 	"github.com/gin-gonic/gin"
@@ -38,10 +39,10 @@ type UptimeGroupResult struct {
 func getAndDecode(ctx context.Context, client *http.Client, url string, dest interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return service.SanitizeNetworkError(err)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := service.DoUpstreamRequest(client, req)
 	if err != nil {
 		return err
 	}
@@ -51,7 +52,11 @@ func getAndDecode(ctx context.Context, client *http.Client, url string, dest int
 		return errors.New("non-200 status")
 	}
 
-	return common.DecodeJson(resp.Body, dest)
+	body, err := service.ReadResponseBodyWithLimit(resp.Body, 1<<20)
+	if err != nil {
+		return err
+	}
+	return common.Unmarshal(body, dest)
 }
 
 func fetchGroupData(ctx context.Context, client *http.Client, groupConfig map[string]interface{}) UptimeGroupResult {
@@ -68,7 +73,11 @@ func fetchGroupData(ctx context.Context, client *http.Client, groupConfig map[st
 		return result
 	}
 
-	baseURL := strings.TrimSuffix(url, "/")
+	parsedURL, err := common.ParseAbsoluteHTTPURL(url)
+	if err != nil {
+		return result
+	}
+	baseURL := strings.TrimSuffix(parsedURL.String(), "/")
 
 	var statusData struct {
 		PublicGroupList []struct {
@@ -138,7 +147,7 @@ func GetUptimeKumaStatus(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), requestTimeout)
 	defer cancel()
 
-	client := &http.Client{Timeout: httpTimeout}
+	client := service.GetHttpClientWithTimeout(httpTimeout)
 	results := make([]UptimeGroupResult, len(groups))
 
 	g, gCtx := errgroup.WithContext(ctx)

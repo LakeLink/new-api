@@ -1,6 +1,10 @@
 package setting
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+)
 
 var CheckSensitiveEnabled = true
 var CheckSensitiveOnPromptEnabled = true
@@ -35,7 +39,25 @@ func SensitiveWordsFromString(s string) {
 }
 
 func ShouldCheckPromptSensitive() bool {
-	return CheckSensitiveEnabled && CheckSensitiveOnPromptEnabled
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+	return optionBoolLocked("CheckSensitiveEnabled", CheckSensitiveEnabled) &&
+		optionBoolLocked("CheckSensitiveOnPromptEnabled", CheckSensitiveOnPromptEnabled)
+}
+
+func GetSensitiveWords() []string {
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+	if value, ok := common.OptionMap["SensitiveWords"]; ok {
+		words := make([]string, 0)
+		for _, word := range strings.Split(value, "\n") {
+			if word = strings.TrimSpace(word); word != "" {
+				words = append(words, word)
+			}
+		}
+		return words
+	}
+	return append([]string(nil), SensitiveWords...)
 }
 
 //func ShouldCheckCompletionSensitive() bool {

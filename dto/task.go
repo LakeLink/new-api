@@ -10,7 +10,12 @@ type TaskError struct {
 	Data       any    `json:"data"`
 	StatusCode int    `json:"-"`
 	LocalError bool   `json:"-"`
-	Error      error  `json:"-"`
+	// SkipRetry prevents another task submission after the upstream has
+	// already accepted the request. Retrying a response-parsing failure can
+	// create a duplicate billable task even when no usable task ID was
+	// returned to the gateway.
+	SkipRetry bool  `json:"-"`
+	Error     error `json:"-"`
 }
 
 type TaskData interface {

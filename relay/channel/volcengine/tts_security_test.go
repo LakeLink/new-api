@@ -48,7 +48,8 @@ func TestConvertAudioRequestKeepsValidatedVolcengineFieldsAuthoritative(t *testi
 	require.Equal(t, "ogg_opus", converted.Audio.Encoding)
 	require.Equal(t, 1.0, converted.Audio.SpeedRatio)
 	require.Equal(t, 16000, converted.Audio.Rate, "safe provider-specific metadata remains supported")
-	require.Equal(t, 128, converted.Audio.Bitrate)
+	require.NotNil(t, converted.Audio.Bitrate)
+	require.Equal(t, 128, *converted.Audio.Bitrate)
 	require.NotEqual(t, "attacker-request", converted.Request.ReqID)
 	require.Equal(t, "bill this complete text", converted.Request.Text)
 	require.Equal(t, "submit", converted.Request.Operation)
@@ -56,6 +57,57 @@ func TestConvertAudioRequestKeepsValidatedVolcengineFieldsAuthoritative(t *testi
 	require.Equal(t, "ssml", converted.Request.TextType)
 	require.Equal(t, "ogg_opus", c.GetString(contextKeyResponseFormat))
 	require.True(t, info.IsStream)
+}
+
+func TestConvertAudioRequestPreservesExplicitZeroVolcengineOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		RelayMode: relayconstant.RelayModeAudioSpeech,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ApiKey:         "app|token",
+			ChannelBaseUrl: "https://volcengine-proxy.example",
+		},
+	}
+
+	reader, err := (&Adaptor{}).ConvertAudioRequest(c, info, dto.AudioRequest{
+		Model: "seed-tts-1.1",
+		Input: "hello",
+		Voice: "alloy",
+		Metadata: []byte(`{
+			"audio":{"bitrate":0,"enable_emotion":false,"emotion_scale":0},
+			"request":{
+				"silence_duration":0,
+				"extra_param":{
+					"disable_markdown_filter":false,
+					"unsupported_char_ratio_thresh":0,
+					"cache_config":{"text_type":0,"use_cache":false}
+				}
+			}
+		}`),
+	})
+	require.NoError(t, err)
+
+	var converted VolcengineTTSRequest
+	require.NoError(t, common.DecodeJson(reader, &converted))
+	require.NotNil(t, converted.Audio.Bitrate)
+	require.Zero(t, *converted.Audio.Bitrate)
+	require.NotNil(t, converted.Audio.EnableEmotion)
+	require.False(t, *converted.Audio.EnableEmotion)
+	require.NotNil(t, converted.Audio.EmotionScale)
+	require.Zero(t, *converted.Audio.EmotionScale)
+	require.NotNil(t, converted.Request.SilenceDuration)
+	require.Zero(t, *converted.Request.SilenceDuration)
+	require.NotNil(t, converted.Request.ExtraParam)
+	require.NotNil(t, converted.Request.ExtraParam.DisableMarkdownFilter)
+	require.False(t, *converted.Request.ExtraParam.DisableMarkdownFilter)
+	require.NotNil(t, converted.Request.ExtraParam.UnsupportedCharRatioThresh)
+	require.Zero(t, *converted.Request.ExtraParam.UnsupportedCharRatioThresh)
+	require.NotNil(t, converted.Request.ExtraParam.CacheConfig)
+	require.NotNil(t, converted.Request.ExtraParam.CacheConfig.TextType)
+	require.Zero(t, *converted.Request.ExtraParam.CacheConfig.TextType)
+	require.NotNil(t, converted.Request.ExtraParam.CacheConfig.UseCache)
+	require.False(t, *converted.Request.ExtraParam.CacheConfig.UseCache)
 }
 
 func TestConvertAudioRequestValidatesVolcengineProtocolOptions(t *testing.T) {

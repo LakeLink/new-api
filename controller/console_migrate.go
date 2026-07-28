@@ -22,31 +22,52 @@ func MigrateConsoleSetting(c *gin.Context) {
 	}
 	// 建立 map
 	valMap := map[string]string{}
+	present := map[string]bool{}
 	for _, o := range opts {
 		valMap[o.Key] = o.Value
+		present[o.Key] = true
 	}
 
+	updates := make(map[string]string)
+	deleteKeys := make([]string, 0, 5)
+
 	// 处理 APIInfo
-	if v := valMap["ApiInfo"]; v != "" {
-		var arr []map[string]interface{}
-		if err := common.UnmarshalJsonStr(v, &arr); err == nil {
+	if v, ok := valMap["ApiInfo"]; ok {
+		deleteKeys = append(deleteKeys, "ApiInfo")
+		if v != "" {
+			var arr []map[string]interface{}
+			if err := common.UnmarshalJsonStr(v, &arr); err != nil {
+				common.ApiErrorMsg(c, "旧版 API 信息格式无效，请修正后重试")
+				return
+			}
 			if len(arr) > 50 {
 				arr = arr[:50]
 			}
-			bytes, _ := common.Marshal(arr)
-			model.UpdateOption("console_setting.api_info", string(bytes))
+			bytes, err := common.Marshal(arr)
+			if err != nil {
+				common.ApiError(c, err)
+				return
+			}
+			updates["console_setting.api_info"] = string(bytes)
 		}
-		model.UpdateOption("ApiInfo", "")
 	}
+
 	// Announcements 直接搬
-	if v := valMap["Announcements"]; v != "" {
-		model.UpdateOption("console_setting.announcements", v)
-		model.UpdateOption("Announcements", "")
+	if v, ok := valMap["Announcements"]; ok {
+		deleteKeys = append(deleteKeys, "Announcements")
+		if v != "" {
+			updates["console_setting.announcements"] = v
+		}
 	}
 	// FAQ 转换
-	if v := valMap["FAQ"]; v != "" {
-		var arr []map[string]interface{}
-		if err := common.UnmarshalJsonStr(v, &arr); err == nil {
+	if v, ok := valMap["FAQ"]; ok {
+		deleteKeys = append(deleteKeys, "FAQ")
+		if v != "" {
+			var arr []map[string]interface{}
+			if err := common.UnmarshalJsonStr(v, &arr); err != nil {
+				common.ApiErrorMsg(c, "旧版 FAQ 格式无效，请修正后重试")
+				return
+			}
 			out := []map[string]interface{}{}
 			for _, item := range arr {
 				q, _ := item["question"].(string)
@@ -64,14 +85,22 @@ func MigrateConsoleSetting(c *gin.Context) {
 			if len(out) > 50 {
 				out = out[:50]
 			}
-			bytes, _ := common.Marshal(out)
-			model.UpdateOption("console_setting.faq", string(bytes))
+			bytes, err := common.Marshal(out)
+			if err != nil {
+				common.ApiError(c, err)
+				return
+			}
+			updates["console_setting.faq"] = string(bytes)
 		}
-		model.UpdateOption("FAQ", "")
 	}
+
 	// Uptime Kuma 迁移到新的 groups 结构（console_setting.uptime_kuma_groups）
 	url := valMap["UptimeKumaUrl"]
 	slug := valMap["UptimeKumaSlug"]
+	if (url == "") != (slug == "") {
+		common.ApiErrorMsg(c, "旧版 Uptime Kuma 配置不完整，请同时设置 URL 和 Slug 后重试")
+		return
+	}
 	if url != "" && slug != "" {
 		// 仅当同时存在 URL 与 Slug 时才进行迁移
 		groups := []map[string]interface{}{
@@ -83,20 +112,30 @@ func MigrateConsoleSetting(c *gin.Context) {
 				"description":  "",
 			},
 		}
-		bytes, _ := common.Marshal(groups)
-		model.UpdateOption("console_setting.uptime_kuma_groups", string(bytes))
+		bytes, err := common.Marshal(groups)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		updates["console_setting.uptime_kuma_groups"] = string(bytes)
 	}
-	// 清空旧键内容
-	if url != "" {
-		model.UpdateOption("UptimeKumaUrl", "")
+	if present["UptimeKumaUrl"] {
+		deleteKeys = append(deleteKeys, "UptimeKumaUrl")
 	}
-	if slug != "" {
-		model.UpdateOption("UptimeKumaSlug", "")
+	if present["UptimeKumaSlug"] {
+		deleteKeys = append(deleteKeys, "UptimeKumaSlug")
 	}
 
-	// 删除旧键记录
-	oldKeys := []string{"ApiInfo", "Announcements", "FAQ", "UptimeKumaUrl", "UptimeKumaSlug"}
-	model.DB.Where("key IN ?", oldKeys).Delete(&model.Option{})
+	if err := model.UpdateOptionsBulk(updates); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(deleteKeys) > 0 {
+		if err := model.DB.Where("key IN ?", deleteKeys).Delete(&model.Option{}).Error; err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 
 	// 重新加载 OptionMap
 	model.InitOptionMap()

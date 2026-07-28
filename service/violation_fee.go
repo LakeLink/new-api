@@ -86,7 +86,7 @@ func calcViolationFeeQuota(amount, groupRatio float64) (int, *common.QuotaClamp)
 	if groupRatio <= 0 {
 		return 0, nil
 	}
-	quota, clamp := common.QuotaRoundChecked(amount * common.QuotaPerUnit * groupRatio)
+	quota, clamp := common.QuotaRoundChecked(amount * common.CurrentQuotaPerUnit() * groupRatio)
 	if clamp != nil {
 		return 0, clamp
 	}
@@ -125,17 +125,16 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		return false
 	}
 
-	_, applied, err := ApplyDurableQuotaAdjustment(relayInfo, "violation-fee:grok-csam", feeQuota, 0, true)
+	adjustmentRequestID, _, err := durableQuotaAdjustmentRequestID(relayInfo, "violation-fee:grok-csam")
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("failed to charge violation fee: %s", err.Error()))
+		logger.LogError(ctx, fmt.Sprintf("failed to build violation fee: %s", err.Error()))
 		return false
 	}
-	if !applied {
-		return true
+	fundingSource := durableQuotaAdjustmentFundingSource(relayInfo)
+	tokenDelta := feeQuota
+	if relayInfo.IsPlayground {
+		tokenDelta = 0
 	}
-
-	model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, feeQuota)
-	model.UpdateChannelUsedQuota(relayInfo.ChannelId, feeQuota)
 
 	useTimeSeconds := time.Now().Unix() - relayInfo.StartTime.Unix()
 	tokenName := ctx.GetString("token_name")
@@ -152,19 +151,68 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		"upstream_error_code":  fmt.Sprintf("%v", oai.Code),
 		"violation_fee_marker": CSAMViolationMarker,
 	}
-
-	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
-		ChannelId:      relayInfo.ChannelId,
-		ModelName:      relayInfo.OriginModelName,
-		TokenName:      tokenName,
-		Quota:          feeQuota,
-		Content:        "Violation fee charged",
-		TokenId:        relayInfo.TokenId,
-		UseTimeSeconds: int(useTimeSeconds),
-		IsStream:       relayInfo.IsStream,
-		Group:          relayInfo.UsingGroup,
-		Other:          other,
-	})
+	ip := ""
+	if userSetting, settingErr := model.GetUserSetting(relayInfo.UserId, false); settingErr == nil && userSetting.RecordIpLog {
+		ip = ctx.ClientIP()
+	}
+	channelCreatedTime := int64(0)
+	if relayInfo.ChannelMeta != nil {
+		channelCreatedTime = relayInfo.ChannelMeta.ChannelCreateTime
+	}
+	payload := model.TaskBillingFinalizationPayload{
+		Adjustment: model.BillingAdjustment{
+			RequestID:      adjustmentRequestID,
+			Kind:           model.BillingAdjustmentSettle,
+			FundingSource:  fundingSource,
+			UserID:         relayInfo.UserId,
+			SubscriptionID: relayInfo.SubscriptionId,
+			TokenID:        relayInfo.TokenId,
+			TokenKeyHash:   model.BillingTokenKeyHash(relayInfo.TokenKey),
+			FundingDelta:   feeQuota,
+			TokenDelta:     tokenDelta,
+		},
+		UserUsedQuotaDelta:        feeQuota,
+		IncrementUserRequestCount: true,
+		ChannelUsedQuotaDelta:     feeQuota,
+		ChannelCreatedTime:        channelCreatedTime,
+		Log: model.TaskBillingFinalizationLog{
+			UserID:            relayInfo.UserId,
+			LogType:           model.LogTypeConsume,
+			Content:           "Violation fee charged",
+			ChannelID:         relayInfo.ChannelId,
+			ModelName:         relayInfo.OriginModelName,
+			Quota:             feeQuota,
+			TokenID:           relayInfo.TokenId,
+			TokenName:         tokenName,
+			Group:             relayInfo.UsingGroup,
+			UseTime:           int(useTimeSeconds),
+			IsStream:          relayInfo.IsStream,
+			IP:                ip,
+			RequestID:         ctx.GetString(common.RequestIdKey),
+			UpstreamRequestID: ctx.GetString(common.UpstreamRequestIdKey),
+			Username:          ctx.GetString("username"),
+			Other:             other,
+			NodeName:          common.NodeName,
+			CreatedAt:         common.GetTimestamp(),
+		},
+	}
+	result, err := processTaskBillingFinalization(payload)
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("failed to charge violation fee: %s", err.Error()))
+		return false
+	}
+	if !result.AlreadyProcessed {
+		if fundingSource == model.BillingAdjustmentSubscription {
+			relayInfo.SubscriptionPostDelta += int64(result.SubscriptionDelta)
+			relayInfo.SubscriptionWalletOverflow += result.WalletDelta
+			checkAndSendSubscriptionQuotaNotify(relayInfo)
+			if result.WalletDelta > 0 {
+				checkAndSendQuotaNotify(relayInfo, result.WalletDelta, 0)
+			}
+		} else {
+			checkAndSendQuotaNotify(relayInfo, feeQuota, 0)
+		}
+	}
 
 	return true
 }

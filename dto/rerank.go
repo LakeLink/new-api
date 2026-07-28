@@ -13,8 +13,11 @@ type RerankRequest struct {
 	Model           string `json:"model"`
 	TopN            *int   `json:"top_n,omitempty"`
 	ReturnDocuments *bool  `json:"return_documents,omitempty"`
-	MaxChunkPerDoc  *int   `json:"max_chunk_per_doc,omitempty"`
-	OverLapTokens   *int   `json:"overlap_tokens,omitempty"`
+	MaxChunksPerDoc *int   `json:"max_chunks_per_doc,omitempty"`
+	// MaxChunkPerDoc keeps compatibility with the gateway's historical,
+	// singular spelling. Provider adaptors must emit max_chunks_per_doc.
+	MaxChunkPerDoc *int `json:"max_chunk_per_doc,omitempty"`
+	OverLapTokens  *int `json:"overlap_tokens,omitempty"`
 }
 
 func (r *RerankRequest) IsStream(c *gin.Context) bool {
@@ -63,6 +66,13 @@ func (r *RerankRequest) GetReturnDocuments() bool {
 		return false
 	}
 	return *r.ReturnDocuments
+}
+
+func (r *RerankRequest) GetMaxChunksPerDoc() *int {
+	if r.MaxChunksPerDoc != nil {
+		return r.MaxChunksPerDoc
+	}
+	return r.MaxChunkPerDoc
 }
 
 type RerankResponseResult struct {

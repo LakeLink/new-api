@@ -3,20 +3,25 @@ package operation_setting
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGetMonitorSetting_ChannelTestEnabledEnvOverridesEnabledConfig(t *testing.T) {
 	orig := monitorSetting
-	t.Cleanup(func() { monitorSetting = orig })
+	t.Cleanup(func() {
+		require.NoError(t, config.Mutate(&monitorSetting, func() { monitorSetting = orig }))
+	})
 
 	t.Setenv("CHANNEL_TEST_ENABLED", "false")
 	t.Setenv("CHANNEL_TEST_FREQUENCY", "5")
-	monitorSetting = MonitorSetting{
-		AutoTestChannelEnabled: true,
-		AutoTestChannelMinutes: 20,
-	}
+	require.NoError(t, config.Mutate(&monitorSetting, func() {
+		monitorSetting = MonitorSetting{
+			AutoTestChannelEnabled: true,
+			AutoTestChannelMinutes: 20,
+		}
+	}))
 
 	setting := GetMonitorSetting()
 
@@ -27,13 +32,17 @@ func TestGetMonitorSetting_ChannelTestEnabledEnvOverridesEnabledConfig(t *testin
 
 func TestGetMonitorSetting_ChannelTestEnabledEnvCanEnableDisabledConfig(t *testing.T) {
 	orig := monitorSetting
-	t.Cleanup(func() { monitorSetting = orig })
+	t.Cleanup(func() {
+		require.NoError(t, config.Mutate(&monitorSetting, func() { monitorSetting = orig }))
+	})
 
 	t.Setenv("CHANNEL_TEST_ENABLED", "true")
-	monitorSetting = MonitorSetting{
-		AutoTestChannelEnabled: false,
-		AutoTestChannelMinutes: 12,
-	}
+	require.NoError(t, config.Mutate(&monitorSetting, func() {
+		monitorSetting = MonitorSetting{
+			AutoTestChannelEnabled: false,
+			AutoTestChannelMinutes: 12,
+		}
+	}))
 
 	setting := GetMonitorSetting()
 

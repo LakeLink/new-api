@@ -180,3 +180,19 @@ func TestStreamStatus_Summary_NilSafe(t *testing.T) {
 	var s *StreamStatus
 	assert.Equal(t, "StreamStatus<nil>", s.Summary())
 }
+
+func TestStreamStatusSnapshotIsCallerOwned(t *testing.T) {
+	t.Parallel()
+	s := NewStreamStatus()
+	s.SetEndReason(StreamEndReasonScannerErr, fmt.Errorf("upstream disconnected"))
+	s.RecordError("malformed event")
+
+	snapshot := s.Snapshot()
+	assert.Equal(t, StreamEndReasonScannerErr, snapshot.EndReason)
+	assert.EqualError(t, snapshot.EndError, "upstream disconnected")
+	assert.Equal(t, 1, snapshot.ErrorCount)
+	assert.Len(t, snapshot.Errors, 1)
+
+	snapshot.Errors[0].Message = "mutated"
+	assert.Equal(t, "malformed event", s.Snapshot().Errors[0].Message)
+}

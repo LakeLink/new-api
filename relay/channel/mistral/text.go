@@ -75,8 +75,8 @@ func requestOpenAI2Mistral(request *dto.GeneralOpenAIRequest) *dto.GeneralOpenAI
 		Tools:       request.Tools,
 		ToolChoice:  request.ToolChoice,
 	}
-	if request.MaxTokens != nil || request.MaxCompletionTokens != nil {
-		maxTokens := request.GetMaxTokens()
+	if requestedMaxTokens := request.GetMaxTokensPointer(); requestedMaxTokens != nil {
+		maxTokens := *requestedMaxTokens
 		out.MaxTokens = &maxTokens
 	}
 	return out

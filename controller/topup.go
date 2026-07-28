@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -23,9 +22,21 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+func lookupPaymentAmountDiscount(discounts map[int]float64, amount int64) (float64, bool) {
+	if amount < 0 || uint64(amount) > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	discount, ok := discounts[int(amount)]
+	return discount, ok
+}
+
 func GetTopUpInfo(c *gin.Context) {
 	// 获取支付方式
-	payMethods := operation_setting.PayMethods
+	legacyPaymentSetting := operation_setting.GetLegacyPaymentSetting()
+	stripeSetting := setting.GetStripeSettings()
+	creemSetting := setting.GetCreemSettings()
+	waffoSetting := setting.GetWaffoSettings()
+	payMethods := legacyPaymentSetting.PayMethods
 
 	// 如果启用了 Stripe 支付，添加到支付方法列表
 	if isStripeTopUpEnabled() {
@@ -43,7 +54,7 @@ func GetTopUpInfo(c *gin.Context) {
 				"name":      "Stripe",
 				"type":      "stripe",
 				"color":     "rgba(var(--semi-purple-5), 1)",
-				"min_topup": strconv.Itoa(setting.StripeMinTopUp),
+				"min_topup": strconv.Itoa(stripeSetting.MinTopUp),
 			}
 			payMethods = append(payMethods, stripeMethod)
 		}
@@ -65,7 +76,7 @@ func GetTopUpInfo(c *gin.Context) {
 				"name":      "Waffo Pancake",
 				"type":      model.PaymentMethodWaffoPancake,
 				"color":     "rgba(var(--semi-orange-5), 1)",
-				"min_topup": strconv.Itoa(setting.WaffoPancakeMinTopUp),
+				"min_topup": strconv.Itoa(waffoSetting.PancakeMinTopUp),
 			})
 		}
 	}
@@ -86,7 +97,7 @@ func GetTopUpInfo(c *gin.Context) {
 				"name":      "Waffo (Global Payment)",
 				"type":      model.PaymentMethodWaffo,
 				"color":     "rgba(var(--semi-blue-5), 1)",
-				"min_topup": strconv.Itoa(setting.WaffoMinTopUp),
+				"min_topup": strconv.Itoa(waffoSetting.MinTopUp),
 			}
 			payMethods = append(payMethods, waffoMethod)
 		}
@@ -104,15 +115,15 @@ func GetTopUpInfo(c *gin.Context) {
 			}
 			return nil
 		}(),
-		"creem_products":          setting.CreemProducts,
+		"creem_products":          creemSetting.Products,
 		"pay_methods":             payMethods,
-		"min_topup":               operation_setting.MinTopUp,
-		"stripe_min_topup":        setting.StripeMinTopUp,
-		"waffo_min_topup":         setting.WaffoMinTopUp,
-		"waffo_pancake_min_topup": setting.WaffoPancakeMinTopUp,
+		"min_topup":               legacyPaymentSetting.MinTopUp,
+		"stripe_min_topup":        stripeSetting.MinTopUp,
+		"waffo_min_topup":         waffoSetting.MinTopUp,
+		"waffo_pancake_min_topup": waffoSetting.PancakeMinTopUp,
 		"amount_options":          operation_setting.GetPaymentSetting().AmountOptions,
 		"discount":                operation_setting.GetPaymentSetting().AmountDiscount,
-		"topup_link":              common.TopUpLink,
+		"topup_link":              common.GetLegacyOptionString("TopUpLink", &common.TopUpLink),
 	}
 	common.ApiSuccess(c, data)
 }
@@ -127,13 +138,14 @@ type AmountRequest struct {
 }
 
 func GetEpayClient() *epay.Client {
-	if operation_setting.PayAddress == "" || operation_setting.EpayId == "" || operation_setting.EpayKey == "" {
+	paymentSetting := operation_setting.GetLegacyPaymentSetting()
+	if paymentSetting.PayAddress == "" || paymentSetting.EpayID == "" || paymentSetting.EpayKey == "" {
 		return nil
 	}
 	withUrl, err := epay.NewClient(&epay.Config{
-		PartnerID: operation_setting.EpayId,
-		Key:       operation_setting.EpayKey,
-	}, operation_setting.PayAddress)
+		PartnerID: paymentSetting.EpayID,
+		Key:       paymentSetting.EpayKey,
+	}, paymentSetting.PayAddress)
 	if err != nil {
 		return nil
 	}
@@ -152,16 +164,18 @@ func buildEpayTopUpQuote(amount int64, group string) (*epayTopUpQuote, error) {
 	if err != nil {
 		return nil, err
 	}
-	if operation_setting.Price <= 0 || math.IsNaN(operation_setting.Price) || math.IsInf(operation_setting.Price, 0) {
+	paymentSetting := operation_setting.GetLegacyPaymentSetting()
+	if paymentSetting.Price <= 0 || math.IsNaN(paymentSetting.Price) || math.IsInf(paymentSetting.Price, 0) {
 		return nil, errors.New("易支付单价配置错误")
 	}
 
 	payUnits := decimal.NewFromInt(amount)
 	if amountIsTokens {
-		if common.QuotaPerUnit <= 0 || math.IsNaN(common.QuotaPerUnit) || math.IsInf(common.QuotaPerUnit, 0) {
+		quotaPerUnit := common.GetLegacyOptionFloat64("QuotaPerUnit", &common.QuotaPerUnit)
+		if quotaPerUnit <= 0 || math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) {
 			return nil, errors.New("额度单位配置错误")
 		}
-		payUnits = payUnits.Div(decimal.NewFromFloat(common.QuotaPerUnit))
+		payUnits = payUnits.Div(decimal.NewFromFloat(quotaPerUnit))
 	}
 	topupGroupRatio := common.GetTopupGroupRatio(group)
 	if topupGroupRatio == 0 {
@@ -171,14 +185,14 @@ func buildEpayTopUpQuote(amount int64, group string) (*epayTopUpQuote, error) {
 		return nil, errors.New("充值分组倍率配置错误")
 	}
 	discount := 1.0
-	if configured, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(amount)]; ok {
+	if configured, ok := lookupPaymentAmountDiscount(operation_setting.GetPaymentSetting().AmountDiscount, amount); ok {
 		if configured <= 0 || math.IsNaN(configured) || math.IsInf(configured, 0) {
 			return nil, errors.New("充值折扣配置错误")
 		}
 		discount = configured
 	}
 	payMoney := payUnits.
-		Mul(decimal.NewFromFloat(operation_setting.Price)).
+		Mul(decimal.NewFromFloat(paymentSetting.Price)).
 		Mul(decimal.NewFromFloat(topupGroupRatio)).
 		Mul(decimal.NewFromFloat(discount)).
 		Round(2)
@@ -192,17 +206,34 @@ func buildEpayTopUpQuote(amount int64, group string) (*epayTopUpQuote, error) {
 	}, nil
 }
 
+func tokenDisplayMinimum(minimum int64) int64 {
+	quotaPerUnit := common.CurrentQuotaPerUnit()
+	if minimum <= 0 ||
+		quotaPerUnit <= 0 ||
+		math.IsNaN(quotaPerUnit) ||
+		math.IsInf(quotaPerUnit, 0) ||
+		quotaPerUnit > float64(common.MaxQuota) {
+		return int64(common.MaxQuota)
+	}
+	value := decimal.NewFromInt(minimum).Mul(decimal.NewFromFloat(quotaPerUnit)).Ceil()
+	if !value.IsPositive() || value.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
+		return int64(common.MaxQuota)
+	}
+	return value.IntPart()
+}
+
 func getMinTopup() (int64, error) {
-	minTopup := operation_setting.MinTopUp
+	minTopup := operation_setting.GetLegacyPaymentSetting().MinTopUp
 	if minTopup <= 0 {
 		return 0, errors.New("最低充值数量配置错误")
 	}
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
-		if common.QuotaPerUnit <= 0 || math.IsNaN(common.QuotaPerUnit) || math.IsInf(common.QuotaPerUnit, 0) {
+		quotaPerUnit := common.GetLegacyOptionFloat64("QuotaPerUnit", &common.QuotaPerUnit)
+		if quotaPerUnit <= 0 || math.IsNaN(quotaPerUnit) || math.IsInf(quotaPerUnit, 0) {
 			return 0, errors.New("额度单位配置错误")
 		}
 		dMinTopup := decimal.NewFromInt(int64(minTopup))
-		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+		dQuotaPerUnit := decimal.NewFromFloat(quotaPerUnit)
 		minimum := dMinTopup.Mul(dQuotaPerUnit).Ceil()
 		if minimum.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
 			return 0, errors.New("最低充值数量超出允许范围")
@@ -251,8 +282,16 @@ func RequestEpay(c *gin.Context) {
 	}
 
 	callBackAddress := service.GetCallbackAddress()
-	returnUrl, _ := url.Parse(paymentReturnPath("/console/log"))
-	notifyUrl, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
+	returnUrl, err := parsePaymentCallbackURL(paymentReturnPath("/console/log"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "error", "data": "回调地址配置错误"})
+		return
+	}
+	notifyUrl, err := parsePaymentCallbackURL(callBackAddress + "/api/user/epay/notify")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"message": "error", "data": "回调地址配置错误"})
+		return
+	}
 	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
 	tradeNo = fmt.Sprintf("USR%dNO%s", id, tradeNo)
 	client := GetEpayClient()
@@ -339,7 +378,7 @@ func UnlockOrder(tradeNo string) {
 
 func EpayNotify(c *gin.Context) {
 	if !isEpayWebhookEnabled() {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.URL.Path, c.ClientIP()))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
@@ -349,7 +388,7 @@ func EpayNotify(c *gin.Context) {
 	if c.Request.Method == "POST" {
 		// POST 请求：从 POST body 解析参数
 		if err := c.Request.ParseForm(); err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook POST 表单解析失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook POST 表单解析失败 path=%q client_ip=%s error=%q", c.Request.URL.Path, c.ClientIP(), err.Error()))
 			_, _ = c.Writer.Write([]byte("fail"))
 			return
 		}
@@ -365,16 +404,16 @@ func EpayNotify(c *gin.Context) {
 		}, map[string]string{})
 	}
 	if len(params) == 0 {
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 参数为空 path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 参数为空 path=%q client_ip=%s", c.Request.URL.Path, c.ClientIP()))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
 	client := GetEpayClient()
 	if client == nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 client 未初始化 path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 client 未初始化 path=%q client_ip=%s", c.Request.URL.Path, c.ClientIP()))
 		_, err := c.Writer.Write([]byte("fail"))
 		if err != nil {
-			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+			logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 响应写入失败 path=%q client_ip=%s error=%q", c.Request.URL.Path, c.ClientIP(), err.Error()))
 		}
 		return
 	}
@@ -384,7 +423,7 @@ func EpayNotify(c *gin.Context) {
 		if verifyErr != nil {
 			reason = verifyErr.Error()
 		}
-		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签失败 path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), reason))
+		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 验签失败 path=%q client_ip=%s error=%q", c.Request.URL.Path, c.ClientIP(), reason))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
@@ -394,8 +433,13 @@ func EpayNotify(c *gin.Context) {
 		return
 	}
 
-	topUp := model.GetTopUpByTradeNo(verifyInfo.ServiceTradeNo)
-	if topUp == nil || topUp.PaymentProvider != model.PaymentProviderEpay || topUp.PaymentMethod != verifyInfo.Type {
+	topUp, lookupErr := model.FindTopUpByTradeNo(verifyInfo.ServiceTradeNo)
+	if lookupErr != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 webhook 查询订单失败 trade_no=%s callback_type=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP(), lookupErr.Error()))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
+	if topUp.PaymentProvider != model.PaymentProviderEpay || topUp.PaymentMethod != verifyInfo.Type {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 订单不匹配 trade_no=%s callback_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP()))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
@@ -471,7 +515,7 @@ func GetUserTopUps(c *gin.Context) {
 		return
 	}
 
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(topups)
 	common.ApiSuccess(c, pageInfo)
 }
@@ -496,7 +540,7 @@ func GetAllTopUps(c *gin.Context) {
 		return
 	}
 
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(topups)
 	common.ApiSuccess(c, pageInfo)
 }

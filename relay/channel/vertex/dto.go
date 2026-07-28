@@ -28,7 +28,7 @@ func copyRequest(req *dto.ClaudeRequest, version string) *VertexAIClaudeRequest 
 		AnthropicVersion: version,
 		System:           req.System,
 		Messages:         req.Messages,
-		MaxTokens:        req.MaxTokens,
+		MaxTokens:        req.GetMaxTokensPointer(),
 		Stream:           req.Stream,
 		Temperature:      req.Temperature,
 		TopP:             req.TopP,

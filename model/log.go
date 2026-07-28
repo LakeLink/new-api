@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
@@ -57,27 +58,29 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2;index:idx_user_created_at_id,priority:3;index:idx_type_created_at_id,priority:3"`
-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1;index:idx_user_created_at_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type;index:idx_user_created_at_id,priority:2;index:idx_type_created_at_id,priority:2"`
-	Type              int    `json:"type" gorm:"index:idx_created_at_type;index:idx_type_created_at_id,priority:1"`
-	Content           string `json:"content"`
-	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
-	TokenName         string `json:"token_name" gorm:"index;default:''"`
-	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
-	Quota             int    `json:"quota" gorm:"default:0"`
-	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens  int    `json:"completion_tokens" gorm:"default:0"`
-	UseTime           int    `json:"use_time" gorm:"default:0"`
-	IsStream          bool   `json:"is_stream"`
-	ChannelId         int    `json:"channel" gorm:"index"`
-	ChannelName       string `json:"channel_name" gorm:"->"`
-	TokenId           int    `json:"token_id" gorm:"default:0;index"`
-	Group             string `json:"group" gorm:"index"`
-	Ip                string `json:"ip" gorm:"index;default:''"`
-	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
-	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
-	Other             string `json:"other"`
+	Id                int     `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2;index:idx_user_created_at_id,priority:3;index:idx_type_created_at_id,priority:3"`
+	UserId            int     `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1;index:idx_user_created_at_id,priority:1"`
+	CreatedAt         int64   `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type;index:idx_user_created_at_id,priority:2;index:idx_type_created_at_id,priority:2"`
+	Type              int     `json:"type" gorm:"index:idx_created_at_type;index:idx_type_created_at_id,priority:1"`
+	Content           string  `json:"content"`
+	Username          string  `json:"username" gorm:"index;default:''"`
+	TokenName         string  `json:"token_name" gorm:"index;default:''"`
+	ModelName         string  `json:"model_name" gorm:"index;default:''"`
+	Quota             int     `json:"quota" gorm:"default:0"`
+	PromptTokens      int     `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens  int     `json:"completion_tokens" gorm:"default:0"`
+	UseTime           int     `json:"use_time" gorm:"default:0"`
+	IsStream          bool    `json:"is_stream"`
+	ChannelId         int     `json:"channel" gorm:"index"`
+	ChannelName       string  `json:"channel_name" gorm:"->"`
+	TokenId           int     `json:"token_id" gorm:"default:0;index"`
+	Group             string  `json:"group" gorm:"index"`
+	Ip                string  `json:"ip" gorm:"index;default:''"`
+	RequestId         string  `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
+	BillingEventId    *string `json:"-" gorm:"type:varchar(64);uniqueIndex:idx_logs_billing_event_id"`
+	BillingEventClaim *string `json:"-" gorm:"type:varchar(32)"`
+	UpstreamRequestId string  `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
+	Other             string  `json:"other"`
 }
 
 // don't use iota, avoid change log type value
@@ -101,6 +104,95 @@ func ensureLogRequestId(log *Log) {
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
 	return LOG_DB.Create(log).Error
+}
+
+// createBillingEventLog inserts a durable billing event exactly once on the
+// relational log databases. NULL event IDs preserve normal log behavior and
+// allow any number of pre-existing rows to coexist with the unique index.
+// ClickHouse does not enforce uniqueness, so it gets a best-effort replay
+// check while retaining a compatible event identity for operators.
+func createBillingEventLog(log *Log) (bool, error) {
+	return createBillingEventLogWithDB(LOG_DB, log)
+}
+
+func createBillingEventLogWithDB(logDB *gorm.DB, log *Log) (bool, error) {
+	if logDB == nil {
+		return false, errors.New("billing event log database is nil")
+	}
+	if log == nil {
+		return false, errors.New("billing event log is nil")
+	}
+	if log.BillingEventId == nil {
+		ensureLogRequestId(log)
+		return true, logDB.Create(log).Error
+	}
+	eventID := *log.BillingEventId
+	if eventID == "" {
+		return false, errors.New("billing event log id is empty")
+	}
+	ensureLogRequestId(log)
+
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		var existing Log
+		query := logDB.Where("billing_event_id = ?", eventID).Limit(1).Find(&existing)
+		if query.Error != nil {
+			return false, query.Error
+		}
+		if query.RowsAffected != 0 {
+			if !billingEventLogAccountingMatches(&existing, log) {
+				return false, errors.New("billing event log id reused with different accounting context")
+			}
+			log.Username = existing.Username
+			log.CreatedAt = existing.CreatedAt
+			return false, nil
+		}
+		return true, logDB.Create(log).Error
+	}
+
+	claimToken := common.GetUUID()
+	log.BillingEventClaim = &claimToken
+	insert := logDB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "billing_event_id"}},
+		DoNothing: true,
+	}).Create(log)
+	if insert.Error != nil {
+		return false, insert.Error
+	}
+	var existing Log
+	if err := logDB.Where("billing_event_id = ?", eventID).First(&existing).Error; err != nil {
+		return false, err
+	}
+	if !billingEventLogAccountingMatches(&existing, log) {
+		return false, errors.New("billing event log id reused with different accounting context")
+	}
+	// The log database is the canonical side of this cross-database outbox.
+	// Reuse its descriptive/time dimensions when replaying the QuotaData write;
+	// otherwise a username change or a regenerated timestamp after a crash can
+	// make the already-committed analytics event appear conflicting forever.
+	log.Username = existing.Username
+	log.CreatedAt = existing.CreatedAt
+	// MySQL may report a no-op duplicate-key update as one affected row when
+	// CLIENT_FOUND_ROWS is enabled. The random claim stored on the canonical row
+	// identifies the actual inserter without relying on dialect-specific counts.
+	return existing.BillingEventClaim != nil && *existing.BillingEventClaim == claimToken, nil
+}
+
+func billingEventLogAccountingMatches(a *Log, b *Log) bool {
+	return a != nil && b != nil &&
+		a.UserId == b.UserId &&
+		a.Type == b.Type &&
+		a.ChannelId == b.ChannelId &&
+		a.ModelName == b.ModelName &&
+		a.Quota == b.Quota &&
+		a.PromptTokens == b.PromptTokens &&
+		a.CompletionTokens == b.CompletionTokens &&
+		a.TokenId == b.TokenId &&
+		a.Group == b.Group &&
+		a.UseTime == b.UseTime &&
+		a.IsStream == b.IsStream &&
+		a.Ip == b.Ip &&
+		a.RequestId == b.RequestId &&
+		a.UpstreamRequestId == b.UpstreamRequestId
 }
 
 func clickHouseLogOrder(prefix string) string {
@@ -146,7 +238,7 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 }
 
 func RecordLog(userId int, logType int, content string) {
-	if logType == LogTypeConsume && !common.LogConsumeEnabled {
+	if logType == LogTypeConsume && !common.GetLegacyOptionBool("LogConsumeEnabled", &common.LogConsumeEnabled) {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
@@ -165,7 +257,7 @@ func RecordLog(userId int, logType int, content string) {
 
 // RecordLogWithAdminInfo 记录操作日志，并将管理员相关信息存入 Other.admin_info，
 func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo map[string]interface{}) {
-	if logType == LogTypeConsume && !common.LogConsumeEnabled {
+	if logType == LogTypeConsume && !common.GetLegacyOptionBool("LogConsumeEnabled", &common.LogConsumeEnabled) {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
@@ -285,7 +377,14 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other map[string]interface{}) {
-	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
+	logger.LogInfo(c, fmt.Sprintf(
+		"record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content_bytes=%d",
+		userId,
+		channelId,
+		modelName,
+		tokenName,
+		len(content),
+	))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
@@ -345,7 +444,7 @@ type RecordConsumeLogParams struct {
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
-	if !common.LogConsumeEnabled {
+	if !common.GetLegacyOptionBool("LogConsumeEnabled", &common.LogConsumeEnabled) {
 		return
 	}
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
@@ -391,7 +490,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
 	}
-	if common.DataExportEnabled {
+	if common.GetLegacyOptionBool("DataExportEnabled", &common.DataExportEnabled) {
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
@@ -408,65 +507,116 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 }
 
 type RecordTaskBillingLogParams struct {
-	UserId    int
-	LogType   int
-	Content   string
-	ChannelId int
-	ModelName string
-	Quota     int
-	TokenId   int
-	Group     string
-	Other     map[string]interface{}
-	NodeName  string // 任务发起节点；为空时回退当前节点
+	UserId            int
+	LogType           int
+	Content           string
+	ChannelId         int
+	ModelName         string
+	Quota             int
+	PromptTokens      int
+	CompletionTokens  int
+	TokenId           int
+	TokenName         string
+	Group             string
+	UseTime           int
+	IsStream          bool
+	IP                string
+	RequestID         string
+	UpstreamRequestID string
+	Username          string
+	Other             map[string]interface{}
+	NodeName          string // 任务发起节点；为空时回退当前节点
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
-	if params.LogType == LogTypeConsume && !common.LogConsumeEnabled {
-		return
+	if err := RecordTaskBillingLogWithRequestID(params, "", common.GetTimestamp()); err != nil {
+		common.SysLog("failed to record task billing log: " + err.Error())
 	}
-	username, _ := GetUsernameById(params.UserId, false)
-	tokenName := ""
-	if params.TokenId > 0 {
+}
+
+// RecordTaskBillingLogWithRequestID writes a task billing log with a caller-
+// supplied durable idempotency key. The finalization outbox uses this key to
+// detect a committed log after a crash, including when LOG_DB is separate.
+func RecordTaskBillingLogWithRequestID(params RecordTaskBillingLogParams, requestID string, createdAt int64) error {
+	if params.LogType == LogTypeConsume && !common.GetLegacyOptionBool("LogConsumeEnabled", &common.LogConsumeEnabled) {
+		return nil
+	}
+	username := params.Username
+	if username == "" {
+		username, _ = GetUsernameById(params.UserId, false)
+	}
+	tokenName := params.TokenName
+	if tokenName == "" && params.TokenId > 0 {
 		if token, err := GetTokenById(params.TokenId); err == nil {
 			tokenName = token.Name
 		}
 	}
-	createdAt := common.GetTimestamp()
+	if createdAt <= 0 {
+		createdAt = common.GetTimestamp()
+	}
+	var billingEventID *string
+	if requestID != "" {
+		billingEventID = &requestID
+	}
+	originalRequestID := params.RequestID
+	if originalRequestID == "" {
+		// Existing async task callers did not snapshot the originating HTTP
+		// request. Keep their request ID deterministic across log retries while
+		// allowing synchronous callers to preserve the original separately.
+		originalRequestID = requestID
+	}
 	log := &Log{
-		UserId:    params.UserId,
-		Username:  username,
-		CreatedAt: createdAt,
-		Type:      params.LogType,
-		Content:   params.Content,
-		TokenName: tokenName,
-		ModelName: params.ModelName,
-		Quota:     params.Quota,
-		ChannelId: params.ChannelId,
-		TokenId:   params.TokenId,
-		Group:     params.Group,
-		Other:     common.MapToJsonStr(params.Other),
+		UserId:            params.UserId,
+		Username:          username,
+		CreatedAt:         createdAt,
+		Type:              params.LogType,
+		Content:           params.Content,
+		PromptTokens:      params.PromptTokens,
+		CompletionTokens:  params.CompletionTokens,
+		TokenName:         tokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		UseTime:           params.UseTime,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		Ip:                params.IP,
+		RequestId:         originalRequestID,
+		BillingEventId:    billingEventID,
+		UpstreamRequestId: params.UpstreamRequestID,
+		Other:             common.MapToJsonStr(params.Other),
 	}
-	err := createLog(log)
+	created, err := createBillingEventLog(log)
 	if err != nil {
-		common.SysLog("failed to record task billing log: " + err.Error())
+		return err
 	}
-	if params.LogType == LogTypeConsume && common.DataExportEnabled {
+	if params.LogType == LogTypeConsume && common.GetLegacyOptionBool("DataExportEnabled", &common.DataExportEnabled) {
 		nodeName := params.NodeName
 		if nodeName == "" {
 			nodeName = common.NodeName
 		}
-		LogQuotaData(QuotaDataLogParams{
+		quotaData := QuotaDataLogParams{
 			UserID:    params.UserId,
-			Username:  username,
-			ModelName: params.ModelName,
+			Username:  log.Username,
+			ModelName: log.ModelName,
 			Quota:     params.Quota,
-			CreatedAt: createdAt,
+			CreatedAt: log.CreatedAt,
+			TokenUsed: params.PromptTokens + params.CompletionTokens,
 			UseGroup:  params.Group,
 			TokenID:   params.TokenId,
 			ChannelID: params.ChannelId,
 			NodeName:  nodeName,
-		})
+		}
+		if requestID != "" {
+			if err := RecordQuotaDataEvent(requestID, quotaData); err != nil {
+				return err
+			}
+		} else if created {
+			LogQuotaData(quotaData)
+		}
 	}
+	return nil
 }
 
 type LogQueryOptions struct {

@@ -96,3 +96,34 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 		convertAndReplay(t, c, prompt)
 	})
 }
+
+func TestConvertImageEditRequestPreservesMixedImageFieldForms(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("model", "gpt-image-1"))
+	require.NoError(t, writer.WriteField("prompt", "edit"))
+	for index, field := range []string{"image", "image[]", "image[2]"} {
+		part, err := writer.CreateFormFile(field, "input.png")
+		require.NoError(t, err)
+		_, err = part.Write([]byte{byte(index)})
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesEdits}
+
+	converted, err := (&Adaptor{}).ConvertImageRequest(c, info, dto.ImageRequest{
+		Model: "gpt-image-1", Prompt: "edit",
+	})
+	require.NoError(t, err)
+	convertedBody, ok := converted.(*bytes.Buffer)
+	require.True(t, ok)
+	replayed := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(convertedBody.Bytes()))
+	replayed.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+	require.NoError(t, replayed.ParseMultipartForm(32<<20))
+	require.Len(t, replayed.MultipartForm.File["image[]"], 3)
+}

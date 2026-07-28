@@ -1,6 +1,11 @@
 package model_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+	"math"
+
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 // GrokSettings defines Grok model configuration.
 type GrokSettings struct {
@@ -15,10 +20,18 @@ var defaultGrokSettings = GrokSettings{
 
 var grokSettings = defaultGrokSettings
 
+func (s GrokSettings) Validate() error {
+	amount := s.ViolationDeductionAmount
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return fmt.Errorf("Grok violation deduction amount must be a finite non-negative number")
+	}
+	return nil
+}
+
 func init() {
 	config.GlobalConfig.Register("grok", &grokSettings)
 }
 
 func GetGrokSettings() *GrokSettings {
-	return &grokSettings
+	return config.Snapshot[GrokSettings]("grok")
 }

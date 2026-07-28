@@ -185,7 +185,7 @@ type InputSchema struct {
 type ClaudeWebSearchTool struct {
 	Type         string                       `json:"type"`
 	Name         string                       `json:"name"`
-	MaxUses      int                          `json:"max_uses,omitempty"`
+	MaxUses      *uint                        `json:"max_uses,omitempty"`
 	UserLocation *ClaudeWebSearchUserLocation `json:"user_location,omitempty"`
 }
 
@@ -200,7 +200,7 @@ type ClaudeWebSearchUserLocation struct {
 type ClaudeToolChoice struct {
 	Type                   string `json:"type"`
 	Name                   string `json:"name,omitempty"`
-	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
+	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type ClaudeRequest struct {
@@ -211,7 +211,7 @@ type ClaudeRequest struct {
 	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 	// InferenceGeo controls Claude data residency region.
 	// This field is filtered by default and can be enabled via channel setting allow_inference_geo.
-	InferenceGeo      string          `json:"inference_geo,omitempty"`
+	InferenceGeo      *string         `json:"inference_geo,omitempty"`
 	MaxTokens         *uint           `json:"max_tokens,omitempty"`
 	MaxTokensToSample *uint           `json:"max_tokens_to_sample,omitempty"`
 	StopSequences     []string        `json:"stop_sequences,omitempty"`
@@ -242,13 +242,9 @@ type OutputConfigForEffort struct {
 }
 
 func (c *ClaudeRequest) GetTokenCountMeta() *types.TokenCountMeta {
-	maxTokens := 0
-	if c.MaxTokens != nil {
-		maxTokens = int(*c.MaxTokens)
-	}
 	var tokenCountMeta = types.TokenCountMeta{
 		TokenType: types.TokenTypeTokenizer,
-		MaxTokens: maxTokens,
+		MaxTokens: c.GetMaxTokenEstimate(),
 	}
 
 	var texts = make([]string, 0)
@@ -358,6 +354,28 @@ func (c *ClaudeRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	return &tokenCountMeta
 }
 
+// GetMaxTokenEstimate returns a conservative bound across the current and
+// legacy Anthropic completion-limit spellings.
+func (c *ClaudeRequest) GetMaxTokenEstimate() int {
+	maxTokens := uint(0)
+	if c.MaxTokens != nil {
+		maxTokens = *c.MaxTokens
+	}
+	if c.MaxTokensToSample != nil && *c.MaxTokensToSample > maxTokens {
+		maxTokens = *c.MaxTokensToSample
+	}
+	return boundedMaxTokenProduct(maxTokens, 1)
+}
+
+// GetMaxTokensPointer returns the current Anthropic limit or the legacy
+// completions spelling while preserving an explicit zero.
+func (c *ClaudeRequest) GetMaxTokensPointer() *uint {
+	if c.MaxTokens != nil {
+		return c.MaxTokens
+	}
+	return c.MaxTokensToSample
+}
+
 func (c *ClaudeRequest) IsStream(ctx *gin.Context) bool {
 	if c.Stream == nil {
 		return false
@@ -412,9 +430,39 @@ func (c *ClaudeRequest) GetTools() []any {
 	}
 }
 
+func ClaudeWebSearchMaxUses(tools any) (uint, bool, error) {
+	if tools == nil {
+		return 0, false, nil
+	}
+	encoded, err := common.Marshal(tools)
+	if err != nil {
+		return 0, false, err
+	}
+	var definitions []struct {
+		Type    string `json:"type"`
+		MaxUses *uint  `json:"max_uses,omitempty"`
+	}
+	if err := common.Unmarshal(encoded, &definitions); err != nil {
+		return 0, false, err
+	}
+	total := uint(0)
+	found := false
+	for _, definition := range definitions {
+		if !strings.HasPrefix(definition.Type, "web_search") || definition.MaxUses == nil {
+			continue
+		}
+		found = true
+		if *definition.MaxUses > ^uint(0)-total {
+			return 0, false, fmt.Errorf("Claude web search max_uses overflow")
+		}
+		total += *definition.MaxUses
+	}
+	return total, found, nil
+}
+
 func (c *ClaudeRequest) GetEfforts() string {
 	var OutputConfig OutputConfigForEffort
-	if err := json.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
+	if err := common.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
 		effort := OutputConfig.Effort
 		return effort
 	}
@@ -564,6 +612,7 @@ type ClaudeUsage struct {
 	ClaudeCacheCreation5mTokens int                  `json:"claude_cache_creation_5_m_tokens"`
 	ClaudeCacheCreation1hTokens int                  `json:"claude_cache_creation_1_h_tokens"`
 	ServerToolUse               *ClaudeServerToolUse `json:"server_tool_use,omitempty"`
+	Speed                       string               `json:"speed,omitempty"`
 	BillingUsage                *BillingUsage        `json:"billing_usage,omitempty"`
 }
 

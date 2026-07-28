@@ -15,6 +15,7 @@ func TestCompleteSubscriptionEpayCallbackValidatesAmountAndIsIdempotent(t *testi
 	require.NoError(t, db.AutoMigrate(
 		&model.SubscriptionPlan{},
 		&model.SubscriptionOrder{},
+		&model.SubscriptionProviderPayment{},
 		&model.UserSubscription{},
 		&model.TopUp{},
 	))

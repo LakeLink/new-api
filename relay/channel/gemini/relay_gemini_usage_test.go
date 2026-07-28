@@ -392,8 +392,13 @@ func TestGeminiStreamHandlerPromptOnlyUsageMetadataEstimatesCompletionTokens(t *
 			},
 		},
 		UsageMetadata: dto.GeminiUsageMetadata{
-			PromptTokenCount: 151,
-			TotalTokenCount:  151,
+			PromptTokenCount:        151,
+			TotalTokenCount:         151,
+			CachedContentTokenCount: 20,
+			CacheTokensDetails: []dto.GeminiPromptTokensDetails{
+				{Modality: "AUDIO", TokenCount: 20},
+			},
+			ServiceTier: "flex",
 		},
 	}
 
@@ -417,6 +422,9 @@ func TestGeminiStreamHandlerPromptOnlyUsageMetadataEstimatesCompletionTokens(t *
 	require.True(t, usage.BillingUsage.Estimated)
 	require.NotNil(t, usage.BillingUsage.GeminiUsageMetadata)
 	require.Equal(t, usage.CompletionTokens, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokenCount)
+	require.Equal(t, 20, usage.BillingUsage.GeminiUsageMetadata.CachedContentTokenCount)
+	require.Equal(t, []dto.GeminiPromptTokensDetails{{Modality: "AUDIO", TokenCount: 20}}, usage.BillingUsage.GeminiUsageMetadata.CacheTokensDetails)
+	require.Equal(t, "flex", usage.BillingUsage.GeminiUsageMetadata.ServiceTier)
 }
 
 func TestGeminiChatHandlerPromptOnlyUsageMetadataEstimatesCompletionTokens(t *testing.T) {
@@ -465,6 +473,27 @@ func TestGeminiChatHandlerPromptOnlyUsageMetadataEstimatesCompletionTokens(t *te
 	require.Equal(t, usage.PromptTokens+usage.CompletionTokens, usage.TotalTokens)
 	require.NotNil(t, usage.BillingUsage)
 	require.True(t, usage.BillingUsage.Estimated)
+}
+
+func TestPatchGeminiZeroCompletionUsageEstimatesImageModalitySeparately(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	model := "gemini-3.1-flash-image"
+	metadata := &dto.GeminiUsageMetadata{PromptTokenCount: 10, TotalTokenCount: 10}
+	usage := buildUsageFromGeminiMetadata(metadata, 10)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: model,
+		ChannelMeta:     &relaycommon.ChannelMeta{UpstreamModelName: model},
+	}
+
+	patchGeminiZeroCompletionUsage(c, info, &usage, "caption", 1)
+
+	require.Greater(t, usage.CompletionTokens, 2520)
+	require.Equal(t, 2520, usage.CompletionTokenDetails.ImageTokens)
+	require.NotNil(t, usage.BillingUsage)
+	require.NotNil(t, usage.BillingUsage.GeminiUsageMetadata)
+	require.Contains(t, usage.BillingUsage.GeminiUsageMetadata.CandidatesTokensDetails,
+		dto.GeminiPromptTokensDetails{Modality: "IMAGE", TokenCount: 2520})
 }
 
 func TestGeminiStreamHandlerEmptyUsageMetadataBuildsEstimatedBillingUsage(t *testing.T) {

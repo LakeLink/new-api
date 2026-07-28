@@ -75,17 +75,49 @@ func (j *JSONValue) UnmarshalJSON(data []byte) error {
 
 type PrefillGroup struct {
 	Id          int            `json:"id"`
-	Name        string         `json:"name" gorm:"size:64;not null;uniqueIndex:uk_prefill_name,where:deleted_at IS NULL"`
+	Name        string         `json:"name" gorm:"size:64;not null;index"`
+	NameHash    *string        `json:"-" gorm:"type:char(64);uniqueIndex:ux_prefill_groups_active_name_hash"`
 	Type        string         `json:"type" gorm:"size:32;index;not null"`
-	Items       JSONValue      `json:"items" gorm:"type:json"`
+	Items       JSONValue      `json:"items" gorm:"type:text"`
 	Description string         `json:"description,omitempty" gorm:"type:varchar(255)"`
 	CreatedTime int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime int64          `json:"updated_time" gorm:"bigint"`
 	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
+func (g *PrefillGroup) BeforeCreate(_ *gorm.DB) error {
+	name, nameHash, err := normalizeNamedResourceIdentity(g.Name, 64)
+	if err != nil {
+		return err
+	}
+	g.Name = name
+	g.NameHash = &nameHash
+	return nil
+}
+
+func (g *PrefillGroup) BeforeUpdate(tx *gorm.DB) error {
+	if g.Id <= 0 {
+		return nil
+	}
+	name, nameHash, err := normalizeNamedResourceIdentity(g.Name, 64)
+	if err != nil {
+		return err
+	}
+	g.Name = name
+	g.NameHash = &nameHash
+	tx.Statement.SetColumn("name", name)
+	tx.Statement.SetColumn("name_hash", nameHash)
+	return nil
+}
+
 // Insert 新建组
 func (g *PrefillGroup) Insert() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(g.Name, 64)
+	if err != nil {
+		return err
+	}
+	g.Name = name
+	g.NameHash = &nameHash
 	now := common.GetTimestamp()
 	g.CreatedTime = now
 	g.UpdatedTime = now
@@ -94,23 +126,43 @@ func (g *PrefillGroup) Insert() error {
 
 // IsPrefillGroupNameDuplicated 检查组名称是否重复（排除自身 ID）
 func IsPrefillGroupNameDuplicated(id int, name string) (bool, error) {
-	if name == "" {
-		return false, nil
+	_, nameHash, err := normalizeNamedResourceIdentity(name, 64)
+	if err != nil {
+		return false, err
 	}
 	var cnt int64
-	err := DB.Model(&PrefillGroup{}).Where("name = ? AND id <> ?", name, id).Count(&cnt).Error
+	err = DB.Model(&PrefillGroup{}).Where("name_hash = ? AND id <> ?", nameHash, id).Count(&cnt).Error
 	return cnt > 0, err
 }
 
 // Update 更新组
 func (g *PrefillGroup) Update() error {
+	name, nameHash, err := normalizeNamedResourceIdentity(g.Name, 64)
+	if err != nil {
+		return err
+	}
+	g.Name = name
+	g.NameHash = &nameHash
 	g.UpdatedTime = common.GetTimestamp()
 	return DB.Save(g).Error
 }
 
 // DeleteByID 根据 ID 删除组
 func DeletePrefillGroupByID(id int) error {
-	return DB.Delete(&PrefillGroup{}, id).Error
+	if id <= 0 {
+		return gorm.ErrMissingWhereClause
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var group PrefillGroup
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&group).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&group).UpdateColumn("name_hash", nil).Error; err != nil {
+			return err
+		}
+		group.NameHash = nil
+		return tx.Delete(&group).Error
+	})
 }
 
 // GetAllPrefillGroups 获取全部组，可按类型过滤（为空则返回全部）

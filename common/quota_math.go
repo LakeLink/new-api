@@ -12,8 +12,10 @@ import (
 // integers in the database, so an oversized product must clamp to the int32
 // range instead of wrapping around and turning a charge into a credit.
 const (
-	MaxQuota = math.MaxInt32
-	MinQuota = math.MinInt32
+	MaxQuota             = math.MaxInt32
+	MinQuota             = math.MinInt32
+	MaxTokensLimit       = MaxQuota / 2
+	MaxTextToolCallCount = 1024
 )
 
 // QuotaClampKind identifies why a quota conversion had to be saturated.
@@ -53,10 +55,19 @@ func (c *QuotaClamp) AuditMap() map[string]interface{} {
 	if c == nil {
 		return nil
 	}
+	original := interface{}(c.Original)
+	switch {
+	case math.IsNaN(c.Original):
+		original = "NaN"
+	case math.IsInf(c.Original, 1):
+		original = "+Inf"
+	case math.IsInf(c.Original, -1):
+		original = "-Inf"
+	}
 	return map[string]interface{}{
 		"op":       c.Op,
 		"kind":     c.Kind,
-		"original": c.Original,
+		"original": original,
 		"clamped":  c.Clamped,
 	}
 }
@@ -74,9 +85,9 @@ func saturateQuota(value float64, op string) (int, *QuotaClamp) {
 	switch {
 	case math.IsNaN(value):
 		clamp = &QuotaClamp{Op: op, Kind: QuotaClampNaN, Original: value, Clamped: 0}
-	case value >= MaxQuota:
+	case value > MaxQuota:
 		clamp = &QuotaClamp{Op: op, Kind: QuotaClampOverflow, Original: value, Clamped: MaxQuota}
-	case value <= MinQuota:
+	case value < MinQuota:
 		clamp = &QuotaClamp{Op: op, Kind: QuotaClampUnderflow, Original: value, Clamped: MinQuota}
 	default:
 		return int(value), nil

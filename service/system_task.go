@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
 	"sync"
 	"time"
 
@@ -452,7 +453,9 @@ func logCleanupProgress(processed int64, total int64) int {
 	if processed >= total {
 		return 100
 	}
-	return int(processed * 100 / total)
+	high, low := bits.Mul64(uint64(processed), 100)
+	progress, _ := bits.Div64(high, low, uint64(total))
+	return int(progress)
 }
 
 func systemTaskLockUntil() int64 {

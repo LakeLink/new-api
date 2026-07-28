@@ -15,6 +15,7 @@ type ResponsesToChatStreamState struct {
 	Model        string
 	Created      int64
 	IncludeUsage bool
+	ServiceTier  string
 
 	Usage *dto.Usage
 
@@ -131,8 +132,12 @@ func (s *ResponsesToChatStreamState) applyResponseMetadata(response *dto.OpenAIR
 	if response.CreatedAt != 0 {
 		s.Created = int64(response.CreatedAt)
 	}
+	if response.ServiceTier != "" {
+		s.ServiceTier = response.ServiceTier
+	}
 	if response.Usage != nil {
 		s.Usage = UsageFromResponsesUsage(response.Usage)
+		s.Usage.ActualServiceTier = s.ServiceTier
 	}
 }
 
@@ -432,12 +437,13 @@ func (s *ResponsesToChatStreamState) finalize(response *dto.OpenAIResponsesRespo
 	chunks = append(chunks, s.makeChunk(dto.ChatCompletionsStreamResponseChoiceDelta{}, &finishReason))
 	if s.IncludeUsage && s.Usage != nil {
 		chunks = append(chunks, dto.ChatCompletionsStreamResponse{
-			Id:      s.ID,
-			Object:  "chat.completion.chunk",
-			Created: s.Created,
-			Model:   s.Model,
-			Choices: make([]dto.ChatCompletionsStreamResponseChoice, 0),
-			Usage:   s.Usage,
+			Id:          s.ID,
+			Object:      "chat.completion.chunk",
+			Created:     s.Created,
+			Model:       s.Model,
+			ServiceTier: s.ServiceTier,
+			Choices:     make([]dto.ChatCompletionsStreamResponseChoice, 0),
+			Usage:       s.Usage,
 		})
 	}
 	return chunks
@@ -501,10 +507,11 @@ func (s *ResponsesToChatStreamState) flushAllPendingTools() []dto.ChatCompletion
 
 func (s *ResponsesToChatStreamState) makeChunk(delta dto.ChatCompletionsStreamResponseChoiceDelta, finishReason *string) dto.ChatCompletionsStreamResponse {
 	return dto.ChatCompletionsStreamResponse{
-		Id:      s.ID,
-		Object:  "chat.completion.chunk",
-		Created: s.Created,
-		Model:   s.Model,
+		Id:          s.ID,
+		Object:      "chat.completion.chunk",
+		Created:     s.Created,
+		Model:       s.Model,
+		ServiceTier: s.ServiceTier,
 		Choices: []dto.ChatCompletionsStreamResponseChoice{
 			{
 				Index:        0,

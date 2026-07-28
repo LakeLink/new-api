@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -49,7 +50,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *common.RelayInfo, r
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
-	return convertCozeChatRequest(c, *request), nil
+	return convertCozeChatRequest(c, *request)
 }
 
 // ConvertOpenAIResponsesRequest implements channel.Adaptor.
@@ -75,27 +76,47 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *common.RelayInfo, requestBody 
 	}
 	// 解析 resp
 	var cozeResponse CozeChatResponse
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := service.ReadUpstreamResponseBody(resp.Body)
 	if err != nil {
+		_ = resp.Body.Close()
 		return nil, err
 	}
-	err = rootcommon.Unmarshal(respBody, &cozeResponse)
+	_ = resp.Body.Close()
+	if err = rootcommon.Unmarshal(respBody, &cozeResponse); err != nil {
+		return nil, fmt.Errorf("decode Coze create-chat response: %w", err)
+	}
 	if cozeResponse.Code != 0 {
 		return nil, errors.New(cozeResponse.Msg)
 	}
 	c.Set("coze_conversation_id", cozeResponse.Data.ConversationId)
 	c.Set("coze_chat_id", cozeResponse.Data.Id)
 	// 轮询检查消息是否完成
+	relayContext := info.GetRelayContext(c.Request.Context())
 	for {
+		select {
+		case <-relayContext.Done():
+			return nil, relayContext.Err()
+		default:
+		}
 		err, isComplete := checkIfChatComplete(a, c, info)
 		if err != nil {
 			return nil, err
-		} else {
-			if isComplete {
-				break
-			}
 		}
-		time.Sleep(time.Second * 1)
+		if isComplete {
+			break
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-timer.C:
+		case <-relayContext.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, relayContext.Err()
+		}
 	}
 	// 发送获取消息请求
 	return getChatDetail(a, c, info)

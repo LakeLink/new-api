@@ -423,7 +423,13 @@ func TestSearchTokensMasksKeyInResponse(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "searchable-token", "ijkl1234mnop5678")
 
-	ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/search?keyword=searchable-token&p=1&size=10", nil, 1)
+	ctx, recorder := newAuthenticatedContext(
+		t,
+		http.MethodPost,
+		"/api/token/search?p=1&size=10",
+		tokenSearchRequest{Keyword: "searchable-token"},
+		1,
+	)
 	SearchTokens(ctx)
 
 	response := decodeAPIResponse(t, recorder)

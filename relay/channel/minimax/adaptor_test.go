@@ -1,6 +1,7 @@
 package minimax
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetRequestURLForImageGeneration(t *testing.T) {
@@ -34,6 +37,35 @@ func TestGetRequestURLForImageGeneration(t *testing.T) {
 	if got != want {
 		t.Fatalf("GetRequestURL() = %q, want %q", got, want)
 	}
+}
+
+func TestConvertImageRequestEnforcesMiniMaxImageCountLimit(t *testing.T) {
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations}
+
+	for _, count := range []uint{0, MaxMiniMaxImageN + 1, dto.MaxImageN} {
+		t.Run(fmt.Sprintf("n_%d", count), func(t *testing.T) {
+			converted, err := adaptor.ConvertImageRequest(nil, info, dto.ImageRequest{
+				Model:  "image-01",
+				Prompt: "a red fox",
+				N:      &count,
+			})
+
+			require.ErrorContains(t, err, "MiniMax image n")
+			assert.Nil(t, converted)
+		})
+	}
+
+	count := MaxMiniMaxImageN
+	converted, err := adaptor.ConvertImageRequest(nil, info, dto.ImageRequest{
+		Model:  "image-01",
+		Prompt: "a red fox",
+		N:      &count,
+	})
+	require.NoError(t, err)
+	payload, ok := converted.(MiniMaxImageRequest)
+	require.True(t, ok)
+	assert.Equal(t, int(MaxMiniMaxImageN), payload.N)
 }
 
 func TestConvertImageRequest(t *testing.T) {

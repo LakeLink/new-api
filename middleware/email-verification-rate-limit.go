@@ -1,14 +1,13 @@
 package middleware
 
 import (
-	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 )
 
 const (
@@ -17,21 +16,29 @@ const (
 	EmailVerificationDuration      = 30 // 30秒时间窗口
 )
 
+var emailVerificationRateLimitScript = redis.NewScript(`
+local count = redis.call("INCR", KEYS[1])
+local ttl = redis.call("TTL", KEYS[1])
+if count == 1 or ttl < 0 then
+	redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return count
+`)
+
 func redisEmailVerificationRateLimiter(c *gin.Context) {
-	ctx := context.Background()
 	rdb := common.RDB
 	key := "emailVerification:" + EmailVerificationRateLimitMark + ":" + c.ClientIP()
 
-	count, err := rdb.Incr(ctx, key).Result()
+	count, err := emailVerificationRateLimitScript.Run(
+		c.Request.Context(),
+		rdb,
+		[]string{key},
+		EmailVerificationDuration,
+	).Int64()
 	if err != nil {
 		// fallback
 		memoryEmailVerificationRateLimiter(c)
 		return
-	}
-
-	// 第一次设置键时设置过期时间
-	if count == 1 {
-		_ = rdb.Expire(ctx, key, time.Duration(EmailVerificationDuration)*time.Second).Err()
 	}
 
 	// 检查是否超出限制
@@ -41,7 +48,7 @@ func redisEmailVerificationRateLimiter(c *gin.Context) {
 	}
 
 	// 获取剩余等待时间
-	ttl, err := rdb.TTL(ctx, key).Result()
+	ttl, err := rdb.TTL(c.Request.Context(), key).Result()
 	waitSeconds := int64(EmailVerificationDuration)
 	if err == nil && ttl > 0 {
 		waitSeconds = int64(ttl.Seconds())

@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -64,26 +66,30 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	if !strings.HasPrefix(info.UpstreamModelName, "imagen") {
 		return nil, errors.New("not supported model for image generation, only imagen models are supported")
 	}
+	imageN := lo.FromPtrOr(request.N, uint(1))
+	if imageN < 1 || imageN > relaycommon.MaxImagenImageCount {
+		return nil, fmt.Errorf("Imagen n must be an integer between 1 and %d", relaycommon.MaxImagenImageCount)
+	}
 
 	// convert size to aspect ratio but allow user to specify aspect ratio
 	aspectRatio := "1:1" // default aspect ratio
 	size := strings.TrimSpace(request.Size)
 	if size != "" {
-		if strings.Contains(size, ":") {
+		switch size {
+		case "1:1", "3:4", "4:3", "9:16", "16:9":
 			aspectRatio = size
-		} else {
-			switch size {
-			case "256x256", "512x512", "1024x1024":
-				aspectRatio = "1:1"
-			case "1536x1024":
-				aspectRatio = "3:2"
-			case "1024x1536":
-				aspectRatio = "2:3"
-			case "1024x1792":
-				aspectRatio = "9:16"
-			case "1792x1024":
-				aspectRatio = "16:9"
-			}
+		case "256x256", "512x512", "1024x1024":
+			aspectRatio = "1:1"
+		case "1536x1024":
+			aspectRatio = "4:3"
+		case "1024x1536":
+			aspectRatio = "3:4"
+		case "1024x1792":
+			aspectRatio = "9:16"
+		case "1792x1024":
+			aspectRatio = "16:9"
+		default:
+			return nil, fmt.Errorf("unsupported Imagen size or aspect ratio %q", size)
 		}
 	}
 
@@ -95,7 +101,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 			},
 		},
 		Parameters: dto.GeminiImageParameters{
-			SampleCount:      int(lo.FromPtrOr(request.N, uint(1))),
+			SampleCount:      int(imageN),
 			AspectRatio:      aspectRatio,
 			PersonGeneration: "allow_adult", // default allow adult
 		},
@@ -117,10 +123,15 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		case "standard", "medium", "low", "auto", "1K":
 			imageSize = "1K"
 		default:
-			// unknown quality value, default to 1K
-			imageSize = "1K"
+			return nil, fmt.Errorf("unsupported Imagen quality %q", request.Quality)
+		}
+		if imageSize == "2K" && strings.Contains(info.UpstreamModelName, "fast") {
+			return nil, errors.New("Imagen 4 Fast does not support 2K output")
 		}
 		geminiRequest.Parameters.ImageSize = imageSize
+	}
+	if err := relaycommon.SyncImagenBilling(info, int(imageN)); err != nil {
+		return nil, err
 	}
 
 	return geminiRequest, nil
@@ -183,6 +194,92 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
+	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
+		prompt := ""
+		for _, message := range request.Messages {
+			if message.Role != "user" {
+				continue
+			}
+			prompt = message.StringContent()
+			if prompt == "" {
+				for _, content := range message.ParseContent() {
+					if content.Type == dto.ContentTypeText && strings.TrimSpace(content.Text) != "" {
+						prompt = content.Text
+						break
+					}
+				}
+			}
+			if prompt != "" {
+				break
+			}
+		}
+		if prompt == "" {
+			if value, ok := request.Prompt.(string); ok {
+				prompt = value
+			}
+		}
+		if prompt == "" {
+			if value, ok := request.Input.(string); ok {
+				prompt = value
+			}
+		}
+		if strings.TrimSpace(prompt) == "" {
+			return nil, errors.New("prompt is required for Imagen image generation")
+		}
+
+		imageRequest := dto.ImageRequest{
+			Model:  request.Model,
+			Prompt: prompt,
+			N:      lo.ToPtr(uint(1)),
+			Size:   "1024x1024",
+		}
+		if request.N != nil {
+			if *request.N < 1 || *request.N > relaycommon.MaxImagenImageCount {
+				return nil, fmt.Errorf("Imagen n must be an integer between 1 and %d", relaycommon.MaxImagenImageCount)
+			}
+			imageRequest.N = lo.ToPtr(uint(*request.N))
+		}
+		if request.Size != "" {
+			imageRequest.Size = request.Size
+		}
+		if len(request.ExtraBody) > 0 {
+			var extra map[string]any
+			if err := common.Unmarshal(request.ExtraBody, &extra); err != nil {
+				return nil, fmt.Errorf("invalid Imagen extra_body: %w", err)
+			}
+			if rawN, exists := extra["n"]; exists {
+				n, ok := rawN.(float64)
+				if !ok || math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n || n < 1 || n > relaycommon.MaxImagenImageCount {
+					return nil, fmt.Errorf("Imagen n must be an integer between 1 and %d", relaycommon.MaxImagenImageCount)
+				}
+				imageRequest.N = lo.ToPtr(uint(n))
+			}
+			if size, ok := extra["size"].(string); ok && size != "" {
+				imageRequest.Size = size
+			}
+			if quality, ok := extra["quality"].(string); ok && quality != "" {
+				imageRequest.Quality = quality
+			}
+			if aspectRatio, ok := extra["aspectRatio"].(string); ok && aspectRatio != "" {
+				imageRequest.Size = aspectRatio
+			}
+			if parameters, ok := extra["parameters"].(map[string]any); ok {
+				if aspectRatio, ok := parameters["aspectRatio"].(string); ok && aspectRatio != "" {
+					imageRequest.Size = aspectRatio
+				}
+			}
+		}
+
+		if c != nil {
+			c.Set("request_model", request.Model)
+		}
+		converted, err := a.ConvertImageRequest(c, info, imageRequest)
+		if err != nil {
+			return nil, err
+		}
+
+		return converted, nil
+	}
 	result, err := relayconvert.ConvertRequest(c, info, types.RelayFormatGemini, request)
 	if err != nil {
 		return nil, err
@@ -206,6 +303,39 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 	// We always build a batch-style payload with `requests`, so ensure we call the
 	// batch endpoint upstream to avoid payload/endpoint mismatches.
 	info.IsGeminiBatchEmbedding = true
+	var dimensions *int
+	if request.Dimensions != nil {
+		maxDimensions := 0
+		switch strings.TrimPrefix(info.UpstreamModelName, "models/") {
+		case "text-embedding-004":
+			maxDimensions = 768
+		case "gemini-embedding-exp", "gemini-embedding-exp-03-07",
+			"gemini-embedding-001", "gemini-embedding-2",
+			"gemini-embedding-2-preview", "embedding-2-preview":
+			maxDimensions = dto.MaxGeminiEmbeddingDimensions
+		default:
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("dimensions is not supported for Gemini embedding model %q", info.UpstreamModelName),
+				types.ErrorCodeInvalidRequest,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
+		}
+		if *request.Dimensions < 1 || *request.Dimensions > maxDimensions {
+			return nil, types.NewOpenAIError(
+				fmt.Errorf(
+					"dimensions must be an integer between 1 and %d for Gemini embedding model %q",
+					maxDimensions,
+					info.UpstreamModelName,
+				),
+				types.ErrorCodeInvalidRequest,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
+		}
+		dimensions = request.Dimensions
+	}
+
 	// process all inputs
 	geminiRequests := make([]map[string]interface{}, 0, len(inputs))
 	for _, input := range inputs {
@@ -220,15 +350,8 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 			},
 		}
 
-		// set specific parameters for different models
-		// https://ai.google.dev/api/embeddings?hl=zh-cn#method:-models.embedcontent
-		switch info.UpstreamModelName {
-		case "text-embedding-004", "gemini-embedding-exp-03-07", "gemini-embedding-001":
-			// Only newer models introduced after 2024 support OutputDimensionality
-			dimensions := lo.FromPtrOr(request.Dimensions, 0)
-			if dimensions > 0 {
-				geminiRequest["outputDimensionality"] = dimensions
-			}
+		if dimensions != nil {
+			geminiRequest["outputDimensionality"] = *dimensions
 		}
 		geminiRequests = append(geminiRequests, geminiRequest)
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -250,14 +251,21 @@ var defaultModelRatio = map[string]float64{
 	"claude-3-haiku-20240307":                   0.125, // $0.25 / 1M tokens
 	"claude-3-5-haiku-20241022":                 0.5,   // $1 / 1M tokens
 	"claude-haiku-4-5-20251001":                 0.5,   // $1 / 1M tokens
+	"claude-fable-5":                            5,     // $10 / 1M tokens
+	"claude-mythos-5":                           5,     // $10 / 1M tokens, limited availability
+	"claude-sonnet-5":                           1,     // $2 / 1M tokens through August 31, 2026
 	"claude-3-sonnet-20240229":                  1.5,   // $3 / 1M tokens
 	"claude-3-5-sonnet-20240620":                1.5,
 	"claude-3-5-sonnet-20241022":                1.5,
 	"claude-3-7-sonnet-20250219":                1.5,
 	"claude-3-7-sonnet-20250219-thinking":       1.5,
 	"claude-sonnet-4-20250514":                  1.5,
+	"claude-sonnet-4-20250514-thinking":         1.5,
 	"claude-sonnet-4-5-20250929":                1.5,
+	"claude-sonnet-4-5-20250929-thinking":       1.5,
+	"claude-sonnet-4-6":                         1.5,
 	"claude-opus-4-5-20251101":                  2.5,
+	"claude-opus-4-5-20251101-thinking":         2.5,
 	"claude-opus-4-6":                           2.5,
 	"claude-opus-4-6-max":                       2.5,
 	"claude-opus-4-6-high":                      2.5,
@@ -269,15 +277,26 @@ var defaultModelRatio = map[string]float64{
 	"claude-opus-4-7-high":                      2.5,
 	"claude-opus-4-7-medium":                    2.5,
 	"claude-opus-4-7-low":                       2.5,
+	"claude-opus-4-7-thinking":                  2.5,
 	"claude-opus-4-8":                           2.5,
 	"claude-opus-4-8-max":                       2.5,
 	"claude-opus-4-8-xhigh":                     2.5,
 	"claude-opus-4-8-high":                      2.5,
 	"claude-opus-4-8-medium":                    2.5,
 	"claude-opus-4-8-low":                       2.5,
+	"claude-opus-4-8-thinking":                  2.5,
+	"claude-opus-5":                             2.5, // $5 / 1M tokens
+	"claude-opus-5-max":                         2.5,
+	"claude-opus-5-xhigh":                       2.5,
+	"claude-opus-5-high":                        2.5,
+	"claude-opus-5-medium":                      2.5,
+	"claude-opus-5-low":                         2.5,
+	"claude-opus-5-thinking":                    2.5,
 	"claude-3-opus-20240229":                    7.5, // $15 / 1M tokens
 	"claude-opus-4-20250514":                    7.5,
+	"claude-opus-4-20250514-thinking":           7.5,
 	"claude-opus-4-1-20250805":                  7.5,
+	"claude-opus-4-1-20250805-thinking":         7.5,
 	"ERNIE-4.0-8K":                              0.120 * RMB,
 	"ERNIE-3.5-8K":                              0.012 * RMB,
 	"ERNIE-3.5-8K-0205":                         0.024 * RMB,
@@ -297,6 +316,14 @@ var defaultModelRatio = map[string]float64{
 	"PaLM-2":                                    1,
 	"gemini-1.5-pro-latest":                     1.25, // $3.5 / 1M tokens
 	"gemini-1.5-flash-latest":                   0.075,
+	"gemini-3.6-flash":                          0.75,
+	"gemini-3.5-flash":                          0.75,
+	"gemini-3.5-flash-lite":                     0.15,
+	"gemini-3.1-flash-lite":                     0.125,
+	"gemini-3-flash-preview":                    0.25,
+	"gemini-flash-latest":                       0.75,
+	"gemini-flash-lite-latest":                  0.15,
+	"gemini-pro-latest":                         1,
 	"gemini-2.0-flash":                          0.05,
 	"gemini-2.5-pro-exp-03-25":                  0.625,
 	"gemini-2.5-pro-preview-03-25":              0.625,
@@ -312,8 +339,21 @@ var defaultModelRatio = map[string]float64{
 	"gemini-2.5-flash-lite-preview-thinking-*":  0.05,
 	"gemini-2.5-flash-lite-preview-06-17":       0.05,
 	"gemini-2.5-flash":                          0.15,
+	"gemini-2.5-flash-lite":                     0.05,
+	"gemini-2.5-flash-image":                    0.15,
+	"gemini-3.1-flash-image":                    0.25,
+	"gemini-3.1-flash-lite-image":               0.125,
+	"gemini-3-pro-image":                        1,
+	"gemini-2.5-flash-preview-tts":              0.25,
+	"gemini-2.5-pro-preview-tts":                0.5,
+	"gemini-3.1-flash-tts-preview":              0.5,
+	"gemini-2.5-computer-use-preview-10-2025":   0.625,
+	"gemini-3.1-pro-preview":                    1,
+	"gemini-3.1-pro-preview-customtools":        1,
 	"gemini-robotics-er-1.5-preview":            0.15,
+	"gemini-robotics-er-1.6-preview":            0.5,
 	"gemini-embedding-001":                      0.075,
+	"gemini-embedding-2":                        0.1,
 	"text-embedding-004":                        0.001,
 	"chatglm_turbo":                             0.3572,     // ￥0.005 / 1k tokens
 	"chatglm_pro":                               0.7143,     // ￥0.01 / 1k tokens
@@ -341,43 +381,96 @@ var defaultModelRatio = map[string]float64{
 	"hunyuan":                                   7.143, // ¥0.1 / 1k tokens  // https://cloud.tencent.com/document/product/1729/97731#e0e6be58-60c8-469f-bdeb-6c264ce3b4d0
 	// https://platform.lingyiwanwu.com/docs#-计费单元
 	// 已经按照 7.2 来换算美元价格
-	"yi-34b-chat-0205":       0.18,
-	"yi-34b-chat-200k":       0.864,
-	"yi-vl-plus":             0.432,
-	"yi-large":               20.0 / 1000 * RMB,
-	"yi-medium":              2.5 / 1000 * RMB,
-	"yi-vision":              6.0 / 1000 * RMB,
-	"yi-medium-200k":         12.0 / 1000 * RMB,
-	"yi-spark":               1.0 / 1000 * RMB,
-	"yi-large-rag":           25.0 / 1000 * RMB,
-	"yi-large-turbo":         12.0 / 1000 * RMB,
-	"yi-large-preview":       20.0 / 1000 * RMB,
-	"yi-large-rag-preview":   25.0 / 1000 * RMB,
-	"command":                0.5,
-	"command-nightly":        0.5,
-	"command-light":          0.5,
-	"command-light-nightly":  0.5,
-	"command-r":              0.25,
-	"command-r-plus":         1.5,
-	"command-r-08-2024":      0.075,
-	"command-r-plus-08-2024": 1.25,
-	"deepseek-chat":          0.27 / 2,
-	"deepseek-coder":         0.27 / 2,
-	"deepseek-reasoner":      0.55 / 2, // 0.55 / 1k tokens
-	// Perplexity online 模型对搜索额外收费，有需要应自行调整，此处不计入搜索费用
-	"llama-3-sonar-small-32k-chat":   0.2 / 1000 * USD,
-	"llama-3-sonar-small-32k-online": 0.2 / 1000 * USD,
-	"llama-3-sonar-large-32k-chat":   1 / 1000 * USD,
-	"llama-3-sonar-large-32k-online": 1 / 1000 * USD,
-	// grok
-	"grok-3-beta":           1.5,
-	"grok-3-mini-beta":      0.15,
-	"grok-2":                1,
-	"grok-2-vision":         1,
-	"grok-beta":             2.5,
-	"grok-vision-beta":      2.5,
-	"grok-3-fast-beta":      2.5,
-	"grok-3-mini-fast-beta": 0.3,
+	"yi-34b-chat-0205":      0.18,
+	"yi-34b-chat-200k":      0.864,
+	"yi-vl-plus":            0.432,
+	"yi-large":              20.0 / 1000 * RMB,
+	"yi-medium":             2.5 / 1000 * RMB,
+	"yi-vision":             6.0 / 1000 * RMB,
+	"yi-medium-200k":        12.0 / 1000 * RMB,
+	"yi-spark":              1.0 / 1000 * RMB,
+	"yi-large-rag":          25.0 / 1000 * RMB,
+	"yi-large-turbo":        12.0 / 1000 * RMB,
+	"yi-large-preview":      20.0 / 1000 * RMB,
+	"yi-large-rag-preview":  25.0 / 1000 * RMB,
+	"command":               0.5,
+	"command-nightly":       0.5,
+	"command-light":         0.5,
+	"command-light-nightly": 0.5,
+	"command-r":             0.25,
+	"command-r-plus":        1.5,
+	// Cohere documents these models as free on the standard API until its
+	// published rate limits are reached. Dedicated Model Vault deployments use
+	// contract pricing and should override these defaults.
+	"command-a-plus-05-2026":             0,
+	"command-a-translate-08-2025":        0,
+	"command-a-reasoning-08-2025":        0,
+	"command-a-vision-07-2025":           0,
+	"north-mini-code-1-0":                0,
+	"command-a-03-2025":                  1.25,
+	"command-r7b-12-2024":                0.01875,
+	"command-r-08-2024":                  0.075,
+	"command-r-plus-08-2024":             1.25,
+	"c4ai-aya-expanse-32b":               0.25,
+	"deepseek-chat":                      0.14 / 2,
+	"deepseek-coder":                     0.27 / 2,
+	"deepseek-reasoner":                  0.14 / 2,
+	"deepseek-v4-flash":                  0.14 / 2,
+	"deepseek-v4-pro":                    0.435 / 2,
+	"jina-embeddings-v2-base-en":         0.05 / 2,
+	"jina-embeddings-v2-base-zh":         0.05 / 2,
+	"jina-embeddings-v2-base-de":         0.05 / 2,
+	"jina-embeddings-v2-base-es":         0.05 / 2,
+	"jina-embeddings-v2-base-code":       0.05 / 2,
+	"jina-embeddings-v3":                 0.05 / 2,
+	"jina-embeddings-v4":                 0.05 / 2,
+	"jina-embeddings-v5-text-nano":       0.02 / 2,
+	"jina-embeddings-v5-text-small":      0.05 / 2,
+	"jina-embeddings-v5-omni-nano":       0.02 / 2,
+	"jina-embeddings-v5-omni-small":      0.05 / 2,
+	"jina-code-embeddings-0.5b":          0.05 / 2,
+	"jina-code-embeddings-1.5b":          0.05 / 2,
+	"jina-clip-v1":                       0.05 / 2,
+	"jina-clip-v2":                       0.05 / 2,
+	"jina-colbert-v1-en":                 0.05 / 2,
+	"jina-colbert-v2":                    0.05 / 2,
+	"elser-v2":                           0.05 / 2,
+	"jina-reranker-v1-tiny-en":           0.05 / 2,
+	"jina-reranker-v1-turbo-en":          0.05 / 2,
+	"jina-reranker-v1-base-en":           0.05 / 2,
+	"jina-reranker-v2-base-multilingual": 0.05 / 2,
+	"jina-reranker-m0":                   0.05 / 2,
+	"jina-reranker-v3":                   0.05 / 2,
+	"jina-reranker-v3.5":                 0.05 / 2,
+	// Perplexity Sonar token prices. Per-request and research/search-query
+	// charges are reserved separately and reconciled from usage.cost.
+	"sonar":               0.5,
+	"sonar-pro":           1.5,
+	"sonar-reasoning-pro": 1,
+	"sonar-deep-research": 1,
+	// Current xAI text models. Priority and prompts over 200K tokens are
+	// dynamic multipliers applied only on first-party xAI channels.
+	"grok-4.5":                       1,
+	"grok-4.5-latest":                1,
+	"grok-4.3":                       0.625,
+	"grok-4.3-latest":                0.625,
+	"grok-latest":                    0.625,
+	"grok-4.20-0309-reasoning":       0.625,
+	"grok-4.20-0309":                 0.625,
+	"grok-4.20-reasoning":            0.625,
+	"grok-4.20-reasoning-latest":     0.625,
+	"grok-4.20":                      0.625,
+	"grok-4.20-0309-non-reasoning":   0.625,
+	"grok-4.20-non-reasoning":        0.625,
+	"grok-4.20-non-reasoning-latest": 0.625,
+	"grok-4.20-multi-agent-0309":     0.625,
+	"grok-4.20-multi-agent":          0.625,
+	"grok-4.20-multi-agent-latest":   0.625,
+	"grok-build-0.1":                 0.5,
+	"grok-build-latest":              0.5,
+	"grok-code-fast-1":               0.5,
+	"grok-code-fast":                 0.5,
+	"grok-code-fast-1-0825":          0.5,
 	// submodel
 	"NousResearch/Hermes-4-405B-FP8":          0.8,
 	"Qwen/Qwen3-235B-A22B-Thinking-2507":      0.6,
@@ -392,11 +485,21 @@ var defaultModelRatio = map[string]float64{
 }
 
 var defaultModelPrice = map[string]float64{
+	// Cohere Rerank prices are USD per search unit. Cohere defines the public
+	// rates per 1,000 searches; settlement multiplies these values by the
+	// provider-reported billed_units.search_units.
+	"rerank-v4.0-fast":               2.0 / 1000,
+	"rerank-v4.0-pro":                2.5 / 1000,
+	"grok-imagine-image-quality":     0.05,
+	"grok-imagine-image":             0.02,
 	"suno_music":                     0.1,
 	"suno_lyrics":                    0.01,
 	"dall-e-3":                       0.04,
 	"dall-e-2":                       0.02,
 	"imagen-3.0-generate-002":        0.03,
+	"imagen-4.0-fast-generate-001":   0.02,
+	"imagen-4.0-generate-001":        0.04,
+	"imagen-4.0-ultra-generate-001":  0.06,
 	"black-forest-labs/flux-1.1-pro": 0.04,
 	"gpt-4-gizmo-*":                  0.1,
 	"mj_video":                       0.8,
@@ -421,8 +524,12 @@ var defaultModelPrice = map[string]float64{
 	"sora-2-pro":                     0.5,
 	"veo-3.0-generate-001":           0.4,
 	"veo-3.0-fast-generate-001":      0.15,
+	"veo-3.1-generate-001":           0.4,
+	"veo-3.1-fast-generate-001":      0.1,
+	"veo-3.1-lite-generate-001":      0.05,
 	"veo-3.1-generate-preview":       0.4,
-	"veo-3.1-fast-generate-preview":  0.15,
+	"veo-3.1-fast-generate-preview":  0.1,
+	"veo-3.1-lite-generate-preview":  0.05,
 }
 
 var defaultAudioRatio = map[string]float64{
@@ -496,29 +603,88 @@ var modelRatioMap = types.NewRWMap[string, float64]()
 var completionRatioMap = types.NewRWMap[string, float64]()
 
 var defaultCompletionRatio = map[string]float64{
-	"gpt-4-gizmo-*":          2,
-	"gpt-4o-gizmo-*":         3,
-	"gpt-4-all":              2,
-	"gpt-image-1":            8,
-	"gpt-image-1-mini":       4,
-	"gpt-image-1.5":          6.4,
-	"chatgpt-image-latest":   6.4,
-	"gpt-image-2":            6,
-	"gpt-image-2-2026-04-21": 6,
-	"gpt-5.1":                8,
-	"gpt-5.1-2025-11-13":     8,
-	"gpt-5.1-chat-latest":    8,
-	"gpt-5.1-codex":          8,
-	"gpt-5.1-codex-mini":     8,
-	"gpt-5.1-codex-max":      8,
-	"gpt-5.2":                8,
-	"gpt-5.2-2025-12-11":     8,
-	"gpt-5.2-chat-latest":    8,
-	"gpt-5.2-codex":          8,
-	"gpt-5.2-pro":            8,
-	"gpt-5.2-pro-2025-12-11": 8,
-	"gpt-5.3-chat-latest":    8,
-	"gpt-5.3-codex":          8,
+	"c4ai-aya-expanse-32b":                    3,
+	"sonar":                                   1,
+	"sonar-pro":                               5,
+	"sonar-reasoning-pro":                     4,
+	"sonar-deep-research":                     4,
+	"grok-4.5":                                3,
+	"grok-4.5-latest":                         3,
+	"grok-4.3":                                2,
+	"grok-4.3-latest":                         2,
+	"grok-latest":                             2,
+	"grok-4.20-0309-reasoning":                2,
+	"grok-4.20-0309":                          2,
+	"grok-4.20-reasoning":                     2,
+	"grok-4.20-reasoning-latest":              2,
+	"grok-4.20":                               2,
+	"grok-4.20-0309-non-reasoning":            2,
+	"grok-4.20-non-reasoning":                 2,
+	"grok-4.20-non-reasoning-latest":          2,
+	"grok-4.20-multi-agent-0309":              2,
+	"grok-4.20-multi-agent":                   2,
+	"grok-4.20-multi-agent-latest":            2,
+	"grok-build-0.1":                          2,
+	"grok-build-latest":                       2,
+	"grok-code-fast-1":                        2,
+	"grok-code-fast":                          2,
+	"grok-code-fast-1-0825":                   2,
+	"gpt-4-gizmo-*":                           2,
+	"gpt-4o-gizmo-*":                          3,
+	"gpt-4-all":                               2,
+	"gpt-image-1":                             8,
+	"gpt-image-1-mini":                        4,
+	"gpt-image-1.5":                           6.4,
+	"chatgpt-image-latest":                    6.4,
+	"gpt-image-2":                             6,
+	"gpt-image-2-2026-04-21":                  6,
+	"gpt-5.1":                                 8,
+	"gpt-5.1-2025-11-13":                      8,
+	"gpt-5.1-chat-latest":                     8,
+	"gpt-5.1-codex":                           8,
+	"gpt-5.1-codex-mini":                      8,
+	"gpt-5.1-codex-max":                       8,
+	"gpt-5.2":                                 8,
+	"gpt-5.2-2025-12-11":                      8,
+	"gpt-5.2-chat-latest":                     8,
+	"gpt-5.2-codex":                           8,
+	"gpt-5.2-pro":                             8,
+	"gpt-5.2-pro-2025-12-11":                  8,
+	"gpt-5.3-chat-latest":                     8,
+	"gpt-5.3-codex":                           8,
+	"gemini-flash-latest":                     5,
+	"gemini-flash-lite-latest":                2.5 / 0.3,
+	"gemini-pro-latest":                       6,
+	"gemini-3.6-flash":                        5,
+	"gemini-3.5-flash":                        6,
+	"gemini-3.5-flash-lite":                   2.5 / 0.3,
+	"gemini-3.1-flash-lite":                   6,
+	"gemini-3-flash-preview":                  6,
+	"gemini-2.5-flash-image":                  2.5 / 0.3,
+	"gemini-3.1-flash-image":                  6,
+	"gemini-3.1-flash-lite-image":             6,
+	"gemini-3-pro-image":                      6,
+	"gemini-2.5-computer-use-preview-10-2025": 8,
+	"gemini-2.5-flash-preview-tts":            20,
+	"gemini-2.5-pro-preview-tts":              20,
+	"gemini-3.1-flash-tts-preview":            20,
+	"gemini-3.1-pro-preview":                  6,
+	"gemini-3.1-pro-preview-customtools":      6,
+	"gemini-robotics-er-1.6-preview":          5,
+	"claude-fable-5":                          5,
+	"claude-mythos-5":                         5,
+	"claude-sonnet-5":                         5,
+	"claude-opus-5":                           5,
+	"claude-opus-5-max":                       5,
+	"claude-opus-5-xhigh":                     5,
+	"claude-opus-5-high":                      5,
+	"claude-opus-5-medium":                    5,
+	"claude-opus-5-low":                       5,
+	"claude-opus-5-thinking":                  5,
+	"deepseek-chat":                           2,
+	"deepseek-reasoner":                       2,
+	"deepseek-v4-flash":                       2,
+	"deepseek-v4-pro":                         2,
 }
 
 // InitRatioSettings initializes all model related settings maps
@@ -542,6 +708,9 @@ func ModelPrice2JSONString() string {
 }
 
 func UpdateModelPriceByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(modelPriceMap, jsonStr, InvalidateExposedDataCache)
 }
 
@@ -571,6 +740,9 @@ func GetModelPrice(name string, printErr bool) (float64, bool) {
 }
 
 func UpdateModelRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(modelRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
@@ -593,7 +765,8 @@ func GetModelRatio(name string) (float64, bool, string) {
 			}
 			//return 0, true, name
 		}
-		return 37.5, operation_setting.SelfUseModeEnabled, name
+		selfUseModeEnabled := common.GetLegacyOptionBool("SelfUseModeEnabled", &operation_setting.SelfUseModeEnabled)
+		return 37.5, selfUseModeEnabled, name
 	}
 	return ratio, true, name
 }
@@ -631,6 +804,9 @@ func CompletionRatio2JSONString() string {
 }
 
 func UpdateCompletionRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(completionRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
@@ -870,6 +1046,9 @@ func ImageRatio2JSONString() string {
 }
 
 func UpdateImageRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonString(imageRatioMap, jsonStr)
 }
 
@@ -886,6 +1065,9 @@ func AudioRatio2JSONString() string {
 }
 
 func UpdateAudioRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(audioRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
@@ -894,6 +1076,9 @@ func AudioCompletionRatio2JSONString() string {
 }
 
 func UpdateAudioCompletionRatioByJSONString(jsonStr string) error {
+	if err := CheckRatioMap(jsonStr); err != nil {
+		return err
+	}
 	return types.LoadFromJsonStringWithCallback(audioCompletionRatioMap, jsonStr, InvalidateExposedDataCache)
 }
 
@@ -923,6 +1108,7 @@ func GetAudioCompletionRatioCopy() map[string]float64 {
 
 // 转换模型名，减少渠道必须配置各种带参数模型
 func FormatMatchingModelName(name string) string {
+	name = reasoning.NormalizeDeepSeekV4PricingModel(name)
 
 	if strings.HasPrefix(name, "gemini-2.5-flash-lite") {
 		name = handleThinkingBudgetModel(name, "gemini-2.5-flash-lite", "gemini-2.5-flash-lite-thinking-*")

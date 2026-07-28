@@ -236,6 +236,17 @@ func executeRequestSpec(c *gin.Context, info *relaycommon.RelayInfo, from types.
 }
 
 func executeRequestSteps(c *gin.Context, info *relaycommon.RelayInfo, from types.RelayFormat, target types.RelayFormat, request any, converter string, quality RequestConverterQuality, specs []RequestConverterSpec) (*RequestResult, error) {
+	if from == types.RelayFormatOpenAIResponses &&
+		(target == types.RelayFormatClaude || target == types.RelayFormatGemini) {
+		responsesRequest, err := oairesponses.OpenAIResponsesRequestFromAny(request)
+		if err != nil {
+			return nil, err
+		}
+		if err := oairesponses.ValidateToolsForConversion(responsesRequest.Tools, string(target)); err != nil {
+			return nil, err
+		}
+	}
+
 	current := request
 	steps := make([]RequestStep, 0, len(specs))
 	for _, spec := range specs {
@@ -425,7 +436,7 @@ func convertClaudeRequestToOpenAI(_ *gin.Context, info *relaycommon.RelayInfo, r
 	return claudemessages.ClaudeMessagesRequestToOpenAIChat(*claudeRequest, info)
 }
 
-func convertOpenAIRequestToClaude(c *gin.Context, _ *relaycommon.RelayInfo, request any) (any, error) {
+func convertOpenAIRequestToClaude(c *gin.Context, info *relaycommon.RelayInfo, request any) (any, error) {
 	openAIRequest, ok := request.(*dto.GeneralOpenAIRequest)
 	if !ok {
 		if value, ok := request.(dto.GeneralOpenAIRequest); ok {
@@ -435,7 +446,21 @@ func convertOpenAIRequestToClaude(c *gin.Context, _ *relaycommon.RelayInfo, requ
 	if openAIRequest == nil {
 		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", request)
 	}
-	return oaichat.OpenAIChatRequestToClaudeMessages(c, *openAIRequest)
+	claudeRequest, err := oaichat.OpenAIChatRequestToClaudeMessages(c, *openAIRequest)
+	if err != nil {
+		return nil, err
+	}
+	if info != nil {
+		info.EffectiveClaudeWebSearchMaxUses = nil
+		maxUses, found, err := dto.ClaudeWebSearchMaxUses(claudeRequest.Tools)
+		if err != nil {
+			return nil, fmt.Errorf("preserve converted Claude web search max_uses: %w", err)
+		}
+		if found {
+			info.EffectiveClaudeWebSearchMaxUses = &maxUses
+		}
+	}
+	return claudeRequest, nil
 }
 
 func convertGeminiRequestToOpenAI(_ *gin.Context, info *relaycommon.RelayInfo, request any) (any, error) {

@@ -107,7 +107,7 @@ func buildChannelListQuery(group string, statusFilter int, typeFilter int) *gorm
 
 func GetChannelOps(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
-		"retry_times": common.RetryTimes,
+		"retry_times": common.GetLegacyOptionInt("RetryTimes", &common.RetryTimes),
 	})
 }
 
@@ -248,7 +248,7 @@ func FetchUpstreamModels(c *gin.Context) {
 		return
 	}
 
-	ids, err := fetchChannelUpstreamModelIDs(channel)
+	ids, err := fetchChannelUpstreamModelIDs(c.Request.Context(), channel)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -374,16 +374,13 @@ func SearchChannels(c *gin.Context) {
 	if pageSize <= 0 {
 		pageSize = 20
 	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
 
 	total := len(channelData)
-	startIdx := (page - 1) * pageSize
-	if startIdx > total {
-		startIdx = total
-	}
-	endIdx := startIdx + pageSize
-	if endIdx > total {
-		endIdx = total
-	}
+	pageInfo := common.PageInfo{Page: page, PageSize: pageSize}
+	startIdx, endIdx := pageInfo.GetBounds(total)
 
 	pagedData := channelData[startIdx:endIdx]
 
@@ -857,7 +854,8 @@ func EditTagChannels(c *gin.Context) {
 	}
 	if channelTag.ParamOverride != nil {
 		trimmed := strings.TrimSpace(*channelTag.ParamOverride)
-		if trimmed != "" && !json.Valid([]byte(trimmed)) {
+		var decoded any
+		if trimmed != "" && common.UnmarshalJsonStr(trimmed, &decoded) != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "参数覆盖必须是合法的 JSON 格式",
@@ -868,7 +866,8 @@ func EditTagChannels(c *gin.Context) {
 	}
 	if channelTag.HeaderOverride != nil {
 		trimmed := strings.TrimSpace(*channelTag.HeaderOverride)
-		if trimmed != "" && !json.Valid([]byte(trimmed)) {
+		var decoded any
+		if trimmed != "" && common.UnmarshalJsonStr(trimmed, &decoded) != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "请求头覆盖必须是合法的 JSON 格式",
@@ -987,6 +986,39 @@ func UpdateChannel(c *gin.Context) {
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
 		return
+	}
+
+	// Channel.Update protects active asynchronous tasks by comparing the full
+	// upstream routing/account identity. Preserve fields omitted by this PATCH
+	// request so they cannot look like zero-value identity changes, while
+	// retaining explicit type 0 and explicit empty/null values. An empty key has
+	// historically meant "keep the existing secret" in this endpoint.
+	if _, present := requestData["type"]; !present {
+		channel.Type = originChannel.Type
+	}
+	if _, present := requestData["key"]; !present || channel.Key == "" {
+		channel.Key = originChannel.Key
+	}
+	if _, present := requestData["base_url"]; !present {
+		channel.BaseURL = originChannel.BaseURL
+	}
+	if _, present := requestData["openai_organization"]; !present {
+		channel.OpenAIOrganization = originChannel.OpenAIOrganization
+	}
+	if _, present := requestData["other"]; !present {
+		channel.Other = originChannel.Other
+	}
+	if _, present := requestData["setting"]; !present {
+		channel.Setting = originChannel.Setting
+	}
+	if _, present := requestData["settings"]; !present {
+		channel.OtherSettings = originChannel.OtherSettings
+	}
+	if _, present := requestData["header_override"]; !present {
+		channel.HeaderOverride = originChannel.HeaderOverride
+	}
+	if _, present := requestData["param_override"]; !present {
+		channel.ParamOverride = originChannel.ParamOverride
 	}
 
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
@@ -1209,7 +1241,7 @@ func FetchModels(c *gin.Context) {
 	key = strings.Split(key, "\n")[0]
 
 	if req.Type == constant.ChannelTypeOllama {
-		models, err := ollama.FetchOllamaModels(baseURL, key)
+		models, err := ollama.FetchOllamaModels(c.Request.Context(), baseURL, key)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
@@ -1231,7 +1263,7 @@ func FetchModels(c *gin.Context) {
 	}
 
 	if req.Type == constant.ChannelTypeGemini {
-		models, err := gemini.FetchGeminiModels(baseURL, key, "")
+		models, err := gemini.FetchGeminiModels(c.Request.Context(), baseURL, key, "")
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
@@ -1247,21 +1279,26 @@ func FetchModels(c *gin.Context) {
 		return
 	}
 
-	client := &http.Client{}
 	url := fmt.Sprintf("%s/v1/models", baseURL)
 
-	request, err := http.NewRequest("GET", url, nil)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": service.SanitizeNetworkError(err).Error(),
 		})
 		return
 	}
 
 	request.Header.Set("Authorization", "Bearer "+key)
 
-	response, err := client.Do(request)
+	client := service.GetHttpClient()
+	if client == nil {
+		client = service.GetHttpClientWithTimeout(30 * time.Second)
+	}
+	response, err := service.DoUpstreamRequest(client, request)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -1269,6 +1306,7 @@ func FetchModels(c *gin.Context) {
 		})
 		return
 	}
+	defer response.Body.Close()
 	//check status code
 	if response.StatusCode != http.StatusOK {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1277,15 +1315,21 @@ func FetchModels(c *gin.Context) {
 		})
 		return
 	}
-	defer response.Body.Close()
-
 	var result struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
 
-	if err := common.DecodeJson(response.Body, &result); err != nil {
+	body, err := service.ReadUpstreamResponseBody(response.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	if err := common.Unmarshal(body, &result); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -1522,6 +1566,16 @@ func ManageMultiKeys(c *gin.Context) {
 		if pageSize <= 0 {
 			pageSize = 50 // Default page size
 		}
+		if pageSize > 100 {
+			pageSize = 100
+		}
+		if request.Status != nil &&
+			*request.Status != common.ChannelStatusEnabled &&
+			*request.Status != common.ChannelStatusManuallyDisabled &&
+			*request.Status != common.ChannelStatusAutoDisabled {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
 
 		// Statistics for all keys (unchanged by filtering)
 		var enabledCount, manualDisabledCount, autoDisabledCount int
@@ -1587,7 +1641,10 @@ func ManageMultiKeys(c *gin.Context) {
 
 		// Calculate pagination based on filtered results
 		filteredTotal := len(filteredKeyStatusList)
-		totalPages := (filteredTotal + pageSize - 1) / pageSize
+		totalPages := filteredTotal / pageSize
+		if filteredTotal%pageSize != 0 {
+			totalPages++
+		}
 		if totalPages == 0 {
 			totalPages = 1
 		}
@@ -1595,12 +1652,8 @@ func ManageMultiKeys(c *gin.Context) {
 			page = totalPages
 		}
 
-		// Calculate range for current page
-		start := (page - 1) * pageSize
-		end := start + pageSize
-		if end > filteredTotal {
-			end = filteredTotal
-		}
+		pageInfo := common.PageInfo{Page: page, PageSize: pageSize}
+		start, end := pageInfo.GetBounds(filteredTotal)
 
 		// Get the page data
 		var pageKeyStatusList []KeyStatus
@@ -1990,7 +2043,7 @@ func OllamaPullModel(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	err = ollama.PullOllamaModel(baseURL, key, req.ModelName)
+	err = ollama.PullOllamaModel(c.Request.Context(), baseURL, key, req.ModelName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -2068,7 +2121,7 @@ func OllamaPullModelStream(c *gin.Context) {
 	}
 
 	// 执行拉取
-	err = ollama.PullOllamaModelStream(baseURL, key, req.ModelName, progressCallback)
+	err = ollama.PullOllamaModelStream(c.Request.Context(), baseURL, key, req.ModelName, progressCallback)
 
 	if err != nil {
 		errorData, _ := common.Marshal(gin.H{
@@ -2135,7 +2188,7 @@ func OllamaDeleteModel(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	err = ollama.DeleteOllamaModel(baseURL, key, req.ModelName)
+	err = ollama.DeleteOllamaModel(c.Request.Context(), baseURL, key, req.ModelName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -2184,7 +2237,7 @@ func OllamaVersion(c *gin.Context) {
 	}
 
 	key := strings.Split(channel.Key, "\n")[0]
-	version, err := ollama.FetchOllamaVersion(baseURL, key)
+	version, err := ollama.FetchOllamaVersion(c.Request.Context(), baseURL, key)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,

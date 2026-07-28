@@ -62,8 +62,8 @@ func requestOpenAI2Zhipu(request dto.GeneralOpenAIRequest) (*dto.GeneralOpenAIRe
 		ToolChoice:      request.ToolChoice,
 		THINKING:        request.THINKING,
 	}
-	if request.MaxTokens != nil || request.MaxCompletionTokens != nil {
-		maxTokens := request.GetMaxTokens()
+	if requestedMaxTokens := request.GetMaxTokensPointer(); requestedMaxTokens != nil {
+		maxTokens := *requestedMaxTokens
 		out.MaxTokens = &maxTokens
 	}
 	return out, nil

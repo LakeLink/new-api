@@ -3,8 +3,8 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +21,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -40,7 +41,7 @@ var (
 )
 
 func Login(c *gin.Context) {
-	if !common.PasswordLoginEnabled {
+	if !common.GetLegacyOptionBool("PasswordLoginEnabled", &common.PasswordLoginEnabled) {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordLoginDisabled)
 		return
 	}
@@ -64,7 +65,7 @@ func Login(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, model.ErrDatabase):
-			common.SysLog(fmt.Sprintf("Login database error for user %s: %v", username, err))
+			common.SysLog(fmt.Sprintf("Login database error: %v", err))
 			common.ApiErrorI18n(c, i18n.MsgDatabaseError)
 		case errors.Is(err, model.ErrUserEmptyCredentials):
 			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
@@ -74,10 +75,33 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// 检查是否启用2FA
-	if model.IsTwoFAEnabled(user.Id) {
+	// A failed 2FA lookup must stop authentication. Treating a database error as
+	// "2FA disabled" would let a password-only login bypass the second factor.
+	twoFAEnabled, err := model.IsTwoFAEnabled(user.Id)
+	if err != nil {
+		common.SysLog(fmt.Sprintf("Login 2FA lookup error for user %d: %v", user.Id, err))
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return
+	}
+	if twoFAEnabled {
 		// 设置pending session，等待2FA验证
 		session := sessions.Default(c)
+		previousUserID, previousUserIDOK := session.Get("id").(int)
+		previousSessionID, previousSessionIDOK := session.Get(
+			constant.SessionKeyBrowserSessionID,
+		).(string)
+		if previousUserIDOK &&
+			previousUserID > 0 &&
+			previousSessionIDOK &&
+			previousSessionID != "" {
+			if err := model.RevokeBrowserSession(
+				previousUserID,
+				previousSessionID,
+			); err != nil {
+				common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+				return
+			}
+		}
 		session.Clear()
 		session.Set("pending_username", user.Username)
 		session.Set("pending_user_id", user.Id)
@@ -141,8 +165,23 @@ func recordLoginAudit(user *model.User, c *gin.Context) {
 
 // setup session & cookies and then return user info
 func setupLogin(user *model.User, c *gin.Context) {
-	model.UpdateUserLastLoginAt(user.Id)
 	session := sessions.Default(c)
+	previousUserID, _ := session.Get("id").(int)
+	previousSessionID, _ := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	now := time.Now().Unix()
+	browserSessionID, err := model.RotateBrowserSession(
+		user.Id,
+		previousUserID,
+		previousSessionID,
+		now,
+	)
+	if err != nil {
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return
+	}
+	model.UpdateUserLastLoginAt(user.Id)
 	// Rotate all application session state at the authentication boundary. The
 	// cookie store is signed but client-side, so retaining pre-login state would
 	// otherwise allow pending or step-up markers to survive account changes.
@@ -153,10 +192,21 @@ func setupLogin(user *model.User, c *gin.Context) {
 	session.Set("status", user.Status)
 	session.Set("group", user.Group)
 	session.Set("session_version", user.SessionVersion)
-	err := session.Save()
+	session.Set(constant.SessionKeyBrowserSessionID, browserSessionID)
+	err = session.Save()
 	if err != nil {
+		if revokeErr := model.RevokeBrowserSession(user.Id, browserSessionID); revokeErr != nil {
+			common.SysLog("failed to revoke browser session after cookie save error: " + revokeErr.Error())
+		}
 		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
 		return
+	}
+	if gin.Mode() != gin.TestMode {
+		gopool.Go(func() {
+			if _, cleanupErr := model.CleanupExpiredBrowserSessions(now); cleanupErr != nil {
+				common.SysLog("failed to clean expired browser sessions: " + cleanupErr.Error())
+			}
+		})
 	}
 	recordLoginAudit(user, c)
 	c.JSON(http.StatusOK, gin.H{
@@ -179,9 +229,22 @@ func getCurrentSessionUser(c *gin.Context) (*model.User, error) {
 	if !ok || id == 0 {
 		return nil, errSessionInvalid
 	}
-	user, err := model.GetUserById(id, false)
+	browserSessionID, ok := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	if !ok || browserSessionID == "" {
+		return nil, errSessionInvalid
+	}
+	user, err := model.GetUserByBrowserSession(
+		id,
+		browserSessionID,
+		time.Now().Unix(),
+	)
 	if err != nil {
 		return nil, err
+	}
+	if user == nil {
+		return nil, errSessionInvalid
 	}
 	version := int64(0)
 	if rawVersion := session.Get("session_version"); rawVersion != nil {
@@ -203,6 +266,16 @@ func getCurrentSessionUser(c *gin.Context) (*model.User, error) {
 
 func Logout(c *gin.Context) {
 	session := sessions.Default(c)
+	userID, userIDOK := session.Get("id").(int)
+	browserSessionID, sessionIDOK := session.Get(
+		constant.SessionKeyBrowserSessionID,
+	).(string)
+	if userIDOK && userID > 0 && sessionIDOK && browserSessionID != "" {
+		if err := model.RevokeBrowserSession(userID, browserSessionID); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+			return
+		}
+	}
 	session.Clear()
 	err := session.Save()
 	if err != nil {
@@ -236,11 +309,11 @@ func LogoutAll(c *gin.Context) {
 }
 
 func Register(c *gin.Context) {
-	if !common.RegisterEnabled {
+	if !common.GetLegacyOptionBool("RegisterEnabled", &common.RegisterEnabled) {
 		common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
 		return
 	}
-	if !common.PasswordRegisterEnabled {
+	if !common.GetLegacyOptionBool("PasswordRegisterEnabled", &common.PasswordRegisterEnabled) {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordRegisterDisabled)
 		return
 	}
@@ -260,7 +333,7 @@ func Register(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserInputInvalid, map[string]any{"Error": err.Error()})
 		return
 	}
-	if common.EmailVerificationEnabled {
+	if common.GetLegacyOptionBool("EmailVerificationEnabled", &common.EmailVerificationEnabled) {
 		if user.Email == "" || user.VerificationCode == "" {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailVerificationRequired)
 			return
@@ -284,7 +357,7 @@ func Register(c *gin.Context) {
 		}
 	}
 	emailForExistCheck := ""
-	if common.EmailVerificationEnabled {
+	if common.GetLegacyOptionBool("EmailVerificationEnabled", &common.EmailVerificationEnabled) {
 		emailForExistCheck = user.Email
 	}
 	exist, err := model.CheckUserExistOrDeleted(user.Username, emailForExistCheck)
@@ -306,7 +379,7 @@ func Register(c *gin.Context) {
 		InviterId:   inviterId,
 		Role:        common.RoleCommonUser, // 明确设置角色为普通用户
 	}
-	if common.EmailVerificationEnabled {
+	if common.GetLegacyOptionBool("EmailVerificationEnabled", &common.EmailVerificationEnabled) {
 		cleanUser.Email = user.Email
 		valid, consumeErr := common.ConsumeVerificationCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose)
 		if consumeErr != nil {
@@ -353,7 +426,7 @@ func Register(c *gin.Context) {
 			UnlimitedQuota:     true,
 			ModelLimitsEnabled: false,
 		}
-		if setting.DefaultUseAutoGroup {
+		if setting.IsDefaultAutoGroupEnabled() {
 			token.Group = "auto"
 		}
 		if err := token.Insert(); err != nil {
@@ -377,7 +450,7 @@ func GetAllUsers(c *gin.Context) {
 		return
 	}
 
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(users)
 
 	common.ApiSuccess(c, pageInfo)
@@ -406,7 +479,7 @@ func SearchUsers(c *gin.Context) {
 		return
 	}
 
-	pageInfo.SetTotal(int(total))
+	pageInfo.SetTotal(total)
 	pageInfo.SetItems(users)
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -443,11 +516,6 @@ func GetUser(c *gin.Context) {
 
 func GenerateAccessToken(c *gin.Context) {
 	id := c.GetInt("id")
-	user, err := model.GetUserById(id, true)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
 	// get rand int 28-32
 	randI := common.GetRandomInt(4)
 	key, err := common.GenerateRandomKey(29 + randI)
@@ -456,22 +524,17 @@ func GenerateAccessToken(c *gin.Context) {
 		common.SysLog("failed to generate key: " + err.Error())
 		return
 	}
-	user.SetAccessToken(key)
-
-	if model.DB.Where("access_token = ?", user.AccessToken).First(user).RowsAffected != 0 {
-		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
+	if err := model.UpdateUserAccessToken(id, key); err != nil {
+		common.SysLog(fmt.Sprintf("failed to rotate access token for user %d: %v", id, err))
+		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
 		return
 	}
-
-	if err := user.Update(false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
+	recordUserSecurityAudit(c, id, "user.access_token_rotate", nil)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user.AccessToken,
+		"data":    key,
 	})
 	return
 }
@@ -502,25 +565,15 @@ func TransferAffQuota(c *gin.Context) {
 
 func GetAffCode(c *gin.Context) {
 	id := c.GetInt("id")
-	user, err := model.GetUserById(id, true)
+	affCode, err := model.GetOrCreateUserAffCode(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if user.AffCode == "" {
-		user.AffCode = common.GetRandomString(4)
-		if err := user.Update(false); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    user.AffCode,
+		"data":    affCode,
 	})
 	return
 }
@@ -694,17 +747,27 @@ func GetUserModels(c *gin.Context) {
 			return
 		}
 
+		models, err := model.GetGroupEnabledModels(group)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "",
-			"data":    model.GetGroupEnabledModels(group),
+			"data":    models,
 		})
 		return
 	}
 
 	var models []string
 	for group := range groups {
-		for _, g := range model.GetGroupEnabledModels(group) {
+		groupModels, err := model.GetGroupEnabledModels(group)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		for _, g := range groupModels {
 			if !common.StringsContains(models, g) {
 				models = append(models, g)
 			}
@@ -940,6 +1003,11 @@ func UpdateSelf(c *gin.Context) {
 		session.Set("session_version", cleanUser.SessionVersion)
 		session.Delete(SecureVerificationSessionKey)
 		session.Delete(secureVerificationMethodSessionKey)
+		session.Delete(secureVerificationUserIDSessionKey)
+		session.Delete(secureVerificationBrowserSessionKey)
+		session.Delete(PasskeyReadySessionKey)
+		session.Delete(passkeyReadyUserIDSessionKey)
+		session.Delete(passkeyReadyBrowserSessionKey)
 		if err := session.Save(); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
 			return
@@ -1010,16 +1078,26 @@ func DeleteUser(c *gin.Context) {
 
 func DeleteSelf(c *gin.Context) {
 	id := c.GetInt("id")
-	user, _ := model.GetUserById(id, false)
+	user, err := model.GetUserById(id, false)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	if user.Role == common.RoleRootUser {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotDeleteRootUser)
 		return
 	}
 
-	err := model.DeleteUserById(id)
+	err = model.DeleteUserById(id)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	session := sessions.Default(c)
+	session.Clear()
+	if err := session.Save(); err != nil {
+		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1045,7 +1123,7 @@ func CreateUser(c *gin.Context) {
 		user.DisplayName = user.Username
 	}
 	myRole := c.GetInt("role")
-	if user.Role >= myRole {
+	if !common.IsValidateRole(user.Role) || user.Role >= myRole {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotCreateHigherLevel)
 		return
 	}
@@ -1119,12 +1197,18 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	if req.Id <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
 	user := model.User{
 		Id: req.Id,
 	}
-	// Fill attributes
-	model.DB.Unscoped().Where(&user).First(&user)
-	if user.Id == 0 {
+	if err := model.DB.Unscoped().First(&user, req.Id).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiError(c, err)
+			return
+		}
 		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
 		return
 	}
@@ -1133,6 +1217,8 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
+	expectedRole := user.Role
+	expectedStatus := user.Status
 	switch req.Action {
 	case "disable":
 		user.Status = common.UserStatusDisabled
@@ -1154,11 +1240,22 @@ func ManageUser(c *gin.Context) {
 			})
 			return
 		}
-		// 删除用户后，强制清理 Redis 中所有该用户令牌的缓存，
-		// 避免已缓存的令牌在 TTL 过期前仍能通过 TokenAuth 校验。
+		if err := model.InvalidateUserCache(user.Id); err != nil {
+			common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", user.Id, err.Error()))
+		}
 		if err := model.InvalidateUserTokensCache(user.Id); err != nil {
 			common.SysLog(fmt.Sprintf("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
 		}
+		recordManageAuditFor(c, user.Id, "user.manage", map[string]interface{}{
+			"action":   req.Action,
+			"username": user.Username,
+			"id":       user.Id,
+		})
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+		})
+		return
 	case "promote":
 		if myRole != common.RoleRootUser {
 			common.ApiErrorI18n(c, i18n.MsgUserAdminCannotPromote)
@@ -1174,7 +1271,7 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgUserCannotDemoteRootUser)
 			return
 		}
-		if user.Role == common.RoleCommonUser {
+		if user.Role <= common.RoleCommonUser {
 			common.ApiErrorI18n(c, i18n.MsgUserAlreadyCommon)
 			return
 		}
@@ -1224,14 +1321,26 @@ func ManageUser(c *gin.Context) {
 			"message": "",
 		})
 		return
+	default:
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
 	}
 
 	authzTouched := false
 	if req.Action == "demote" {
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
-			if err := user.UpdateWithTx(tx, false); err != nil {
+			updated, err := model.UpdateUserAdministrationWithTx(
+				tx,
+				user.Id,
+				expectedRole,
+				expectedStatus,
+				user.Role,
+				user.Status,
+			)
+			if err != nil {
 				return err
 			}
+			user = *updated
 			authzTouched = true
 			return authz.ClearUserAuthorizationInTx(tx, user.Id)
 		}); err != nil {
@@ -1245,16 +1354,21 @@ func ManageUser(c *gin.Context) {
 			}
 		}
 	} else {
-		if err := user.Update(false); err != nil {
+		updated, err := model.UpdateUserAdministration(
+			user.Id,
+			expectedRole,
+			expectedStatus,
+			user.Role,
+			user.Status,
+		)
+		if err != nil {
 			common.ApiError(c, err)
 			return
 		}
+		user = *updated
 	}
-	// 禁用 / 角色调整后，强制失效用户缓存与其全部令牌缓存，
-	// 避免在 Redis TTL 过期前仍使用旧状态（尤其是禁用后仍可发起请求的问题）。
-	// InvalidateUserCache 会让下一次 GetUserCache 从数据库重新加载，
-	// InvalidateUserTokensCache 则确保令牌侧的缓存也同步刷新。
-	if req.Action == "disable" || req.Action == "promote" || req.Action == "demote" {
+	if req.Action == "disable" || req.Action == "enable" ||
+		req.Action == "promote" || req.Action == "demote" {
 		if err := model.InvalidateUserCache(user.Id); err != nil {
 			common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", user.Id, err.Error()))
 		}
@@ -1338,7 +1452,8 @@ var topUpLocks sync.Map
 var topUpCreateLock sync.Mutex
 
 type topUpTryLock struct {
-	ch chan struct{}
+	ch       chan struct{}
+	refCount int
 }
 
 func newTopUpTryLock() *topUpTryLock {
@@ -1362,27 +1477,47 @@ func (l *topUpTryLock) Unlock() {
 }
 
 func getTopUpLock(userID int) *topUpTryLock {
-	if v, ok := topUpLocks.Load(userID); ok {
-		return v.(*topUpTryLock)
-	}
 	topUpCreateLock.Lock()
 	defer topUpCreateLock.Unlock()
 	if v, ok := topUpLocks.Load(userID); ok {
-		return v.(*topUpTryLock)
+		lock := v.(*topUpTryLock)
+		lock.refCount++
+		return lock
 	}
 	l := newTopUpTryLock()
+	l.refCount = 1
 	topUpLocks.Store(userID, l)
 	return l
+}
+
+func releaseTopUpLock(userID int, lock *topUpTryLock, held bool) {
+	if lock == nil {
+		return
+	}
+	if held {
+		lock.Unlock()
+	}
+	topUpCreateLock.Lock()
+	defer topUpCreateLock.Unlock()
+	current, ok := topUpLocks.Load(userID)
+	if !ok || current != lock {
+		return
+	}
+	lock.refCount--
+	if lock.refCount == 0 {
+		topUpLocks.Delete(userID)
+	}
 }
 
 func TopUp(c *gin.Context) {
 	id := c.GetInt("id")
 	lock := getTopUpLock(id)
 	if !lock.TryLock() {
+		releaseTopUpLock(id, lock, false)
 		common.ApiErrorI18n(c, i18n.MsgUserTopUpProcessing)
 		return
 	}
-	defer lock.Unlock()
+	defer releaseTopUpLock(id, lock, true)
 	req := topUpRequest{}
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
@@ -1393,7 +1528,7 @@ func TopUp(c *gin.Context) {
 	if err != nil {
 		// 不向用户暴露兑换失败的细分原因，避免攻击者根据错误类型判断兑换码状态。
 		common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
-		logger.LogError(c, fmt.Sprintf("failed to redeem key %s for user %d: %s", req.Key, id, err.Error()))
+		logger.LogError(c, fmt.Sprintf("failed to redeem key for user %d: %s", id, err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1436,15 +1571,21 @@ func UpdateUserSetting(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgQuotaThresholdGtZero)
 		return
 	}
+	if math.IsNaN(req.QuotaWarningThreshold) ||
+		math.IsInf(req.QuotaWarningThreshold, 0) ||
+		req.QuotaWarningThreshold > float64(common.MaxQuota) {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
 
 	// 如果是webhook类型,验证webhook地址
 	if req.QuotaWarningType == dto.NotifyTypeWebhook {
+		req.WebhookUrl = strings.TrimSpace(req.WebhookUrl)
 		if req.WebhookUrl == "" {
 			common.ApiErrorI18n(c, i18n.MsgSettingWebhookEmpty)
 			return
 		}
-		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.WebhookUrl); err != nil {
+		if _, err := common.ParseAbsoluteHTTPURL(req.WebhookUrl); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgSettingWebhookInvalid)
 			return
 		}
@@ -1461,24 +1602,20 @@ func UpdateUserSetting(c *gin.Context) {
 
 	// 如果是Bark类型，验证Bark URL
 	if req.QuotaWarningType == dto.NotifyTypeBark {
+		req.BarkUrl = strings.TrimSpace(req.BarkUrl)
 		if req.BarkUrl == "" {
 			common.ApiErrorI18n(c, i18n.MsgSettingBarkUrlEmpty)
 			return
 		}
-		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.BarkUrl); err != nil {
+		if _, err := common.ParseAbsoluteHTTPURL(req.BarkUrl); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgSettingBarkUrlInvalid)
-			return
-		}
-		// 检查是否是HTTP或HTTPS
-		if !strings.HasPrefix(req.BarkUrl, "https://") && !strings.HasPrefix(req.BarkUrl, "http://") {
-			common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
 			return
 		}
 	}
 
 	// 如果是Gotify类型，验证Gotify URL和Token
 	if req.QuotaWarningType == dto.NotifyTypeGotify {
+		req.GotifyUrl = strings.TrimSpace(req.GotifyUrl)
 		if req.GotifyUrl == "" {
 			common.ApiErrorI18n(c, i18n.MsgSettingGotifyUrlEmpty)
 			return
@@ -1487,14 +1624,8 @@ func UpdateUserSetting(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgSettingGotifyTokenEmpty)
 			return
 		}
-		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.GotifyUrl); err != nil {
+		if _, err := common.ParseAbsoluteHTTPURL(req.GotifyUrl); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgSettingGotifyUrlInvalid)
-			return
-		}
-		// 检查是否是HTTP或HTTPS
-		if !strings.HasPrefix(req.GotifyUrl, "https://") && !strings.HasPrefix(req.GotifyUrl, "http://") {
-			common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
 			return
 		}
 	}
