@@ -86,6 +86,7 @@ Transitive dependencies should be audited before a final external release.
 | web/default | production  | npm       | `cmdk`                                                | `1.1.1`                              | MIT                                                |
 | web/default | production  | npm       | `date-fns`                                            | `4.1.0`                              | MIT                                                |
 | web/default | production  | npm       | `dayjs`                                               | `1.11.20`                            | MIT                                                |
+| web/default | production  | npm       | `dompurify`                                           | `3.4.12`                             | MPL-2.0 OR Apache-2.0                              |
 | web/default | production  | npm       | `i18next`                                             | `25.10.10`                           | MIT                                                |
 | web/default | production  | npm       | `i18next-browser-languagedetector`                    | `8.2.1`                              | MIT                                                |
 | web/default | production  | npm       | `input-otp`                                           | `1.4.2`                              | MIT                                                |
@@ -150,6 +151,7 @@ Transitive dependencies should be audited before a final external release.
 | web/classic | production  | npm       | `axios`                                               | `1.15.0`                             | MIT                                                |
 | web/classic | production  | npm       | `clsx`                                                | `2.1.1`                              | MIT                                                |
 | web/classic | production  | npm       | `dayjs`                                               | `1.11.13`                            | MIT                                                |
+| web/classic | production  | npm       | `dompurify`                                           | `3.4.12`                             | MPL-2.0 OR Apache-2.0                              |
 | web/classic | production  | npm       | `history`                                             | `5.3.0`                              | MIT                                                |
 | web/classic | production  | npm       | `i18next`                                             | `23.16.8`                            | MIT                                                |
 | web/classic | production  | npm       | `i18next-browser-languagedetector`                    | `7.2.2`                              | MIT                                                |
@@ -165,8 +167,7 @@ Transitive dependencies should be audited before a final external release.
 | web/classic | production  | npm       | `react-i18next`                                       | `13.5.0`                             | MIT                                                |
 | web/classic | production  | npm       | `react-icons`                                         | `5.5.0`                              | MIT                                                |
 | web/classic | production  | npm       | `react-markdown`                                      | `10.1.0`                             | MIT                                                |
-| web/classic | production  | npm       | `react-router-dom`                                    | `6.28.1`                             | MIT                                                |
-| web/classic | production  | npm       | `react-telegram-login`                                | `1.1.2`                              | MIT                                                |
+| web/classic | production  | npm       | `react-router-dom`                                    | `7.18.1`                             | MIT                                                |
 | web/classic | production  | npm       | `react-toastify`                                      | `9.1.3`                              | MIT                                                |
 | web/classic | production  | npm       | `react-turnstile`                                     | `1.1.4`                              | MIT                                                |
 | web/classic | production  | npm       | `rehype-highlight`                                    | `7.0.2`                              | MIT                                                |
@@ -372,4 +373,3 @@ this software, either in source code form or as a compiled binary, for any
 purpose, commercial or non-commercial, and by any means.
 
 For more information, please refer to https://unlicense.org/
-
