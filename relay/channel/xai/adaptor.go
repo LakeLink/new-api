@@ -10,12 +10,12 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/QuantumNous/new-api/relay/constant"
 
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 )
 
 type Adaptor struct {
@@ -38,16 +38,45 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	if info != nil && info.RelayMode == constant.RelayModeImagesEdits {
-		return nil, errors.New("xAI image edits are not supported by this adapter")
+	relayMode := constant.RelayModeImagesGenerations
+	if info != nil {
+		relayMode = info.RelayMode
 	}
-	xaiRequest := ImageRequest{
-		Model:          request.Model,
-		Prompt:         request.Prompt,
-		N:              int(lo.FromPtrOr(request.N, uint(1))),
-		ResponseFormat: request.ResponseFormat,
+	if relayMode == constant.RelayModeImagesEdits && c != nil && c.Request != nil &&
+		strings.Contains(strings.ToLower(c.Request.Header.Get("Content-Type")), "multipart/form-data") {
+		err := errors.New("xAI image edits require application/json; multipart/form-data is not supported")
+		return nil, types.NewErrorWithStatusCode(
+			err,
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
-	return xaiRequest, nil
+	if err := helper.ValidateXAIImageRequest(&request, relayMode); err != nil {
+		return nil, types.NewErrorWithStatusCode(
+			err,
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+
+	converted := &dto.ImageRequest{
+		Model:           request.Model,
+		Prompt:          request.Prompt,
+		N:               request.N,
+		AspectRatio:     request.AspectRatio,
+		Resolution:      request.Resolution,
+		ResponseFormat:  request.ResponseFormat,
+		Image:           request.Image,
+		Images:          request.Images,
+		User:            request.User,
+		InputImageCount: request.InputImageCount,
+	}
+	if len(request.StorageOptions) > 0 && strings.TrimSpace(string(request.StorageOptions)) != "null" {
+		converted.StorageOptions = request.StorageOptions
+	}
+	return converted, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {

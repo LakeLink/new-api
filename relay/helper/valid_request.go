@@ -391,6 +391,9 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 			if err := ValidateOpenAIImageRequest(imageRequest, relayMode, false); err != nil {
 				return nil, err
 			}
+			if dto.IsXAIImageModel(imageRequest.Model) {
+				return nil, errors.New("xAI image edits require application/json")
+			}
 			if err := ValidateOpenAIImageMultipartFiles(imageRequest, form); err != nil {
 				return nil, err
 			}
@@ -451,6 +454,11 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json")
 	if err := ValidateOpenAIImageRequest(imageRequest, relayMode, jsonEdit); err != nil {
 		return nil, err
+	}
+	if dto.IsXAIImageModel(imageRequest.Model) {
+		if err := ValidateXAIImageRequest(imageRequest, relayMode); err != nil {
+			return nil, err
+		}
 	}
 	return imageRequest, nil
 }

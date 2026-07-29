@@ -269,6 +269,12 @@ func refreshFinalOpenAIImageBilling(c *gin.Context, info *relaycommon.RelayInfo,
 	); err != nil {
 		return nil, fmt.Errorf("final image request is invalid: %w", err)
 	}
+	if (info != nil && (info.ApiType == constant.APITypeXai || info.ChannelType == constant.ChannelTypeXai)) ||
+		dto.IsXAIImageModel(request.Model) {
+		if err := helper.ValidateXAIImageRequest(request, relayMode); err != nil {
+			return nil, fmt.Errorf("final xAI image request is invalid: %w", err)
+		}
+	}
 	if err := refreshFinalModelReservation(c, info, types.RelayFormatOpenAIImage, request); err != nil {
 		return nil, err
 	}

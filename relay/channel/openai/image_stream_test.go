@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/gin-gonic/gin"
@@ -395,6 +396,24 @@ func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 			require.Equal(t, tt.body, recorder.Body.String())
 		})
 	}
+}
+
+func TestOpenaiImageHandlerKeepsXAICompositeRequestRatio(t *testing.T) {
+	body := `{
+		"data":[{"url":"https://example.com/first.png"},{"url":"https://example.com/second.png"}],
+		"usage":{"cost_in_usd_ticks":1400000000}
+	}`
+	c, _, resp, info := newImageTestContext(t, body, "application/json", false)
+	info.PriceData.UsePrice = true
+	info.PriceData.AddOtherRatio(dto.XAIImageBillingRatioKey, 3.4)
+
+	usage, err := OpenaiImageHandler(c, info, resp)
+
+	require.Nil(t, err)
+	require.NotNil(t, usage.CostInUSDTicks)
+	require.Equal(t, int64(1_400_000_000), *usage.CostInUSDTicks)
+	require.Equal(t, 3.4, info.PriceData.OtherRatios()[dto.XAIImageBillingRatioKey])
+	require.NotContains(t, info.PriceData.OtherRatios(), "n")
 }
 
 // TestOpenaiImageHandlersReturnJSONError covers JSON error responses for both

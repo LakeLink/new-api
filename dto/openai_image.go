@@ -15,6 +15,17 @@ import (
 // wrapped-negative n overflows quota calculation into a negative charge.
 const MaxImageN = 128
 
+// MaxXAIImageN is xAI's documented image batch limit.
+const MaxXAIImageN = 10
+
+// MaxXAIImageEditInputs is xAI's documented multi-image edit limit.
+const MaxXAIImageEditInputs = 3
+
+// XAIImageBillingRatioKey identifies the complete xAI image request cost
+// multiplier. It includes output count, output resolution, and edit inputs, so
+// it must not be combined with the generic "n" multiplier.
+const XAIImageBillingRatioKey = "xai_image_request"
+
 // MaxSiliconFlowImageBatchSize is SiliconFlow's documented native
 // batch_size limit. The generic image validator uses it because validation and
 // pre-consume happen before channel selection, while batch_size is accepted as
@@ -27,6 +38,8 @@ type ImageRequest struct {
 	N                 *uint           `json:"n,omitempty"`
 	Size              string          `json:"size,omitempty"`
 	Quality           string          `json:"quality,omitempty"`
+	AspectRatio       *string         `json:"aspect_ratio,omitempty"`
+	Resolution        *string         `json:"resolution,omitempty"`
 	ResponseFormat    string          `json:"response_format,omitempty"`
 	Style             json.RawMessage `json:"style,omitempty"`
 	User              json.RawMessage `json:"user,omitempty"`
@@ -40,6 +53,7 @@ type ImageRequest struct {
 	Images            json.RawMessage `json:"images,omitempty"`
 	Mask              json.RawMessage `json:"mask,omitempty"`
 	InputFidelity     json.RawMessage `json:"input_fidelity,omitempty"`
+	StorageOptions    json.RawMessage `json:"storage_options,omitempty"`
 	// InputImageCount is derived from validated JSON references or multipart
 	// files. It is billing metadata and must never be forwarded upstream.
 	InputImageCount int   `json:"-"`
@@ -197,16 +211,44 @@ func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {
 		}
 	}
 
-	// Keep n separate from ImagePriceRatio so size/quality and count remain
-	// independent billing dimensions. Fixed-price pre-consume stores this on
-	// PriceData, and image settlement reuses or replaces the same "n" ratio.
+	billingRatios := map[string]float64{"n": float64(imageN)}
+	if IsXAIImageModel(i.Model) {
+		outputRatio := 1.0
+		inputRatio := 0.1
+		if i.Model == "grok-imagine-image-quality" {
+			inputRatio = 0.2
+			if i.Resolution != nil && strings.EqualFold(strings.TrimSpace(*i.Resolution), "2k") {
+				outputRatio = 1.4
+			}
+		}
+		// xAI charges each output plus each edit input. Express the additive
+		// provider prices as one multiplier over the model's built-in 1K output
+		// price so fixed-price pre-consume reserves the complete request.
+		billingRatios = map[string]float64{
+			XAIImageBillingRatioKey: float64(imageN)*outputRatio + float64(i.InputImageCount)*inputRatio,
+		}
+	}
+
+	// Keep output count separate from ImagePriceRatio so size/quality and count
+	// remain independent billing dimensions. xAI is the exception because its
+	// edit input fee is additive rather than multiplicative; the complete
+	// provider-price ratio above represents that request exactly.
 	return &types.TokenCountMeta{
 		CombineText:       i.Prompt,
 		MaxTokens:         maxTokens,
 		ImagePriceRatio:   sizeRatio * qualityRatio,
 		ImageInputTokens:  imageInputTokens,
 		ImageOutputTokens: imageOutputTokens,
-		BillingRatios:     map[string]float64{"n": float64(imageN)},
+		BillingRatios:     billingRatios,
+	}
+}
+
+func IsXAIImageModel(model string) bool {
+	switch model {
+	case "grok-imagine-image", "grok-imagine-image-quality":
+		return true
+	default:
+		return false
 	}
 }
 

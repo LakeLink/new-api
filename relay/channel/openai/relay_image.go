@@ -26,6 +26,12 @@ func updateOpenAIImageCount(info *relaycommon.RelayInfo, count int64) {
 	if info == nil || !info.PriceData.UsePrice || count <= 0 || count > int64(dto.MaxImageN) {
 		return
 	}
+	// xAI image pricing includes count, resolution, and edit input fees in one
+	// additive request ratio. Adding the generic n multiplier would double bill
+	// the output count when the provider-reported exact cost is unavailable.
+	if info.PriceData.HasOtherRatio(dto.XAIImageBillingRatioKey) {
+		return
+	}
 	info.PriceData.AddOtherRatio("n", float64(count))
 }
 

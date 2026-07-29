@@ -104,6 +104,37 @@ func TestImageEditTokenReservationIncludesInputImages(t *testing.T) {
 	assert.Equal(t, 2*OpenAIImageHighFidelityInputTokens, meta.ImageInputTokens)
 }
 
+func TestXAIImageReservationIncludesResolutionOutputsAndEditInputs(t *testing.T) {
+	count := uint(2)
+	resolution := "2k"
+	request := ImageRequest{
+		Model:           "grok-imagine-image-quality",
+		Prompt:          "combine",
+		N:               &count,
+		Resolution:      &resolution,
+		InputImageCount: 3,
+	}
+
+	meta := request.GetTokenCountMeta()
+	require.NotNil(t, meta)
+	assert.NotContains(t, meta.BillingRatios, "n")
+	assert.InDelta(t, 3.4, meta.BillingRatios[XAIImageBillingRatioKey], 1e-12)
+}
+
+func TestXAIStandardImageReservationKeepsTwoKOutputPrice(t *testing.T) {
+	count := uint(2)
+	resolution := "2k"
+	request := ImageRequest{
+		Model:           "grok-imagine-image",
+		Prompt:          "combine",
+		N:               &count,
+		Resolution:      &resolution,
+		InputImageCount: 3,
+	}
+
+	assert.InDelta(t, 2.3, request.GetTokenCountMeta().BillingRatios[XAIImageBillingRatioKey], 1e-12)
+}
+
 func TestValidOpenAIGPTImage2Size(t *testing.T) {
 	assert.True(t, ValidOpenAIGPTImage2Size("1024x1024"))
 	assert.True(t, ValidOpenAIGPTImage2Size("3840x2160"))

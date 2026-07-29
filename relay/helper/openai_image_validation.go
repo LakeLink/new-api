@@ -282,6 +282,9 @@ func ValidateOpenAIImageRequest(request *dto.ImageRequest, relayMode int, jsonEd
 	if kind == dto.OpenAIImageModelUnknown {
 		return nil
 	}
+	if request.AspectRatio != nil || request.Resolution != nil || imageRawProvided(request.StorageOptions) {
+		return errors.New("xAI image parameters are not supported for OpenAI image models")
+	}
 	if *request.N > dto.MaxOpenAIImageN {
 		return fmt.Errorf("n must be an integer between 1 and %d for OpenAI image models", dto.MaxOpenAIImageN)
 	}

@@ -8,8 +8,10 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -461,6 +463,51 @@ func TestUnknownFinalAliImageReservesNestedCountAndPromptExtend(t *testing.T) {
 	assert.Equal(t, expected, info.PriceData.QuotaToPreConsume)
 	assert.Equal(t, float64(4), info.PriceData.OtherRatios()["n"])
 	assert.Equal(t, float64(2), info.PriceData.OtherRatios()["prompt_extend"])
+}
+
+func TestFinalXAIImageEditReservesOutputsResolutionAndInputs(t *testing.T) {
+	savedModelPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedModelPrices))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"grok-imagine-image-quality":0.05}`))
+
+	ctx, _ := gin.CreateTestContext(nil)
+	ctx.Set("group", "default")
+	baseQuota := common.QuotaFromFloat(0.05 * common.CurrentQuotaPerUnit())
+	billing := &preflightBillingStub{reserved: baseQuota}
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "grok-imagine-image-quality",
+		UserGroup:       "default",
+		UsingGroup:      "default",
+		RelayFormat:     types.RelayFormatOpenAIImage,
+		RelayMode:       relayconstant.RelayModeImagesEdits,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ApiType:           constant.APITypeXai,
+			ChannelType:       constant.ChannelTypeXai,
+			UpstreamModelName: "grok-imagine-image-quality",
+		},
+		Billing: billing,
+	}
+
+	request, err := refreshFinalOpenAIImageBilling(ctx, info, []byte(`{
+		"model":"grok-imagine-image-quality",
+		"prompt":"combine",
+		"n":2,
+		"resolution":"2k",
+		"images":[
+			{"url":"https://example.com/one.png"},
+			{"file_id":"file_two"},
+			{"url":"data:image/png;base64,YQ=="}
+		]
+	}`))
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, request.InputImageCount)
+	assert.InDelta(t, 3.4, info.PriceData.OtherRatios()[dto.XAIImageBillingRatioKey], 1e-12)
+	expected := common.QuotaFromFloat(0.17 * common.CurrentQuotaPerUnit())
+	assert.Equal(t, expected, billing.reserved)
+	assert.Equal(t, expected, info.PriceData.QuotaToPreConsume)
 }
 
 func TestUnknownFinalAliImageClearsDisabledPromptExtendRatio(t *testing.T) {
