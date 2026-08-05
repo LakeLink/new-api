@@ -137,6 +137,8 @@ func main() {
 
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
+	// Codex weekly usage guard checks configured subscription channels every hour.
+	service.StartCodexUsageLimitCheckTask()
 
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()

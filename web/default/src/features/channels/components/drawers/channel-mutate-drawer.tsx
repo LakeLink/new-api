@@ -750,6 +750,9 @@ export function ChannelMutateDrawer({
   const currentSystemPrompt = form.watch('system_prompt')
   const currentSystemPromptOverride = form.watch('system_prompt_override')
   const currentDenyCrossProtocol = form.watch('deny_cross_protocol')
+  const currentCodexAutoPauseWeeklyLimitEnabled = form.watch(
+    'codex_auto_pause_weekly_limit_enabled'
+  )
   const currentAllowServiceTier = form.watch('allow_service_tier')
   const currentDisableStore = form.watch('disable_store')
   const currentAllowSafetyIdentifier = form.watch('allow_safety_identifier')
@@ -1022,7 +1025,8 @@ export function ChannelMutateDrawer({
     currentDisableTaskPollingSleep ||
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
-    currentSystemPromptOverride
+    currentSystemPromptOverride ||
+    currentCodexAutoPauseWeeklyLimitEnabled
   )
   let fieldPassthroughConfigured = false
   if (currentType === 1 || currentType === 57) {
@@ -4170,7 +4174,75 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              {currentType === 57 && (
+                                <FormField
+                                  control={form.control}
+                                  name='codex_auto_pause_weekly_limit_enabled'
+                                  render={({ field }) => (
+                                    <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t(
+                                            'Auto-pause on low Codex weekly usage'
+                                          )}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Check usage hourly and pause this channel when weekly usage remaining falls below the threshold'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
                             </div>
+
+                            {currentType === 57 && (
+                              <FormField
+                                control={form.control}
+                                name='codex_auto_pause_weekly_limit_threshold'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>
+                                      {t(
+                                        'Codex weekly usage remaining threshold'
+                                      )}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={1}
+                                        max={100}
+                                        step={1}
+                                        disabled={
+                                          !currentCodexAutoPauseWeeklyLimitEnabled
+                                        }
+                                        value={field.value ?? 10}
+                                        onChange={(event) =>
+                                          field.onChange(
+                                            event.target.valueAsNumber
+                                          )
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Percentage remaining before pausing. The channel is re-enabled only when its remaining weekly usage reaches this threshold and it was paused automatically by this setting.'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+                            )}
 
                             <FormField
                               control={form.control}

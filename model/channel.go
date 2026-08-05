@@ -1158,6 +1158,14 @@ func (channel *Channel) ValidateSettings() error {
 			return fmt.Errorf("advanced_custom is required")
 		}
 	}
+	if channelParams.CodexAutoPauseWeeklyLimitEnabled {
+		if channel.Type != constant.ChannelTypeCodex {
+			return fmt.Errorf("codex weekly usage auto-pause is only supported for Codex channels")
+		}
+		if channelParams.CodexAutoPauseWeeklyLimitThreshold <= 0 || channelParams.CodexAutoPauseWeeklyLimitThreshold > 100 {
+			return fmt.Errorf("codex weekly usage auto-pause threshold must be greater than 0 and at most 100")
+		}
+	}
 	if channelOtherSettings.AdvancedCustom != nil {
 		if err := channelOtherSettings.AdvancedCustom.Validate(); err != nil {
 			return err

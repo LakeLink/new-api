@@ -87,6 +87,8 @@ export interface ChannelSettings {
   system_prompt?: string
   system_prompt_override?: boolean
   deny_cross_protocol?: boolean
+  codex_auto_pause_weekly_limit_enabled?: boolean
+  codex_auto_pause_weekly_limit_threshold?: number
 }
 
 export interface ChannelOtherSettings {

@@ -249,6 +249,10 @@ export const ERROR_MESSAGES = {
   TEST_FAILED: 'Failed to test channel',
   BALANCE_QUERY_FAILED: 'Failed to query balance',
   FETCH_MODELS_FAILED: 'Failed to fetch models',
+  CODEX_AUTO_PAUSE_THRESHOLD_MIN:
+    'Codex weekly usage threshold must be at least 1%',
+  CODEX_AUTO_PAUSE_THRESHOLD_MAX:
+    'Codex weekly usage threshold cannot exceed 100%',
 } as const
 
 export const SUCCESS_MESSAGES = {

@@ -11,14 +11,16 @@ import (
 )
 
 type ChannelSettings struct {
-	ForceFormat             bool   `json:"force_format,omitempty"`
-	ThinkingToContent       bool   `json:"thinking_to_content,omitempty"`
-	Proxy                   string `json:"proxy"`
-	PassThroughBodyEnabled  bool   `json:"pass_through_body_enabled,omitempty"`
-	NonStreamUpstreamStream bool   `json:"non_stream_upstream_stream,omitempty"`
-	SystemPrompt            string `json:"system_prompt,omitempty"`
-	SystemPromptOverride    bool   `json:"system_prompt_override,omitempty"`
-	DenyCrossProtocol       bool   `json:"deny_cross_protocol,omitempty"`
+	ForceFormat                        bool    `json:"force_format,omitempty"`
+	ThinkingToContent                  bool    `json:"thinking_to_content,omitempty"`
+	Proxy                              string  `json:"proxy"`
+	PassThroughBodyEnabled             bool    `json:"pass_through_body_enabled,omitempty"`
+	NonStreamUpstreamStream            bool    `json:"non_stream_upstream_stream,omitempty"`
+	SystemPrompt                       string  `json:"system_prompt,omitempty"`
+	SystemPromptOverride               bool    `json:"system_prompt_override,omitempty"`
+	DenyCrossProtocol                  bool    `json:"deny_cross_protocol,omitempty"`
+	CodexAutoPauseWeeklyLimitEnabled   bool    `json:"codex_auto_pause_weekly_limit_enabled,omitempty"`
+	CodexAutoPauseWeeklyLimitThreshold float64 `json:"codex_auto_pause_weekly_limit_threshold,omitempty"`
 }
 
 type VertexKeyType string
