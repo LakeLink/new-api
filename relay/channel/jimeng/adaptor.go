@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -34,7 +35,7 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	return fmt.Sprintf("%s/?Action=CVProcess&Version=2022-08-31", info.ChannelBaseUrl), nil
+	return fmt.Sprintf("%s/?Action=CVProcess&Version=2022-08-31", strings.TrimRight(info.ChannelBaseUrl, "/")), nil
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *relaycommon.RelayInfo) error {
@@ -53,33 +54,41 @@ type LogoInfo struct {
 	Position        *int     `json:"position,omitempty"`
 	Language        *int     `json:"language,omitempty"`
 	Opacity         *float64 `json:"opacity,omitempty"`
-	LogoTextContent string   `json:"logo_text_content,omitempty"`
+	LogoTextContent *string  `json:"logo_text_content,omitempty"`
+}
+
+type AIGCMeta struct {
+	ContentProducer   *string `json:"content_producer,omitempty"`
+	ProducerID        *string `json:"producer_id,omitempty"`
+	ContentPropagator *string `json:"content_propagator,omitempty"`
+	PropagateID       *string `json:"propagate_id,omitempty"`
 }
 
 type imageRequestPayload struct {
-	ReqKey     string    `json:"req_key"`                      // Service identifier, fixed value: jimeng_high_aes_general_v21_L
-	Prompt     string    `json:"prompt"`                       // Prompt for image generation, supports both Chinese and English
-	Seed       *int64    `json:"seed,omitempty"`               // Random seed, default -1 (random)
-	Width      *int      `json:"width,omitempty"`              // Image width, default 512, range [256, 768]
-	Height     *int      `json:"height,omitempty"`             // Image height, default 512, range [256, 768]
-	UsePreLLM  *bool     `json:"use_pre_llm,omitempty"`        // Enable text expansion, default true
-	UseSR      *bool     `json:"use_sr,omitempty"`             // Enable super resolution, default true
-	ReturnURL  *bool     `json:"return_url,omitempty"`         // Whether to return image URL (valid for 24 hours)
-	LogoInfo   *LogoInfo `json:"logo_info,omitempty"`          // Watermark information
-	ImageUrls  []string  `json:"image_urls,omitempty"`         // Image URLs for input
-	BinaryData []string  `json:"binary_data_base64,omitempty"` // Base64 encoded binary data
+	ReqKey    string    `json:"req_key"`               // Service identifier, fixed value: jimeng_high_aes_general_v21_L
+	Prompt    string    `json:"prompt"`                // Prompt for image generation, supports both Chinese and English
+	Seed      *int64    `json:"seed,omitempty"`        // Random seed, default -1 (random)
+	Width     *int      `json:"width,omitempty"`       // Image width, default 512, range [256, 768]
+	Height    *int      `json:"height,omitempty"`      // Image height, default 512, range [256, 768]
+	UsePreLLM *bool     `json:"use_pre_llm,omitempty"` // Enable text expansion, default true
+	UseSR     *bool     `json:"use_sr,omitempty"`      // Enable super resolution, default true
+	ReturnURL *bool     `json:"return_url,omitempty"`  // Whether to return image URL (valid for 24 hours)
+	LogoInfo  *LogoInfo `json:"logo_info,omitempty"`   // Watermark information
+	AIGCMeta  *AIGCMeta `json:"aigc_meta,omitempty"`   // Invisible AIGC provenance metadata
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
 	if request.N != nil && *request.N != 1 {
 		return nil, fmt.Errorf("Jimeng image generation supports exactly one image per request")
 	}
+	switch request.Model {
+	case "jimeng_t2i_v30", "jimeng_t2i_v31", "jimeng_i2i_v30",
+		"jimeng_t2i_v40", "jimeng_seedream46_cvtob":
+		return nil, fmt.Errorf("%s requires Jimeng's asynchronous image protocol, which this adaptor does not support", request.Model)
+	}
 	payload := imageRequestPayload{
 		ReqKey: request.Model,
 		Prompt: request.Prompt,
-	}
-	if request.ResponseFormat == "" || request.ResponseFormat == "url" {
-		payload.ReturnURL = common.GetPointer(true) // Default to returning image URLs
 	}
 
 	if len(request.ExtraFields) > 0 {
@@ -91,11 +100,34 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	// provider-native options, not replace standard OpenAI request fields.
 	payload.ReqKey = request.Model
 	payload.Prompt = request.Prompt
+	switch request.ResponseFormat {
+	case "", "url":
+		payload.ReturnURL = common.GetPointer(true)
+	case "b64_json":
+		payload.ReturnURL = common.GetPointer(false)
+	default:
+		return nil, fmt.Errorf("unsupported response_format: %s", request.ResponseFormat)
+	}
 	if payload.Width != nil && (*payload.Width < 256 || *payload.Width > 768) {
 		return nil, fmt.Errorf("width must be between 256 and 768")
 	}
 	if payload.Height != nil && (*payload.Height < 256 || *payload.Height > 768) {
 		return nil, fmt.Errorf("height must be between 256 and 768")
+	}
+	if payload.LogoInfo != nil {
+		if payload.LogoInfo.Position != nil && (*payload.LogoInfo.Position < 0 || *payload.LogoInfo.Position > 3) {
+			return nil, fmt.Errorf("logo_info.position must be between 0 and 3")
+		}
+		if payload.LogoInfo.Language != nil && (*payload.LogoInfo.Language < 0 || *payload.LogoInfo.Language > 1) {
+			return nil, fmt.Errorf("logo_info.language must be either 0 or 1")
+		}
+		if payload.LogoInfo.Opacity != nil && (*payload.LogoInfo.Opacity < 0 || *payload.LogoInfo.Opacity > 1) {
+			return nil, fmt.Errorf("logo_info.opacity must be between 0 and 1")
+		}
+	}
+	if payload.AIGCMeta != nil &&
+		(payload.AIGCMeta.ProducerID == nil || strings.TrimSpace(*payload.AIGCMeta.ProducerID) == "") {
+		return nil, fmt.Errorf("aigc_meta.producer_id is required when aigc_meta is provided")
 	}
 
 	return payload, nil

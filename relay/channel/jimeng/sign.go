@@ -73,7 +73,7 @@ func Sign(c *gin.Context, req *http.Request, apiKey string) error {
 	payloadHash := sha256.Sum256(bodyBytes)
 	hexPayloadHash := hex.EncodeToString(payloadHash[:])
 
-	method := c.Request.Method
+	method := req.Method
 	u := req.URL
 	keyParts := strings.Split(apiKey, "|")
 	if len(keyParts) != 2 {
@@ -81,6 +81,9 @@ func Sign(c *gin.Context, req *http.Request, apiKey string) error {
 	}
 	accessKey := strings.TrimSpace(keyParts[0])
 	secretKey := strings.TrimSpace(keyParts[1])
+	if accessKey == "" || secretKey == "" {
+		return errors.New("invalid api key format for jimeng: access key and secret key are required")
+	}
 	t := time.Now().UTC()
 	xDate := t.Format("20060102T150405Z")
 	shortDate := t.Format("20060102")
