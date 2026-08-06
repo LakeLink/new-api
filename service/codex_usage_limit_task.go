@@ -37,13 +37,11 @@ type codexUsageLimitWindow struct {
 }
 
 type codexUsageLimitRateLimit struct {
-	PlanType        string                   `json:"plan_type"`
 	PrimaryWindow   *codexUsageLimitWindow `json:"primary_window"`
 	SecondaryWindow *codexUsageLimitWindow `json:"secondary_window"`
 }
 
 type codexUsageLimitPayload struct {
-	PlanType  string                   `json:"plan_type"`
 	RateLimit codexUsageLimitRateLimit `json:"rate_limit"`
 }
 
@@ -158,30 +156,11 @@ func codexWeeklyUsageRemainingPercent(body []byte) (float64, bool) {
 	if err := common.Unmarshal(body, &payload); err != nil {
 		return 0, false
 	}
-	windows := []*codexUsageLimitWindow{
+	for _, window := range []*codexUsageLimitWindow{
 		payload.RateLimit.PrimaryWindow,
 		payload.RateLimit.SecondaryWindow,
-	}
-	for _, window := range windows {
+	} {
 		if window == nil || window.UsedPercent == nil || window.LimitWindowSeconds < int64((24*time.Hour).Seconds()) || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
-			continue
-		}
-		return max(0, min(100, 100-*window.UsedPercent)), true
-	}
-	planType := strings.TrimSpace(payload.PlanType)
-	if planType == "" {
-		planType = strings.TrimSpace(payload.RateLimit.PlanType)
-	}
-	if strings.EqualFold(planType, "free") {
-		for _, window := range windows {
-			if window == nil || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
-				continue
-			}
-			return max(0, min(100, 100-*window.UsedPercent)), true
-		}
-	}
-	for _, window := range []*codexUsageLimitWindow{payload.RateLimit.SecondaryWindow, payload.RateLimit.PrimaryWindow} {
-		if window == nil || (window.LimitWindowSeconds > 0 && window.LimitWindowSeconds < int64((24*time.Hour).Seconds())) || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
 			continue
 		}
 		return max(0, min(100, 100-*window.UsedPercent)), true
