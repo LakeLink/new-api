@@ -90,6 +90,10 @@ func TestCodexWeeklyUsageRemainingPercent(t *testing.T) {
 
 func TestCodexUsageLimitCheckPausesAndResumesOnlyMarkedChannels(t *testing.T) {
 	db := setupCodexUsageLimitTaskTestDB(t)
+
+	oldMaster := common.IsMasterNode
+	common.IsMasterNode = true
+	t.Cleanup(func() { common.IsMasterNode = oldMaster })
 	setting := `{"codex_auto_pause_weekly_limit_enabled":true,"codex_auto_pause_weekly_limit_threshold":10}`
 	key := `{"access_token":"access-token","account_id":"account-id"}`
 	channels := []*model.Channel{

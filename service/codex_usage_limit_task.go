@@ -49,9 +49,6 @@ type codexUsageLimitPayload struct {
 
 func StartCodexUsageLimitCheckTask() {
 	codexUsageLimitCheckOnce.Do(func() {
-		if !common.IsMasterNode {
-			return
-		}
 		gopool.Go(func() {
 			logger.LogInfo(context.Background(), fmt.Sprintf("codex weekly usage limit check started: tick=%s", codexUsageLimitCheckInterval))
 			ticker := time.NewTicker(codexUsageLimitCheckInterval)
@@ -66,6 +63,12 @@ func StartCodexUsageLimitCheckTask() {
 }
 
 func runCodexUsageLimitCheckOnce() {
+	// Only the master node runs this check. Multiple replicas may hold the master
+	// flag simultaneously, which is acceptable; the atomic guard below prevents
+	// concurrent runs within a single process.
+	if !common.IsMasterNode {
+		return
+	}
 	if !codexUsageLimitCheckRunning.CompareAndSwap(false, true) {
 		return
 	}
@@ -181,7 +184,9 @@ func codexWeeklyUsageRemainingPercent(body []byte) (float64, bool) {
 		}
 	}
 	for _, window := range []*codexUsageLimitWindow{payload.RateLimit.SecondaryWindow, payload.RateLimit.PrimaryWindow} {
-		if window == nil || (window.LimitWindowSeconds > 0 && window.LimitWindowSeconds < int64((24*time.Hour).Seconds())) || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
+		// LimitWindowSeconds == 0 means the window carries no duration information;
+		// treat it as absent rather than as an unbounded window.
+		if window == nil || window.LimitWindowSeconds == 0 || (window.LimitWindowSeconds > 0 && window.LimitWindowSeconds < int64((24*time.Hour).Seconds())) || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) {
 			continue
 		}
 		return max(0, min(100, 100-*window.UsedPercent)), true

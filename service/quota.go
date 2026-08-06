@@ -584,9 +584,21 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 	return nil
 }
 
+// PostConsumeQuota settles the final quota charge for a completed relay request.
+// quota is the actual charge (positive = deduct, negative = refund).
+// preConsumedQuota is the amount that was pre-deducted before the request; it is
+// only used here to decide whether a low-balance notification should fire.
+//
+// The function performs three independent steps:
+//  1. Deduct from the user's balance source (subscription item or wallet).
+//  2. Deduct from the API-token quota budget (skipped for playground tokens).
+//  3. Optionally trigger a low-balance notification email.
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (err error) {
 
-	// 1) Consume from wallet quota OR subscription item
+	// Step 1 — settle against the billing source.
+	// For subscription requests the charge is applied to the subscription item's
+	// running delta so that per-period usage can be tracked separately from the
+	// user's top-up wallet.  For everything else the wallet is adjusted directly.
 	if relayInfo != nil && relayInfo.BillingSource == BillingSourceSubscription {
 		if relayInfo.SubscriptionId == 0 {
 			return errors.New("subscription id is missing")
@@ -599,7 +611,8 @@ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQu
 			relayInfo.SubscriptionPostDelta += delta
 		}
 	} else {
-		// Wallet
+		// Wallet billing: a negative quota means the pre-consumed estimate
+		// exceeded the actual cost, so we issue a partial refund.
 		if quota > 0 {
 			err = model.DecreaseUserQuota(relayInfo.UserId, quota, false)
 		} else {
@@ -610,6 +623,8 @@ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQu
 		}
 	}
 
+	// Step 2 — apply the same delta to the API-token's quota budget.
+	// Playground tokens have no quota limit and are exempt from this step.
 	if !relayInfo.IsPlayground {
 		if quota > 0 {
 			err = model.DecreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
@@ -621,6 +636,10 @@ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQu
 		}
 	}
 
+	// Step 3 — low-balance notification.
+	// We compare (preConsumedQuota + quota) against the user's remaining balance
+	// and send an alert if it has crossed the configured warning threshold.
+	// Skip entirely when both values are zero (no real spend occurred).
 	if sendEmail {
 		if (quota + preConsumedQuota) != 0 {
 			checkAndSendQuotaNotify(relayInfo, quota, preConsumedQuota)
