@@ -49,9 +49,6 @@ type codexUsageLimitPayload struct {
 
 func StartCodexUsageLimitCheckTask() {
 	codexUsageLimitCheckOnce.Do(func() {
-		if !common.IsMasterNode {
-			return
-		}
 		gopool.Go(func() {
 			logger.LogInfo(context.Background(), fmt.Sprintf("codex weekly usage limit check started: tick=%s", codexUsageLimitCheckInterval))
 			ticker := time.NewTicker(codexUsageLimitCheckInterval)
@@ -66,6 +63,12 @@ func StartCodexUsageLimitCheckTask() {
 }
 
 func runCodexUsageLimitCheckOnce() {
+	// Only the master node runs this check. Multiple replicas may hold the master
+	// flag simultaneously, which is acceptable; the atomic guard below prevents
+	// concurrent runs within a single process.
+	if !common.IsMasterNode {
+		return
+	}
 	if !codexUsageLimitCheckRunning.CompareAndSwap(false, true) {
 		return
 	}
