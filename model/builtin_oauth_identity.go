@@ -395,49 +395,122 @@ func replaceBuiltInOAuthIdentity(
 	})
 }
 
+// backfillBuiltInOAuthIdentityWithPriority converts one legacy binding into the
+// normalized uniqueness table. During startup migration, an active user takes
+// priority over a soft-deleted user when both legacy rows contain the same
+// external identity. Other conflicts still abort the migration.
+func backfillBuiltInOAuthIdentityWithPriority(
+	tx *gorm.DB,
+	user User,
+	provider string,
+	externalID string,
+) error {
+	err := BindBuiltInOAuthIdentityWithTx(tx, provider, externalID, user.Id)
+	if err == nil {
+		return nil
+	}
+
+	var conflict *BuiltInOAuthIdentityConflictError
+	if !errors.As(err, &conflict) {
+		return err
+	}
+
+	var existingUser User
+	if lookupErr := tx.Unscoped().
+		Select("id", "deleted_at").
+		Where("id = ?", conflict.ExistingUserID).
+		First(&existingUser).Error; lookupErr != nil {
+		return fmt.Errorf("inspect conflicting OAuth user %d: %w", conflict.ExistingUserID, lookupErr)
+	}
+
+	if user.DeletedAt.Valid {
+		if !existingUser.DeletedAt.Valid {
+			// Keep the active user's normalized identity. The deleted user's
+			// legacy column remains untouched for historical compatibility.
+			return nil
+		}
+		return err
+	}
+	if !existingUser.DeletedAt.Valid {
+		return err
+	}
+
+	// A stale backfill may already have reserved the identity for a
+	// soft-deleted user. Release that reservation so the active user can own it.
+	result := tx.Where(
+		"provider = ? AND external_id_hash = ? AND user_id = ?",
+		conflict.Provider,
+		oauthExternalIDHash(conflict.ExternalID),
+		conflict.ExistingUserID,
+	).Delete(&BuiltInOAuthIdentity{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf(
+			"release conflicting %s OAuth identity for soft-deleted user %d",
+			conflict.Provider,
+			conflict.ExistingUserID,
+		)
+	}
+
+	return BindBuiltInOAuthIdentityWithTx(tx, provider, externalID, user.Id)
+}
+
 // backfillBuiltInOAuthIdentities converts legacy user columns into the
-// normalized uniqueness table. Any duplicate or mismatched historical binding
-// aborts startup instead of selecting an arbitrary account.
+// normalized uniqueness table. Active users are processed before soft-deleted
+// users so an active account wins when historical rows contain a duplicate.
+// Conflicts between two active users, or two soft-deleted users, still abort
+// startup instead of selecting an arbitrary account.
 func backfillBuiltInOAuthIdentities() error {
 	if err := DB.Transaction(func(tx *gorm.DB) error {
-		var users []User
-		err := tx.Unscoped().
-			Select("id", "github_id", "discord_id", "oidc_id", "linux_do_id", "wechat_id", "telegram_id").
-			FindInBatches(&users, builtInOAuthBackfillBatchSize, func(_ *gorm.DB, _ int) error {
-				for _, user := range users {
-					identities := []struct {
-						provider   string
-						externalID string
-					}{
-						{BuiltInOAuthProviderGitHub, user.GitHubId},
-						{BuiltInOAuthProviderDiscord, user.DiscordId},
-						{BuiltInOAuthProviderOIDC, user.OidcId},
-						{BuiltInOAuthProviderLinuxDO, user.LinuxDOId},
-						{BuiltInOAuthProviderWeChat, user.WeChatId},
-						{BuiltInOAuthProviderTelegram, user.TelegramId},
-					}
-					for _, identity := range identities {
-						if identity.externalID == "" {
-							continue
+		backfillUsers := func(query *gorm.DB) error {
+			var users []User
+			return query.
+				Select("id", "github_id", "discord_id", "oidc_id", "linux_do_id", "wechat_id", "telegram_id", "deleted_at").
+				FindInBatches(&users, builtInOAuthBackfillBatchSize, func(_ *gorm.DB, _ int) error {
+					for _, user := range users {
+						identities := []struct {
+							provider   string
+							externalID string
+						}{
+							{BuiltInOAuthProviderGitHub, user.GitHubId},
+							{BuiltInOAuthProviderDiscord, user.DiscordId},
+							{BuiltInOAuthProviderOIDC, user.OidcId},
+							{BuiltInOAuthProviderLinuxDO, user.LinuxDOId},
+							{BuiltInOAuthProviderWeChat, user.WeChatId},
+							{BuiltInOAuthProviderTelegram, user.TelegramId},
 						}
-						if err := BindBuiltInOAuthIdentityWithTx(
-							tx,
-							identity.provider,
-							identity.externalID,
-							user.Id,
-						); err != nil {
-							return fmt.Errorf(
-								"backfill %s OAuth identity for user %d: %w",
+						for _, identity := range identities {
+							if identity.externalID == "" {
+								continue
+							}
+							if err := backfillBuiltInOAuthIdentityWithPriority(
+								tx,
+								user,
 								identity.provider,
-								user.Id,
-								err,
-							)
+								identity.externalID,
+							); err != nil {
+								return fmt.Errorf(
+									"backfill %s OAuth identity for user %d: %w",
+									identity.provider,
+									user.Id,
+									err,
+								)
+							}
 						}
 					}
-				}
-				return nil
-			}).Error
-		if err != nil {
+					return nil
+				}).Error
+		}
+
+		// FindInBatches advances by primary key. Use two passes instead of
+		// ordering by deleted_at so every database dialect processes all rows
+		// while guaranteeing active users are handled first.
+		if err := backfillUsers(tx); err != nil {
+			return err
+		}
+		if err := backfillUsers(tx.Unscoped().Where("deleted_at IS NOT NULL")); err != nil {
 			return err
 		}
 

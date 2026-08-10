@@ -146,6 +146,57 @@ func TestBackfillBuiltInOAuthIdentitiesFailsClosedOnDuplicateHistory(t *testing.
 	assert.Zero(t, identityCount, "a failed startup backfill must roll back partial mappings")
 }
 
+func TestBackfillBuiltInOAuthIdentitiesPrefersActiveUserOverSoftDeletedDuplicate(t *testing.T) {
+	db := setupBuiltInOAuthIdentityTestDB(t)
+	deleted := createBuiltInOAuthTestUser(t, db, "deleted-duplicate-oauth")
+	active := createBuiltInOAuthTestUser(t, db, "active-duplicate-oauth")
+	const externalID = "duplicate-with-deleted-user"
+
+	require.NoError(t, db.Model(&deleted).Update("oidc_id", externalID).Error)
+	require.NoError(t, db.Delete(&deleted).Error)
+	require.NoError(t, db.Model(&active).Update("oidc_id", externalID).Error)
+
+	require.NoError(t, backfillBuiltInOAuthIdentities())
+
+	var identity BuiltInOAuthIdentity
+	require.NoError(t, db.Where(
+		"provider = ? AND external_id = ?",
+		BuiltInOAuthProviderOIDC,
+		externalID,
+	).First(&identity).Error)
+	assert.Equal(t, active.Id, identity.UserID)
+
+	resolved := User{}
+	require.NoError(t, FillUserByBuiltInOAuthIdentity(
+		&resolved,
+		BuiltInOAuthProviderOIDC,
+		externalID,
+	))
+	assert.Equal(t, active.Id, resolved.Id)
+}
+
+func TestBackfillBuiltInOAuthIdentitiesReplacesStaleSoftDeletedReservation(t *testing.T) {
+	db := setupBuiltInOAuthIdentityTestDB(t)
+	deleted := createBuiltInOAuthTestUser(t, db, "stale-deleted-oauth")
+	const externalID = "stale-deleted-reservation"
+
+	require.NoError(t, db.Model(&deleted).Update("oidc_id", externalID).Error)
+	require.NoError(t, db.Delete(&deleted).Error)
+	require.NoError(t, backfillBuiltInOAuthIdentities())
+
+	active := createBuiltInOAuthTestUser(t, db, "stale-reservation-active")
+	require.NoError(t, db.Model(&active).Update("oidc_id", externalID).Error)
+	require.NoError(t, backfillBuiltInOAuthIdentities())
+
+	var identity BuiltInOAuthIdentity
+	require.NoError(t, db.Where(
+		"provider = ? AND external_id = ?",
+		BuiltInOAuthProviderOIDC,
+		externalID,
+	).First(&identity).Error)
+	assert.Equal(t, active.Id, identity.UserID)
+}
+
 func TestBackfillBuiltInOAuthIdentitiesPreservesSoftDeletedReservation(t *testing.T) {
 	db := setupBuiltInOAuthIdentityTestDB(t)
 	user := createBuiltInOAuthTestUser(t, db, "deleted-oauth-user")
