@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
@@ -38,6 +38,11 @@ type ApiCall = (() => Promise<unknown>) | null
 
 interface InternalState extends SecureVerificationState {
   apiCall: ApiCall
+}
+
+interface PendingVerification {
+  resolve: (result: unknown) => void
+  reject: (error: unknown) => void
 }
 
 const defaultMethods: VerificationMethods = {
@@ -64,6 +69,7 @@ export function useSecureVerification(
   const [methods, setMethods] = useState<VerificationMethods>(defaultMethods)
   const [state, setState] = useState<InternalState>(initialState)
   const [open, setOpen] = useState(false)
+  const pendingVerificationRef = useRef<PendingVerification | null>(null)
 
   const fetchVerificationMethods = useCallback(async () => {
     const result = await checkVerificationMethods()
@@ -76,6 +82,9 @@ export function useSecureVerification(
   }, [fetchVerificationMethods])
 
   const reset = useCallback(() => {
+    const pendingVerification = pendingVerificationRef.current
+    pendingVerificationRef.current = null
+    pendingVerification?.resolve(null)
     setState(initialState)
     setOpen(false)
   }, [])
@@ -160,6 +169,10 @@ export function useSecureVerification(
         await verify(actualMethod, code ?? state.code)
         const result = await state.apiCall()
 
+        const pendingVerification = pendingVerificationRef.current
+        pendingVerificationRef.current = null
+        pendingVerification?.resolve(result)
+
         if (successMessage) {
           toast.success(successMessage)
         }
@@ -172,6 +185,9 @@ export function useSecureVerification(
 
         return result
       } catch (error) {
+        const pendingVerification = pendingVerificationRef.current
+        pendingVerificationRef.current = null
+        pendingVerification?.reject(error)
         const message =
           error instanceof Error
             ? error.message
@@ -209,8 +225,33 @@ export function useSecureVerification(
         if (isVerificationRequiredError(error)) {
           const info = extractVerificationInfo(error)
           toast.info(info.message)
-          await startVerification(apiCall, config)
-          return null
+
+          let resolvePending!: (result: unknown) => void
+          let rejectPending!: (error: unknown) => void
+          const pendingResult = new Promise<unknown>((resolve, reject) => {
+            resolvePending = resolve
+            rejectPending = reject
+          })
+          const pendingVerification: PendingVerification = {
+            resolve: resolvePending,
+            reject: rejectPending,
+          }
+          pendingVerificationRef.current = pendingVerification
+
+          try {
+            const opened = await startVerification(apiCall, config)
+            if (!opened && pendingVerificationRef.current === pendingVerification) {
+              pendingVerificationRef.current = null
+              resolvePending(null)
+            }
+          } catch (startError) {
+            if (pendingVerificationRef.current === pendingVerification) {
+              pendingVerificationRef.current = null
+              rejectPending(startError)
+            }
+          }
+
+          return await pendingResult
         }
         throw error
       }

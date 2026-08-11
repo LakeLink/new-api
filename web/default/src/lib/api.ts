@@ -22,6 +22,8 @@ import { toast } from 'sonner'
 
 import { useAuthStore } from '@/stores/auth-store'
 
+import { isVerificationRequiredError } from './secure-verification'
+
 declare module 'axios' {
   export interface AxiosRequestConfig {
     skipBusinessError?: boolean
@@ -105,6 +107,10 @@ api.interceptors.response.use(
 
     const skip = error?.config?.skipErrorHandler
     const status = error?.response?.status
+
+    if (isVerificationRequiredError(error)) {
+      return Promise.reject(error)
+    }
 
     if (status === 401) {
       try {

@@ -20,11 +20,16 @@ import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+} from '@/features/auth/secure-verification'
 import useDialogState from '@/hooks/use-dialog'
+import { isVerificationRequiredError } from '@/lib/secure-verification'
 
 import { fetchTokenKey, fetchTokenKeysBatch } from '../api'
 import { ERROR_MESSAGES } from '../constants'
-import { type ApiKey, type ApiKeysDialogType } from '../types'
+import type { ApiKey, ApiKeysDialogType } from '../types'
 
 type ApiKeysContextType = {
   open: ApiKeysDialogType | null
@@ -47,6 +52,16 @@ const ApiKeysContext = React.createContext<ApiKeysContextType | null>(null)
 
 export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
+  const {
+    open: verificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    executeVerification,
+    cancel: cancelVerification,
+    setCode: setVerificationCode,
+    switchMethod: switchVerificationMethod,
+    withVerification,
+  } = useSecureVerification()
   const [open, setOpen] = useDialogState<ApiKeysDialogType>(null)
   const [currentRow, setCurrentRow] = useState<ApiKey | null>(null)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
@@ -73,6 +88,20 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
     setRefreshTrigger((prev) => prev + 1)
   }, [])
 
+  const fetchAndCacheRealKey = useCallback(
+    async (id: number): Promise<string | null> => {
+      const res = await fetchTokenKey(id)
+      if (res.success && res.data?.key) {
+        const fullKey = `sk-${res.data.key}`
+        setResolvedKeys((prev) => ({ ...prev, [id]: fullKey }))
+        return fullKey
+      }
+      toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
+      return null
+    },
+    [t]
+  )
+
   const resolveRealKey = useCallback(
     async (id: number): Promise<string | null> => {
       if (resolvedKeys[id]) return resolvedKeys[id]
@@ -81,15 +110,26 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
       const request = (async () => {
         setLoadingKeys((prev) => ({ ...prev, [id]: true }))
         try {
-          const res = await fetchTokenKey(id)
-          if (res.success && res.data?.key) {
-            const fullKey = `sk-${res.data.key}`
-            setResolvedKeys((prev) => ({ ...prev, [id]: fullKey }))
-            return fullKey
+          return await fetchAndCacheRealKey(id)
+        } catch (error) {
+          if (isVerificationRequiredError(error)) {
+            try {
+              const result = await withVerification(
+                () => fetchAndCacheRealKey(id),
+                {
+                  title: t('Security verification'),
+                  description: t(
+                    'Confirm your identity before accessing this sensitive action.'
+                  ),
+                  preferredMethod: 'passkey',
+                }
+              )
+              return typeof result === 'string' ? result : null
+            } catch {
+              return null
+            }
           }
-          toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
-          return null
-        } catch {
+
           toast.error(t(ERROR_MESSAGES.UNEXPECTED))
           return null
         } finally {
@@ -105,7 +145,24 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
       pendingRequests.current[id] = request
       return request
     },
-    [resolvedKeys, t]
+    [fetchAndCacheRealKey, resolvedKeys, t, withVerification]
+  )
+
+  const fetchAndCacheRealKeysBatch = useCallback(
+    async (ids: number[]): Promise<Record<number, string>> => {
+      const res = await fetchTokenKeysBatch(ids)
+      if (res.success && res.data?.keys) {
+        const newKeys: Record<number, string> = {}
+        for (const [idStr, key] of Object.entries(res.data.keys)) {
+          newKeys[Number(idStr)] = `sk-${key}`
+        }
+        setResolvedKeys((prev) => ({ ...prev, ...newKeys }))
+        return newKeys
+      }
+      toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
+      return {}
+    },
+    [t]
   )
 
   const resolveRealKeysBatch = useCallback(
@@ -122,23 +179,36 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
-        const res = await fetchTokenKeysBatch(uncachedIds)
-        if (res.success && res.data?.keys) {
-          const newKeys: Record<number, string> = {}
-          for (const [idStr, key] of Object.entries(res.data.keys)) {
-            newKeys[Number(idStr)] = `sk-${key}`
-          }
-          setResolvedKeys((prev) => ({ ...prev, ...newKeys }))
-
-          const result: Record<number, string> = { ...newKeys }
-          for (const id of ids) {
-            if (resolvedKeys[id]) result[id] = resolvedKeys[id]
-          }
-          return result
+        const newKeys = await fetchAndCacheRealKeysBatch(uncachedIds)
+        const result: Record<number, string> = { ...newKeys }
+        for (const id of ids) {
+          if (resolvedKeys[id]) result[id] = resolvedKeys[id]
         }
-        toast.error(res.message || t(ERROR_MESSAGES.UNEXPECTED))
-        return {}
-      } catch {
+        return result
+      } catch (error) {
+        if (isVerificationRequiredError(error)) {
+          const result = await withVerification(
+            () => fetchAndCacheRealKeysBatch(uncachedIds),
+            {
+              title: t('Security verification'),
+              description: t(
+                'Confirm your identity before accessing this sensitive action.'
+              ),
+              preferredMethod: 'passkey',
+            }
+          )
+          if (!result || typeof result !== 'object') return {}
+
+          return {
+            ...(result as Record<number, string>),
+            ...Object.fromEntries(
+              ids
+                .filter((id) => resolvedKeys[id])
+                .map((id) => [id, resolvedKeys[id]])
+            ),
+          }
+        }
+
         toast.error(t(ERROR_MESSAGES.UNEXPECTED))
         return {}
       } finally {
@@ -151,30 +221,50 @@ export function ApiKeysProvider({ children }: { children: React.ReactNode }) {
         }
       }
     },
-    [resolvedKeys, t]
+    [fetchAndCacheRealKeysBatch, resolvedKeys, t, withVerification]
   )
 
   return (
-    <ApiKeysContext
-      value={{
-        open,
-        setOpen,
-        currentRow,
-        setCurrentRow,
-        refreshTrigger,
-        triggerRefresh,
-        resolvedKey,
-        setResolvedKey,
-        resolveRealKey,
-        resolveRealKeysBatch,
-        resolvedKeys,
-        loadingKeys,
-        copiedKeyId,
-        markKeyCopied,
-      }}
-    >
-      {children}
-    </ApiKeysContext>
+    <>
+      <ApiKeysContext
+        value={{
+          open,
+          setOpen,
+          currentRow,
+          setCurrentRow,
+          refreshTrigger,
+          triggerRefresh,
+          resolvedKey,
+          setResolvedKey,
+          resolveRealKey,
+          resolveRealKeysBatch,
+          resolvedKeys,
+          loadingKeys,
+          copiedKeyId,
+          markKeyCopied,
+        }}
+      >
+        {children}
+      </ApiKeysContext>
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) cancelVerification()
+        }}
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={async (method, code) => {
+          try {
+            await executeVerification(method, code)
+          } catch {
+            // Errors are already surfaced by useSecureVerification.
+          }
+        }}
+        onCancel={cancelVerification}
+        onCodeChange={setVerificationCode}
+        onMethodChange={switchVerificationMethod}
+      />
+    </>
   )
 }
 
