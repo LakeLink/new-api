@@ -35,10 +35,22 @@ import {
   getServerAddress,
   encodeChannelConnectionString,
 } from '../../helpers/token';
+import { isVerificationRequiredError } from '../../helpers/secureApiCall';
 import { normalizeExternalProtocolUrl } from '../../helpers/safeNavigation';
+import { useSecureVerification } from '../common/useSecureVerification';
 
 export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
   const { t } = useTranslation();
+  const {
+    isModalVisible: secureVerificationVisible,
+    verificationMethods: secureVerificationMethods,
+    verificationState: secureVerificationState,
+    executeVerification: executeSecureVerification,
+    cancelVerification: cancelSecureVerification,
+    setVerificationCode: setSecureVerificationCode,
+    switchVerificationMethod: switchSecureVerificationMethod,
+    withVerification,
+  } = useSecureVerification();
 
   // Basic state
   const [tokens, setTokens] = useState([]);
@@ -162,6 +174,29 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
         setResolvedTokenKeys((prev) => ({ ...prev, [tokenId]: fullKey }));
         return fullKey;
       } catch (error) {
+        if (isVerificationRequiredError(error)) {
+          try {
+            const fullKey = await withVerification(
+              async () => {
+                const verifiedKey = await fetchTokenKeyById(tokenId);
+                setResolvedTokenKeys((prev) => ({
+                  ...prev,
+                  [tokenId]: verifiedKey,
+                }));
+                return verifiedKey;
+              },
+              {
+                preferredMethod: 'passkey',
+                title: t('安全验证'),
+                description: t('需要安全验证'),
+              },
+            );
+            return fullKey || null;
+          } catch (_) {
+            return null;
+          }
+        }
+
         const normalizedError = new Error(
           error?.message || t('获取令牌密钥失败'),
         );
@@ -202,11 +237,13 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
 
   const copyTokenKey = async (record) => {
     const fullKey = await fetchTokenKey(record);
+    if (!fullKey) return;
     await copyText(`sk-${fullKey}`);
   };
 
   const copyTokenConnectionString = async (record) => {
     const fullKey = await fetchTokenKey(record);
+    if (!fullKey) return;
     const serverUrl = getServerAddress();
     const connStr = encodeChannelConnectionString(`sk-${fullKey}`, serverUrl);
     await copyText(connStr);
@@ -215,6 +252,7 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
   // Open link function for chat integrations
   const onOpenLink = async (type, url, record) => {
     const fullKey = await fetchTokenKey(record);
+    if (!fullKey) return;
     if (url && url.startsWith('ccswitch')) {
       openCCSwitchModal(fullKey);
       return;
@@ -430,7 +468,18 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
     }
     try {
       const ids = selectedKeys.map((token) => token.id);
-      const keysMap = await fetchTokenKeysBatch(ids);
+      let keysMap;
+      try {
+        keysMap = await fetchTokenKeysBatch(ids);
+      } catch (error) {
+        if (!isVerificationRequiredError(error)) throw error;
+        keysMap = await withVerification(() => fetchTokenKeysBatch(ids), {
+          preferredMethod: 'passkey',
+          title: t('安全验证'),
+          description: t('需要安全验证'),
+        });
+      }
+      if (!keysMap) return;
 
       setResolvedTokenKeys((prev) => ({ ...prev, ...keysMap }));
 
@@ -524,6 +573,15 @@ export const useTokensData = (openFluentNotification, openCCSwitchModal) => {
     batchDeleteTokens,
     batchCopyTokens,
     syncPageData,
+
+    // Secure verification state
+    secureVerificationVisible,
+    secureVerificationMethods,
+    secureVerificationState,
+    executeSecureVerification,
+    cancelSecureVerification,
+    setSecureVerificationCode,
+    switchSecureVerificationMethod,
 
     // Translation
     t,

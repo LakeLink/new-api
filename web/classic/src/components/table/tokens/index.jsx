@@ -39,6 +39,7 @@ import TokensFilters from './TokensFilters';
 import TokensDescription from './TokensDescription';
 import EditTokenModal from './modals/EditTokenModal';
 import CCSwitchModal from './modals/CCSwitchModal';
+import SecureVerificationModal from '../../common/modals/SecureVerificationModal';
 import { useTokensData } from '../../../hooks/tokens/useTokensData';
 import { useIsMobile } from '../../../hooks/common/useIsMobile';
 import { createCardProPagination } from '../../../helpers/utils';
@@ -373,6 +374,15 @@ function TokensPage() {
 
     // Translation
     t,
+
+    // Secure verification
+    secureVerificationVisible,
+    secureVerificationMethods,
+    secureVerificationState,
+    executeSecureVerification,
+    cancelSecureVerification,
+    setSecureVerificationCode,
+    switchSecureVerificationMethod,
   } = tokensData;
 
   return (
@@ -389,6 +399,24 @@ function TokensPage() {
         onClose={() => setCCSwitchVisible(false)}
         tokenKey={ccSwitchKey}
         modelOptions={modelOptions}
+      />
+
+      <SecureVerificationModal
+        visible={secureVerificationVisible}
+        verificationMethods={secureVerificationMethods}
+        verificationState={secureVerificationState}
+        onVerify={async (method, code) => {
+          try {
+            await executeSecureVerification(method, code);
+          } catch (_) {
+            // Errors are already shown by the secure verification hook.
+          }
+        }}
+        onCancel={cancelSecureVerification}
+        onCodeChange={setSecureVerificationCode}
+        onMethodSwitch={switchSecureVerificationMethod}
+        title={t('安全验证')}
+        description={t('需要安全验证')}
       />
 
       <CardPro

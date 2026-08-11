@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SecureVerificationService } from '../../services/secureVerification';
 import { showError, showSuccess } from '../../helpers';
@@ -57,6 +57,7 @@ export const useSecureVerification = ({
     code: '',
     apiCall: null,
   });
+  const pendingVerificationRef = useRef(null);
 
   // 检查可用的验证方式
   const checkVerificationMethods = useCallback(async () => {
@@ -73,6 +74,9 @@ export const useSecureVerification = ({
 
   // 重置状态
   const resetState = useCallback(() => {
+    const pendingVerification = pendingVerificationRef.current;
+    pendingVerificationRef.current = null;
+    pendingVerification?.resolve(null);
     setVerificationState({
       method: null,
       loading: false,
@@ -152,6 +156,10 @@ export const useSecureVerification = ({
         // 验证成功，调用业务 API（此时中间件会通过）
         const result = await verificationApiCall();
 
+        const pendingVerification = pendingVerificationRef.current;
+        pendingVerificationRef.current = null;
+        pendingVerification?.resolve(result);
+
         // 显示成功消息
         if (successMessage) {
           showSuccess(successMessage);
@@ -167,6 +175,9 @@ export const useSecureVerification = ({
 
         return result;
       } catch (error) {
+        const pendingVerification = pendingVerificationRef.current;
+        pendingVerificationRef.current = null;
+        pendingVerification?.reject(error);
         showError(error.message || t('验证失败，请重试'));
         onError?.(error);
         throw error;
@@ -252,10 +263,35 @@ export const useSecureVerification = ({
       } catch (error) {
         // 检查是否是需要验证的错误
         if (isVerificationRequiredError(error)) {
-          // 自动触发验证流程
-          await startVerification(apiCall, options);
-          // 不抛出错误，让验证模态框处理
-          return null;
+          let resolvePending;
+          let rejectPending;
+          const pendingResult = new Promise((resolve, reject) => {
+            resolvePending = resolve;
+            rejectPending = reject;
+          });
+          const pendingVerification = {
+            resolve: resolvePending,
+            reject: rejectPending,
+          };
+          pendingVerificationRef.current = pendingVerification;
+
+          try {
+            const opened = await startVerification(apiCall, options);
+            if (
+              !opened &&
+              pendingVerificationRef.current === pendingVerification
+            ) {
+              pendingVerificationRef.current = null;
+              resolvePending(null);
+            }
+          } catch (startError) {
+            if (pendingVerificationRef.current === pendingVerification) {
+              pendingVerificationRef.current = null;
+              rejectPending(startError);
+            }
+          }
+
+          return await pendingResult;
         }
         // 其他错误继续抛出
         throw error;

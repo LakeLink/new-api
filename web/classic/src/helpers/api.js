@@ -27,6 +27,7 @@ import axios from 'axios';
 import { MESSAGE_ROLES } from '../constants/playground.constants';
 import { clearPlaygroundData } from '../components/playground/configStorage';
 import { normalizeHttpUrl } from './safeNavigation';
+import { isVerificationRequiredError } from './secureApiCall';
 
 export let API = axios.create({
   baseURL: import.meta.env.VITE_REACT_APP_SERVER_URL
@@ -102,6 +103,9 @@ export function updateAPI() {
 API.interceptors.response.use(
   (response) => response,
   (error) => {
+    if (isVerificationRequiredError(error)) {
+      return Promise.reject(error);
+    }
     // 如果请求配置中显式要求跳过全局错误处理，则不弹出默认错误提示
     if (error.config && error.config.skipErrorHandler) {
       return Promise.reject(error);
