@@ -424,12 +424,11 @@ func TestOpenAIChatRequestToClaudeMessagesSupportsInlineFiles(t *testing.T) {
 			wantContent: 1,
 		},
 		{
-			name: "unsupported file is ignored",
+			name: "unsupported file is rejected instead of being dropped",
 			file: &dto.MessageFile{
 				FileName: "blob.bin",
 				FileData: "AAEC",
 			},
-			wantContent: 0,
 		},
 	}
 
@@ -446,6 +445,10 @@ func TestOpenAIChatRequestToClaudeMessagesSupportsInlineFiles(t *testing.T) {
 			}
 
 			claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, request)
+			if test.wantType == "" {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			require.Len(t, claudeRequest.Messages, 1)
 			content, ok := claudeRequest.Messages[0].Content.([]dto.ClaudeMediaMessage)

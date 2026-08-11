@@ -338,6 +338,7 @@ func responsesRequestToolsToChat(raw json.RawMessage) ([]dto.ToolCallRequest, er
 					Name:        strings.TrimSpace(common.Interface2String(tool["name"])),
 					Description: common.Interface2String(tool["description"]),
 					Parameters:  tool["parameters"],
+					Strict:      boolPointer(tool["strict"]),
 				},
 			})
 			continue

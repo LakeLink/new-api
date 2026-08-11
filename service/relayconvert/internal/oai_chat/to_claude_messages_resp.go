@@ -433,6 +433,9 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 }
 
 func ResponseOpenAI2Claude(openAIResponse *dto.OpenAITextResponse, info *relaycommon.RelayInfo) *dto.ClaudeResponse {
+	if openAIResponse == nil {
+		return nil
+	}
 	var stopReason string
 	contents := make([]dto.ClaudeMediaMessage, 0)
 	claudeResponse := &dto.ClaudeResponse{
@@ -443,6 +446,14 @@ func ResponseOpenAI2Claude(openAIResponse *dto.OpenAITextResponse, info *relayco
 	}
 	for _, choice := range openAIResponse.Choices {
 		stopReason = stopReasonOpenAI2Claude(choice.FinishReason)
+		reasoningContent := choice.Message.GetReasoningContent()
+		if reasoningContent != "" {
+			claudeContent := dto.ClaudeMediaMessage{
+				Type:     "thinking",
+				Thinking: common.GetPointer(reasoningContent),
+			}
+			contents = append(contents, claudeContent)
+		}
 		textContent := choice.Message.StringContent()
 		toolCalls := choice.Message.ParseToolCalls()
 		if textContent != "" || len(toolCalls) == 0 {

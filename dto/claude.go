@@ -34,6 +34,7 @@ type ClaudeMediaMessage struct {
 	Input     any    `json:"input,omitempty"`
 	Content   any    `json:"content,omitempty"`
 	ToolUseId string `json:"tool_use_id,omitempty"`
+	IsError   *bool  `json:"is_error,omitempty"`
 }
 
 func (c *ClaudeMediaMessage) SetText(s string) {
@@ -174,6 +175,7 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description,omitempty"`
 	InputSchema map[string]interface{} `json:"input_schema"`
+	Strict      *bool                  `json:"strict,omitempty"`
 }
 
 type InputSchema struct {

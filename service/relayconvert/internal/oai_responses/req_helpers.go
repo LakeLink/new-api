@@ -120,9 +120,17 @@ func responsesRequestFunctionDeclarations(raw []byte) ([]dto.FunctionRequest, er
 			Name:        name,
 			Description: common.Interface2String(tool["description"]),
 			Parameters:  tool["parameters"],
+			Strict:      boolPointer(tool["strict"]),
 		})
 	}
 	return functions, nil
+}
+
+func boolPointer(value any) *bool {
+	if typed, ok := value.(bool); ok {
+		return &typed
+	}
+	return nil
 }
 
 func RequestFunctionDeclarations(raw []byte) ([]dto.FunctionRequest, error) {

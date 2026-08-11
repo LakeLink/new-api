@@ -1,6 +1,7 @@
 package oairesponses
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -35,6 +36,12 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 	}
 	if err := ValidateToolsForConversion(req.Tools, "Anthropic Messages"); err != nil {
 		return nil, err
+	}
+	if req.TopLogProbs != nil {
+		return nil, fmt.Errorf("top_logprobs cannot be converted to Anthropic Messages")
+	}
+	if req.MaxToolCalls != nil {
+		return nil, fmt.Errorf("max_tool_calls cannot be converted to Anthropic Messages")
 	}
 
 	claudeRequest := &dto.ClaudeRequest{
@@ -86,6 +93,9 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 	if len(functions) > 0 {
 		claudeRequest.Tools = responsesFunctionDeclarationsToClaudeTools(functions)
 	}
+	if err := applyResponsesTextToClaude(req.Text, claudeRequest); err != nil {
+		return nil, err
+	}
 
 	toolChoice, err := RequestToolChoiceToChat(req.ToolChoice)
 	if err != nil {
@@ -103,16 +113,11 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 
 	systemMessages := make([]dto.ClaudeMediaMessage, 0)
 	if RawJSONPresent(req.Instructions) {
-		instructions, err := JSONString(req.Instructions)
+		instructions, err := responsesInstructionsToClaudeMediaMessages(c, req.Instructions)
 		if err != nil {
 			return nil, fmt.Errorf("invalid instructions: %w", err)
 		}
-		if strings.TrimSpace(instructions) != "" {
-			systemMessages = append(systemMessages, dto.ClaudeMediaMessage{
-				Type: "text",
-				Text: common.GetPointer(instructions),
-			})
-		}
+		systemMessages = append(systemMessages, instructions...)
 	}
 
 	inputItems, err := InputItems(req.Input)
@@ -123,11 +128,23 @@ func OpenAIResponsesRequestToClaudeMessages(c *gin.Context, req *dto.OpenAIRespo
 		itemType := strings.TrimSpace(common.Interface2String(item["type"]))
 		switch itemType {
 		case ResponsesInputTypeFunctionCall:
-			claudeRequest.Messages = appendClaudeToolUse(claudeRequest.Messages, responsesFunctionCallItemToClaudeToolUse(item, "arguments"))
+			toolUse, err := responsesFunctionCallItemToClaudeToolUse(item, "arguments")
+			if err != nil {
+				return nil, err
+			}
+			claudeRequest.Messages = appendClaudeToolUse(claudeRequest.Messages, toolUse)
 		case ResponsesInputTypeCustomToolCall:
-			claudeRequest.Messages = appendClaudeToolUse(claudeRequest.Messages, responsesFunctionCallItemToClaudeToolUse(item, "input"))
+			toolUse, err := responsesFunctionCallItemToClaudeToolUse(item, "input")
+			if err != nil {
+				return nil, err
+			}
+			claudeRequest.Messages = appendClaudeToolUse(claudeRequest.Messages, toolUse)
 		case ResponsesInputTypeFunctionCallOutput, ResponsesInputTypeCustomToolOutput:
-			claudeRequest.Messages = appendClaudeToolResult(claudeRequest.Messages, responsesFunctionOutputItemToClaudeToolResult(item))
+			toolResult, err := responsesFunctionOutputItemToClaudeToolResult(c, item)
+			if err != nil {
+				return nil, err
+			}
+			claudeRequest.Messages = appendClaudeToolResult(claudeRequest.Messages, toolResult)
 		default:
 			role := responsesClaudeRole(item)
 			parts, err := responsesInputContentToClaudeMediaMessages(c, item["content"])
@@ -167,6 +184,7 @@ func responsesFunctionDeclarationsToClaudeTools(functions []dto.FunctionRequest)
 			Name:        function.Name,
 			Description: function.Description,
 			InputSchema: responsesFunctionParametersToClaudeInputSchema(function.Parameters),
+			Strict:      function.Strict,
 		})
 	}
 	return tools
@@ -243,10 +261,25 @@ func responsesInputContentToClaudeMediaMessages(c *gin.Context, content any) ([]
 					Text: common.GetPointer(text),
 				})
 			}
-		case "input_image", "input_file", "input_audio", "input_video":
+		case "input_audio", "input_video":
+			return nil, fmt.Errorf("Responses content type %q cannot be converted to Anthropic Messages", partType)
+		case "input_image", "input_file":
+			if partType == "input_image" {
+				if imageURL := responsesInputImageURL(contentPart); imageURL != "" &&
+					(strings.HasPrefix(imageURL, "http://") || strings.HasPrefix(imageURL, "https://")) {
+					parts = append(parts, dto.ClaudeMediaMessage{
+						Type: "image",
+						Source: &dto.ClaudeMessageSource{
+							Type: "url",
+							Url:  imageURL,
+						},
+					})
+					continue
+				}
+			}
 			source := ContentPartToFileSource(contentPart)
 			if source == nil {
-				continue
+				return nil, fmt.Errorf("Responses content type %q is missing its source", partType)
 			}
 			base64Data, mimeType, err := relaymedia.ResolveBase64Data(c, source, "formatting Responses input for Claude")
 			if err != nil {
@@ -259,32 +292,180 @@ func responsesInputContentToClaudeMediaMessages(c *gin.Context, content any) ([]
 					Data:      base64Data,
 				},
 			}
+			if strings.HasPrefix(mimeType, "text/") {
+				decodedData, err := decodeBase64ResponseData(base64Data)
+				if err != nil {
+					return nil, fmt.Errorf("decode text file data failed: %w", err)
+				}
+				parts = append(parts, dto.ClaudeMediaMessage{Type: "text", Text: common.GetPointer(string(decodedData))})
+				continue
+			}
 			if strings.HasPrefix(mimeType, "application/pdf") {
 				claudePart.Type = "document"
-			} else {
+			} else if strings.HasPrefix(mimeType, "image/") {
 				claudePart.Type = "image"
+			} else {
+				return nil, fmt.Errorf("Responses content type %q resolved to unsupported media type %q", partType, mimeType)
 			}
 			parts = append(parts, claudePart)
+		default:
+			return nil, fmt.Errorf("Responses content type %q cannot be converted to Anthropic Messages", partType)
 		}
 	}
 	return parts, nil
 }
 
-func responsesFunctionCallItemToClaudeToolUse(item map[string]any, inputKey string) dto.ClaudeMediaMessage {
-	return dto.ClaudeMediaMessage{
-		Type:  "tool_use",
-		Id:    CallID(item),
-		Name:  strings.TrimSpace(common.Interface2String(item["name"])),
-		Input: ObjectValue(item[inputKey], inputKey),
+func responsesInputImageURL(contentPart map[string]any) string {
+	value, ok := contentPart["image_url"]
+	if !ok {
+		return ""
 	}
+	if imageURL, ok := value.(string); ok {
+		return imageURL
+	}
+	if imageMap, ok := value.(map[string]any); ok {
+		return common.Interface2String(imageMap["url"])
+	}
+	return ""
 }
 
-func responsesFunctionOutputItemToClaudeToolResult(item map[string]any) dto.ClaudeMediaMessage {
+func decodeBase64ResponseData(data string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func responsesInstructionsToClaudeMediaMessages(c *gin.Context, raw json.RawMessage) ([]dto.ClaudeMediaMessage, error) {
+	if common.GetJsonType(raw) == "string" {
+		value, err := JSONString(raw)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(value) == "" {
+			return nil, nil
+		}
+		return []dto.ClaudeMediaMessage{{Type: "text", Text: common.GetPointer(value)}}, nil
+	}
+	var items []map[string]any
+	if err := common.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	parts := make([]dto.ClaudeMediaMessage, 0)
+	for index, item := range items {
+		content, ok := item["content"]
+		if !ok {
+			return nil, fmt.Errorf("instructions[%d] is missing content", index)
+		}
+		converted, err := responsesInputContentToClaudeMediaMessages(c, content)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range converted {
+			if part.Type != "text" {
+				return nil, fmt.Errorf("instructions[%d] contains unsupported %q content", index, part.Type)
+			}
+		}
+		parts = append(parts, converted...)
+	}
+	return parts, nil
+}
+
+func applyResponsesTextToClaude(raw json.RawMessage, request *dto.ClaudeRequest) error {
+	responseFormat, err := RequestTextToChatResponseFormat(raw)
+	if err != nil {
+		return err
+	}
+	if responseFormat == nil || responseFormat.Type == "" || responseFormat.Type == "text" {
+		return nil
+	}
+	if responseFormat.Type != "json_schema" {
+		return fmt.Errorf("Responses text format %q cannot be converted to Anthropic Messages", responseFormat.Type)
+	}
+	var format dto.FormatJsonSchema
+	if err := common.Unmarshal(responseFormat.JsonSchema, &format); err != nil {
+		return fmt.Errorf("invalid Responses text format: %w", err)
+	}
+	if format.Schema == nil {
+		return fmt.Errorf("Responses json_schema format is missing schema")
+	}
+	outputFormat := map[string]any{
+		"type":   "json_schema",
+		"schema": format.Schema,
+	}
+	outputConfig := make(map[string]any)
+	if len(request.OutputConfig) > 0 {
+		if err := common.Unmarshal(request.OutputConfig, &outputConfig); err != nil {
+			return fmt.Errorf("invalid existing Anthropic output_config: %w", err)
+		}
+	}
+	outputConfig["format"] = outputFormat
+	encoded, err := common.Marshal(outputConfig)
+	if err != nil {
+		return fmt.Errorf("marshal Anthropic output_config: %w", err)
+	}
+	request.OutputConfig = encoded
+	return nil
+}
+
+func responsesFunctionCallItemToClaudeToolUse(item map[string]any, inputKey string) (dto.ClaudeMediaMessage, error) {
+	input, err := responsesFunctionCallInput(item[inputKey], inputKey)
+	if err != nil {
+		return dto.ClaudeMediaMessage{}, err
+	}
+	id := CallID(item)
+	name := strings.TrimSpace(common.Interface2String(item["name"]))
+	if id == "" || name == "" {
+		return dto.ClaudeMediaMessage{}, fmt.Errorf("%s item requires call_id and name", inputKey)
+	}
+	return dto.ClaudeMediaMessage{
+		Type:  "tool_use",
+		Id:    id,
+		Name:  name,
+		Input: input,
+	}, nil
+}
+
+func responsesFunctionCallInput(value any, key string) (map[string]any, error) {
+	if value == nil {
+		return map[string]any{}, nil
+	}
+	if object, ok := value.(map[string]any); ok {
+		return object, nil
+	}
+	if text, ok := value.(string); ok {
+		var object map[string]any
+		if err := common.Unmarshal([]byte(text), &object); err != nil || object == nil {
+			return nil, fmt.Errorf("%s must contain a JSON object", key)
+		}
+		return object, nil
+	}
+	return nil, fmt.Errorf("%s must contain a JSON object", key)
+}
+
+func responsesFunctionOutputItemToClaudeToolResult(c *gin.Context, item map[string]any) (dto.ClaudeMediaMessage, error) {
+	content := responsesToolOutputValue(item["output"])
+	_, isArray := content.([]any)
+	if !isArray {
+		_, isArray = content.([]map[string]any)
+	}
+	if isArray {
+		converted, err := responsesInputContentToClaudeMediaMessages(c, content)
+		if err != nil {
+			return dto.ClaudeMediaMessage{}, err
+		}
+		if len(converted) == 1 && converted[0].Type == "text" {
+			content = converted[0].GetText()
+		} else {
+			content = converted
+		}
+	}
 	return dto.ClaudeMediaMessage{
 		Type:      "tool_result",
 		ToolUseId: CallID(item),
-		Content:   responsesToolOutputValue(item["output"]),
-	}
+		Content:   content,
+	}, nil
 }
 
 func responsesToolOutputValue(value any) any {

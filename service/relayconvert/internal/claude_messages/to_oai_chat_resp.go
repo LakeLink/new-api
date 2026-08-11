@@ -13,12 +13,14 @@ import (
 )
 
 type ClaudeResponseInfo struct {
-	ResponseId   string
-	Created      int64
-	Model        string
-	ResponseText strings.Builder
-	Usage        *dto.Usage
-	Done         bool
+	ResponseId       string
+	Created          int64
+	Model            string
+	ResponseText     strings.Builder
+	Usage            *dto.Usage
+	Done             bool
+	ToolBlockIndexes map[int]int
+	NextToolIndex    int
 }
 
 func StopReasonClaudeToOpenAI(reason string) string {
@@ -26,6 +28,17 @@ func StopReasonClaudeToOpenAI(reason string) string {
 }
 
 func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCompletionsStreamResponse {
+	return streamResponseClaude2OpenAI(claudeResponse, nil)
+}
+
+func StreamResponseClaude2OpenAIWithInfo(claudeResponse *dto.ClaudeResponse, info *ClaudeResponseInfo) *dto.ChatCompletionsStreamResponse {
+	return streamResponseClaude2OpenAI(claudeResponse, info)
+}
+
+func streamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse, info *ClaudeResponseInfo) *dto.ChatCompletionsStreamResponse {
+	if claudeResponse == nil {
+		return nil
+	}
 	var response dto.ChatCompletionsStreamResponse
 	response.Object = "chat.completion.chunk"
 	response.Model = claudeResponse.Model
@@ -34,6 +47,21 @@ func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCo
 	fcIdx := 0
 	if claudeResponse.Index != nil {
 		fcIdx = *claudeResponse.Index
+	}
+	toolIndex := func(blockIndex int) int {
+		if info == nil {
+			return blockIndex
+		}
+		if info.ToolBlockIndexes == nil {
+			info.ToolBlockIndexes = make(map[int]int)
+		}
+		if index, ok := info.ToolBlockIndexes[blockIndex]; ok {
+			return index
+		}
+		index := info.NextToolIndex
+		info.ToolBlockIndexes[blockIndex] = index
+		info.NextToolIndex++
+		return index
 	}
 	var choice dto.ChatCompletionsStreamResponseChoice
 	if claudeResponse.Type == "message_start" {
@@ -50,7 +78,7 @@ func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCo
 			}
 			if claudeResponse.ContentBlock.Type == "tool_use" {
 				tools = append(tools, dto.ToolCallResponse{
-					Index: common.GetPointer(fcIdx),
+					Index: common.GetPointer(toolIndex(fcIdx)),
 					ID:    claudeResponse.ContentBlock.Id,
 					Type:  "function",
 					Function: dto.FunctionResponse{
@@ -67,16 +95,20 @@ func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCo
 			choice.Delta.Content = claudeResponse.Delta.Text
 			switch claudeResponse.Delta.Type {
 			case "input_json_delta":
+				if claudeResponse.Delta.PartialJson == nil {
+					return nil
+				}
 				tools = append(tools, dto.ToolCallResponse{
 					Type:  "function",
-					Index: common.GetPointer(fcIdx),
+					Index: common.GetPointer(toolIndex(fcIdx)),
 					Function: dto.FunctionResponse{
 						Arguments: *claudeResponse.Delta.PartialJson,
 					},
 				})
 			case "signature_delta":
-				signatureContent := "\n"
-				choice.Delta.ReasoningContent = &signatureContent
+				// Anthropic's signature is verification metadata, not generated
+				// reasoning text. OpenAI Chat has no equivalent field.
+				return nil
 			case "thinking_delta":
 				choice.Delta.ReasoningContent = claudeResponse.Delta.Thinking
 			}
@@ -103,22 +135,18 @@ func StreamResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.ChatCo
 }
 
 func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextResponse {
+	if claudeResponse == nil {
+		return nil
+	}
 	choices := make([]dto.OpenAITextResponseChoice, 0)
 	fullTextResponse := dto.OpenAITextResponse{
 		Id:      fmt.Sprintf("chatcmpl-%s", common.GetUUID()),
 		Object:  "chat.completion",
 		Created: common.GetTimestamp(),
 	}
-	var responseText string
-	var responseThinking string
-	if len(claudeResponse.Content) > 0 {
-		responseText = claudeResponse.Content[0].GetText()
-		if claudeResponse.Content[0].Thinking != nil {
-			responseThinking = *claudeResponse.Content[0].Thinking
-		}
-	}
+	var responseText strings.Builder
+	var responseThinking strings.Builder
 	tools := make([]dto.ToolCallResponse, 0)
-	thinkingContent := ""
 
 	fullTextResponse.Id = claudeResponse.Id
 	for _, message := range claudeResponse.Content {
@@ -135,10 +163,10 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 			})
 		case "thinking":
 			if message.Thinking != nil {
-				thinkingContent = *message.Thinking
+				responseThinking.WriteString(*message.Thinking)
 			}
 		case "text":
-			responseText = message.GetText()
+			responseText.WriteString(message.GetText())
 		}
 	}
 	choice := dto.OpenAITextResponseChoice{
@@ -148,15 +176,24 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 		},
 		FinishReason: StopReasonClaudeToOpenAI(claudeResponse.StopReason),
 	}
-	choice.SetStringContent(responseText)
-	if len(responseThinking) > 0 {
-		choice.ReasoningContent = &responseThinking
+	if responseText.Len() > 0 {
+		choice.Message.SetStringContent(responseText.String())
+	} else {
+		choice.Message.SetNullContent()
+	}
+	if responseThinking.Len() > 0 {
+		thinking := responseThinking.String()
+		choice.Message.ReasoningContent = &thinking
 	}
 	if len(tools) > 0 {
 		choice.Message.SetToolCalls(tools)
 	}
-	if thinkingContent != "" {
-		choice.Message.ReasoningContent = &thinkingContent
+	if choice.FinishReason == "" || choice.FinishReason == "null" {
+		if len(tools) > 0 {
+			choice.FinishReason = "tool_calls"
+		} else {
+			choice.FinishReason = "stop"
+		}
 	}
 	fullTextResponse.Model = claudeResponse.Model
 	choices = append(choices, choice)

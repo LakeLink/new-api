@@ -264,6 +264,7 @@ type FunctionRequest struct {
 	Description string `json:"description,omitempty"`
 	Name        string `json:"name"`
 	Parameters  any    `json:"parameters,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
 	Arguments   string `json:"arguments,omitempty"`
 }
 
@@ -533,9 +534,23 @@ func (m *Message) StringContent() string {
 			}
 		}
 		return contentStr
+	case []MediaContent:
+		var contentStr string
+		for _, contentItem := range m.Content.([]MediaContent) {
+			if contentItem.Type == ContentTypeText {
+				contentStr += contentItem.Text
+			}
+		}
+		return contentStr
+	default:
+		var contentStr string
+		for _, contentItem := range m.ParseContent() {
+			if contentItem.Type == ContentTypeText {
+				contentStr += contentItem.Text
+			}
+		}
+		return contentStr
 	}
-
-	return ""
 }
 
 func (m *Message) SetNullContent() {
@@ -579,6 +594,19 @@ func (m *Message) ParseContent() []MediaContent {
 		}}
 		m.parsedContent = contentList
 		return contentList
+	}
+
+	// Converters may construct typed content arrays directly in memory.
+	if arrayContent, ok := m.Content.([]MediaContent); ok {
+		m.parsedContent = arrayContent
+		return arrayContent
+	}
+	if arrayContent, ok := m.Content.([]map[string]any); ok {
+		genericContent := make([]any, len(arrayContent))
+		for index, item := range arrayContent {
+			genericContent[index] = item
+		}
+		m.Content = genericContent
 	}
 
 	// 尝试解析为数组
