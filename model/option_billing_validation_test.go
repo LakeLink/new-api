@@ -9,8 +9,33 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	_ "github.com/QuantumNous/new-api/setting/console_setting"
 	_ "github.com/QuantumNous/new-api/setting/perf_metrics_setting"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestPurgeRemovedPaymentComplianceOptions(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Option{}))
+
+	originalDB := DB
+	DB = db
+	t.Cleanup(func() { DB = originalDB })
+
+	require.NoError(t, db.Create([]Option{
+		{Key: "payment_setting.compliance_confirmed", Value: "true"},
+		{Key: "payment_setting.compliance_confirmed_at", Value: "123"},
+		{Key: "payment_setting.amount_options", Value: "[10,20]"},
+	}).Error)
+
+	require.NoError(t, purgeRemovedPaymentComplianceOptions())
+
+	var options []Option
+	require.NoError(t, db.Order("key").Find(&options).Error)
+	require.Len(t, options, 1)
+	require.Equal(t, "payment_setting.amount_options", options[0].Key)
+}
 
 func TestValidateOptionValueRejectsUnsafeBillingMaps(t *testing.T) {
 	for _, key := range []string{

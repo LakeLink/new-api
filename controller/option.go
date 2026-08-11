@@ -28,6 +28,12 @@ var completionRatioMetaOptionKeys = []string{
 	"AudioCompletionRatio",
 }
 
+const removedPaymentComplianceOptionPrefix = "payment_setting.compliance_"
+
+func isRemovedPaymentComplianceOptionKey(key string) bool {
+	return strings.HasPrefix(key, removedPaymentComplianceOptionPrefix)
+}
+
 func isVisiblePublicKeyOption(key string) bool {
 	switch key {
 	case "WaffoPancakeWebhookPublicKey", "WaffoPancakeWebhookTestKey":
@@ -84,6 +90,9 @@ func GetOptions(c *gin.Context) {
 	optionValues := make(map[string]string)
 	common.OptionMapRWMutex.Lock()
 	for k, v := range common.OptionMap {
+		if isRemovedPaymentComplianceOptionKey(k) {
+			continue
+		}
 		value := common.Interface2String(v)
 		isSensitiveKey := strings.HasSuffix(k, "Token") ||
 			strings.HasSuffix(k, "Secret") ||
@@ -140,6 +149,10 @@ func UpdateOption(c *gin.Context) {
 		option.Value = common.Interface2String(option.Value.(int))
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
+	}
+	if isRemovedPaymentComplianceOptionKey(option.Key) {
+		common.ApiSuccess(c, nil)
+		return
 	}
 	switch option.Key {
 	case "GitHubOAuthEnabled":

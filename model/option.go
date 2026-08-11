@@ -26,6 +26,15 @@ type Option struct {
 
 var optionUpdateMutex sync.Mutex
 
+const removedPaymentComplianceOptionPrefix = "payment_setting.compliance_"
+
+func purgeRemovedPaymentComplianceOptions() error {
+	return DB.
+		Where(commonKeyCol+" LIKE ?", removedPaymentComplianceOptionPrefix+"%").
+		Delete(&Option{}).
+		Error
+}
+
 func AllOption() ([]*Option, error) {
 	var options []*Option
 	var err error
@@ -197,6 +206,11 @@ func InitOptionMap() {
 func loadOptionsFromDatabase() {
 	optionUpdateMutex.Lock()
 	defer optionUpdateMutex.Unlock()
+
+	if err := purgeRemovedPaymentComplianceOptions(); err != nil {
+		common.SysError("failed to purge removed payment compliance options: " + err.Error())
+		return
+	}
 
 	options, err := AllOption()
 	if err != nil {
