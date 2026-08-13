@@ -70,12 +70,9 @@ func main() {
 
 	kitutil.Debug.Store(common.DebugEnabled)
 
-	defer func() {
-		err := model.CloseDB()
-		if err != nil {
-			common.FatalLog("failed to close database: " + err.Error())
-		}
-	}()
+	// Recover durable financial operations left pending by an earlier process
+	// before accepting new relay traffic.
+	service.StartBillingAdjustmentWorker()
 
 	if common.RedisEnabled {
 		// for compatibility with old versions
@@ -135,6 +132,8 @@ func main() {
 
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
+	// Codex weekly usage guard checks configured channels every hour.
+	service.StartCodexUsageLimitCheckTask()
 
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
@@ -200,6 +199,7 @@ func main() {
 		common.FatalLog("failed to configure trusted proxies: " + err.Error())
 		return
 	}
+	server.Use(middleware.SecurityHeaders())
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{
