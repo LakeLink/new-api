@@ -159,3 +159,23 @@ func (c *ClaudeSettings) GetThinkingBudgetTokens(maxTokens uint) int {
 	}
 	return budgetTokens
 }
+
+// ValidateClaudeDefaultMaxTokens validates the JSON persisted by the option
+// API. Zero stays allowed — the current Messages API accepts max_tokens: 0 as
+// cache pre-warming — but negative values are rejected because they would
+// wrap into huge unsigned values during request conversion.
+func ValidateClaudeDefaultMaxTokens(value string) error {
+	var settings map[string]int
+	if err := common.UnmarshalJsonStr(value, &settings); err != nil {
+		return fmt.Errorf("Claude default max tokens must be a JSON map of model to integer: %w", err)
+	}
+	if settings == nil {
+		return fmt.Errorf("Claude default max tokens must be a JSON map of model to integer")
+	}
+	for model, maxTokens := range settings {
+		if maxTokens < 0 {
+			return fmt.Errorf("negative Claude default max_tokens %d for %q", maxTokens, model)
+		}
+	}
+	return nil
+}

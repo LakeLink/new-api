@@ -9,9 +9,19 @@ import (
 )
 
 const (
+	defaultGeminiSafetySetting       = "OFF"
 	minimumGeminiThinkingBudgetRatio = 0.002
 	defaultGeminiThinkingBudgetRatio = 0.6
 )
+
+var validGeminiSafetySettings = map[string]struct{}{
+	"OFF":                              {},
+	"BLOCK_NONE":                       {},
+	"BLOCK_ONLY_HIGH":                  {},
+	"BLOCK_MEDIUM_AND_ABOVE":           {},
+	"BLOCK_LOW_AND_ABOVE":              {},
+	"HARM_BLOCK_THRESHOLD_UNSPECIFIED": {},
+}
 
 // GeminiSettings defines Gemini model configuration. 注意bool要以enabled结尾才可以生效编辑
 type GeminiSettings struct {
@@ -27,17 +37,20 @@ type GeminiSettings struct {
 // 默认配置
 var defaultGeminiSettings = GeminiSettings{
 	SafetySettings: map[string]string{
-		"default": "OFF",
+		"default": defaultGeminiSafetySetting,
 	},
 	VersionSettings: map[string]string{
 		"default":        "v1beta",
 		"gemini-1.0-pro": "v1",
 	},
 	SupportedImagineModels: []string{
+		"gemini-2.0-flash-exp-image-generation",
+		"gemini-2.0-flash-exp",
+		"gemini-3-pro-image-preview",
+		"gemini-3-pro-image",
 		"gemini-2.5-flash-image",
 		"gemini-3.1-flash-image",
-		"gemini-3.1-flash-lite-image",
-		"gemini-3-pro-image",
+		"gemini-3.1-flash-image-preview",
 	},
 	ThinkingAdapterEnabled:                false,
 	ThinkingAdapterBudgetTokensPercentage: defaultGeminiThinkingBudgetRatio,
@@ -67,44 +80,55 @@ func init() {
 
 // GetGeminiSettings 获取Gemini配置
 func GetGeminiSettings() *GeminiSettings {
-	return config.Snapshot[GeminiSettings]("gemini")
+	return &geminiSettings
 }
 
 // GetGeminiSafetySetting 获取安全设置
 func GetGeminiSafetySetting(key string) string {
-	settings := GetGeminiSettings()
-	if value, ok := settings.SafetySettings[key]; ok {
+	settings := geminiSettings.SafetySettings
+	if value := settings[key]; value != "" {
 		return value
 	}
-	return settings.SafetySettings["default"]
+	if value := settings["default"]; value != "" {
+		return value
+	}
+	return defaultGeminiSafetySetting
+}
+
+// ValidateGeminiSafetySettings validates the JSON persisted by the option API.
+// Empty values remain valid because read-time fallback returns the default.
+func ValidateGeminiSafetySettings(value string) error {
+	var settings map[string]string
+	if err := common.UnmarshalJsonStr(value, &settings); err != nil {
+		return fmt.Errorf("Gemini safety settings must be a JSON string map: %w", err)
+	}
+	if settings == nil {
+		return fmt.Errorf("Gemini safety settings must be a JSON string map")
+	}
+	for category, threshold := range settings {
+		if threshold == "" {
+			continue
+		}
+		if _, ok := validGeminiSafetySettings[threshold]; !ok {
+			return fmt.Errorf("invalid Gemini safety threshold %q for %q", threshold, category)
+		}
+	}
+	return nil
 }
 
 // GetGeminiVersionSetting 获取版本设置
 func GetGeminiVersionSetting(key string) string {
-	settings := GetGeminiSettings()
-	if value, ok := settings.VersionSettings[key]; ok {
+	if value, ok := geminiSettings.VersionSettings[key]; ok {
 		return value
 	}
-	return settings.VersionSettings["default"]
+	return geminiSettings.VersionSettings["default"]
 }
 
 func IsGeminiModelSupportImagine(model string) bool {
-	for _, v := range GetGeminiSettings().SupportedImagineModels {
+	for _, v := range geminiSettings.SupportedImagineModels {
 		if v == model {
 			return true
 		}
 	}
 	return false
-}
-
-// GetThinkingBudgetTokens converts the configured ratio without allowing a
-// non-finite or out-of-range administrative value to reach an integer cast.
-// Provider-specific minimum and maximum budgets are applied by the converter.
-func (g *GeminiSettings) GetThinkingBudgetTokens(maxTokens uint) int {
-	percentage := g.ThinkingAdapterBudgetTokensPercentage
-	if math.IsNaN(percentage) || math.IsInf(percentage, 0) ||
-		percentage < minimumGeminiThinkingBudgetRatio || percentage > 1 {
-		percentage = defaultGeminiThinkingBudgetRatio
-	}
-	return common.QuotaFromFloat(float64(maxTokens) * percentage)
 }

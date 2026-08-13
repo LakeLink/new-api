@@ -1,49 +1,34 @@
 package middleware
 
 import (
-	"fmt"
-	"sync"
-	"sync/atomic"
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestSuccessfulRequestReservationsReleaseFailedRequest(t *testing.T) {
-	var reservations successfulRequestReservations
-	const now int64 = 1_000
+func TestModelRedisRateLimitUsesUTCRegardlessOfLocalTimezone(t *testing.T) {
+	redisServer, redisClient := useRateLimitMiniRedis(t)
+	previousLocation := time.Local
+	time.Local = time.FixedZone("test-utc-plus-eight", 8*60*60)
+	t.Cleanup(func() { time.Local = previousLocation })
 
-	assert.True(t, reservations.reserve("user", "request-1", 2, 60, now))
-	assert.True(t, reservations.reserve("user", "request-2", 2, 60, now))
-	assert.False(t, reservations.reserve("user", "request-3", 2, 60, now))
+	ctx := context.Background()
+	recordKey := "rateLimit:model-utc-record"
+	recordRedisRequest(ctx, redisClient, recordKey, 2)
+	recorded, err := redisClient.LIndex(ctx, recordKey, 0).Result()
+	require.NoError(t, err)
+	recordedAt, err := time.Parse(modelRateLimitTimeFormat, recorded)
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now().UTC(), recordedAt, 2*time.Second)
 
-	reservations.release("user", "request-1")
-	assert.True(t, reservations.reserve("user", "request-3", 2, 60, now))
-}
-
-func TestSuccessfulRequestReservationsExpireOutsideWindow(t *testing.T) {
-	var reservations successfulRequestReservations
-
-	assert.True(t, reservations.reserve("user", "request-1", 1, 60, 1_000))
-	assert.False(t, reservations.reserve("user", "request-2", 1, 60, 1_059))
-	assert.True(t, reservations.reserve("user", "request-2", 1, 60, 1_060))
-}
-
-func TestSuccessfulRequestReservationsEnforceConcurrentCap(t *testing.T) {
-	var reservations successfulRequestReservations
-	var allowed atomic.Int32
-	var waitGroup sync.WaitGroup
-
-	for index := 0; index < 12; index++ {
-		waitGroup.Add(1)
-		go func(requestID string) {
-			defer waitGroup.Done()
-			if reservations.reserve("user", requestID, 3, 60, 1_000) {
-				allowed.Add(1)
-			}
-		}(fmt.Sprintf("request-%d", index))
-	}
-	waitGroup.Wait()
-
-	assert.EqualValues(t, 3, allowed.Load())
+	checkKey := "rateLimit:model-utc-check"
+	withinWindow := time.Now().UTC().Add(-30 * time.Second).Format(modelRateLimitTimeFormat)
+	_, err = redisServer.Push(checkKey, withinWindow, withinWindow)
+	require.NoError(t, err)
+	allowed, err := checkRedisRateLimit(ctx, redisClient, checkKey, 2, 60)
+	require.NoError(t, err)
+	assert.False(t, allowed, "an existing UTC timestamp inside the window must remain limited on a non-UTC host")
 }

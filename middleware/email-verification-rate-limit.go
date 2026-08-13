@@ -7,7 +7,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis/v8"
 )
 
 const (
@@ -16,42 +15,25 @@ const (
 	EmailVerificationDuration      = 30 // 30秒时间窗口
 )
 
-var emailVerificationRateLimitScript = redis.NewScript(`
-local count = redis.call("INCR", KEYS[1])
-local ttl = redis.call("TTL", KEYS[1])
-if count == 1 or ttl < 0 then
-	redis.call("EXPIRE", KEYS[1], ARGV[1])
-end
-return count
-`)
-
 func redisEmailVerificationRateLimiter(c *gin.Context) {
-	rdb := common.RDB
-	key := "emailVerification:" + EmailVerificationRateLimitMark + ":" + c.ClientIP()
-
-	count, err := emailVerificationRateLimitScript.Run(
+	allowed, _, ttlSeconds, err := redisFixedWindowTake(
 		c.Request.Context(),
-		rdb,
-		[]string{key},
+		redisIPRateLimitKey(EmailVerificationRateLimitMark, c.ClientIP()),
+		EmailVerificationMaxRequests,
 		EmailVerificationDuration,
-	).Int64()
+	)
 	if err != nil {
-		// fallback
 		memoryEmailVerificationRateLimiter(c)
 		return
 	}
-
-	// 检查是否超出限制
-	if count <= int64(EmailVerificationMaxRequests) {
+	if allowed {
 		c.Next()
 		return
 	}
 
-	// 获取剩余等待时间
-	ttl, err := rdb.TTL(c.Request.Context(), key).Result()
 	waitSeconds := int64(EmailVerificationDuration)
-	if err == nil && ttl > 0 {
-		waitSeconds = int64(ttl.Seconds())
+	if ttlSeconds > 0 {
+		waitSeconds = ttlSeconds
 	}
 
 	c.JSON(http.StatusTooManyRequests, gin.H{
@@ -77,11 +59,13 @@ func memoryEmailVerificationRateLimiter(c *gin.Context) {
 }
 
 func EmailVerificationRateLimit() gin.HandlerFunc {
+	// Keep the fallback ready before requests arrive so a concurrent Redis
+	// outage cannot race the in-memory limiter's first initialization.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
 		if common.RedisEnabled {
 			redisEmailVerificationRateLimiter(c)
 		} else {
-			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 			memoryEmailVerificationRateLimiter(c)
 		}
 	}

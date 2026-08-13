@@ -8,13 +8,13 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
-	"github.com/QuantumNous/new-api/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 )
 
-func applyPerplexityRequestFeePreConsume(c *gin.Context, info *relaycommon.RelayInfo, priceData *types.PriceData) error {
+func applyPerplexityRequestFeePreConsume(c *gin.Context, info *relaycommon.RelayInfo, priceData *hosttypes.PriceData) error {
 	if info == nil || priceData == nil || common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypePerplexity ||
 		priceData.UsePrice || info.TieredBillingSnapshot != nil {
 		return nil

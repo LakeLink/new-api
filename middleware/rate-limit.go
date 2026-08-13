@@ -1,14 +1,39 @@
 package middleware
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"time"
+	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis/v8"
 )
+
+const redisRateLimitNamespace = "rateLimit:v2"
+
+// Redis rate limiting intentionally uses a fixed window. The single Lua script
+// makes increment, expiry, and the limit decision atomic, while retaining the
+// simple fixed-window behavior: traffic at a window boundary can burst up to
+// twice the configured limit. Do not replace this with a sliding-window ZSET
+// unless that externally visible behavior is intentionally changed.
+const redisFixedWindowScript = `
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+  ttl = redis.call('TTL', KEYS[1])
+end
+if count > tonumber(ARGV[1]) then
+  return {0, count, ttl}
+end
+return {1, count, ttl}
+`
 
 var inMemoryRateLimiter common.InMemoryRateLimiter
 
@@ -16,84 +41,107 @@ var defNext = func(c *gin.Context) {
 	c.Next()
 }
 
-var slidingWindowRateLimitScript = redis.NewScript(`
-local max_requests = tonumber(ARGV[1])
-local duration = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local expiration = tonumber(ARGV[4])
-local count = redis.call("LLEN", KEYS[1])
+func redisIPRateLimitKey(mark string, clientIP string) string {
+	return fmt.Sprintf("%s:ip:%s:%s", redisRateLimitNamespace, mark, clientIP)
+}
 
-if count > 0 then
-	local oldest = redis.call("LINDEX", KEYS[1], -1)
-	if tonumber(oldest) == nil then
-		redis.call("DEL", KEYS[1])
-		count = 0
-	end
-end
+func redisUserRateLimitKey(mark string, userID int) string {
+	return fmt.Sprintf("%s:user:%s:%d", redisRateLimitNamespace, mark, userID)
+}
 
-if count < max_requests then
-	redis.call("LPUSH", KEYS[1], now)
-	redis.call("EXPIRE", KEYS[1], expiration)
-	return 1
-end
-
-local oldest = tonumber(redis.call("LINDEX", KEYS[1], -1))
-if now - oldest >= duration then
-	redis.call("LPUSH", KEYS[1], now)
-	redis.call("LTRIM", KEYS[1], 0, max_requests - 1)
-	redis.call("EXPIRE", KEYS[1], expiration)
-	return 1
-end
-
-redis.call("EXPIRE", KEYS[1], expiration)
-return 0
-`)
-
-func applyRedisRateLimit(c *gin.Context, maxRequestNum int, duration int64, key string) {
-	if maxRequestNum <= 0 || duration <= 0 {
-		common.SysError(fmt.Sprintf(
-			"invalid rate limit configuration: max_requests=%d duration_seconds=%d",
-			maxRequestNum,
-			duration,
-		))
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	expiration := int64(common.RateLimitKeyExpirationDuration / time.Second)
-	if duration > expiration {
-		expiration = duration
-	}
-	allowed, err := slidingWindowRateLimitScript.Run(
-		c.Request.Context(),
-		common.RDB,
-		[]string{key},
-		maxRequestNum,
-		duration,
-		time.Now().Unix(),
-		expiration,
-	).Int64()
-	if err != nil {
-		common.SysError("Redis rate limit check failed: " + err.Error())
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-	if allowed != 1 {
-		c.AbortWithStatus(http.StatusTooManyRequests)
+func redisReplyInteger(value interface{}) (int64, error) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, nil
+	case string:
+		return strconv.ParseInt(typed, 10, 64)
+	case []byte:
+		return strconv.ParseInt(string(typed), 10, 64)
+	default:
+		return 0, fmt.Errorf("unexpected Redis integer reply type %T", value)
 	}
 }
 
+func redisFixedWindowTake(ctx context.Context, key string, maxRequestNum int, duration int64) (bool, int64, int64, error) {
+	if common.RDB == nil {
+		return false, 0, 0, errors.New("Redis client is not initialized")
+	}
+	if key == "" {
+		return false, 0, 0, errors.New("rate limit key is empty")
+	}
+	if maxRequestNum <= 0 {
+		return false, 0, 0, errors.New("rate limit maximum must be positive")
+	}
+	if duration <= 0 {
+		return false, 0, 0, errors.New("rate limit duration must be positive")
+	}
+
+	values, err := common.RDB.Eval(
+		ctx,
+		redisFixedWindowScript,
+		[]string{key},
+		maxRequestNum,
+		duration,
+	).Slice()
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if len(values) != 3 {
+		return false, 0, 0, fmt.Errorf("unexpected Redis rate limit reply length %d", len(values))
+	}
+
+	allowedValue, err := redisReplyInteger(values[0])
+	if err != nil {
+		return false, 0, 0, err
+	}
+	count, err := redisReplyInteger(values[1])
+	if err != nil {
+		return false, 0, 0, err
+	}
+	ttlSeconds, err := redisReplyInteger(values[2])
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	return allowedValue == 1, count, ttlSeconds, nil
+}
+
 func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark string) {
-	applyRedisRateLimit(c, maxRequestNum, duration, "rateLimit:"+mark+c.ClientIP())
+	allowed, _, ttlSeconds, err := redisFixedWindowTake(
+		c.Request.Context(),
+		redisIPRateLimitKey(mark, c.ClientIP()),
+		maxRequestNum,
+		duration,
+	)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("rate limit check failed (mark=%s): %v", mark, err))
+		c.Status(http.StatusInternalServerError)
+		c.Abort()
+		return
+	}
+	if !allowed {
+		writeRateLimited(c, ttlSeconds)
+	}
 }
 
 func memoryRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark string) {
 	key := mark + c.ClientIP()
 	if !inMemoryRateLimiter.Request(key, maxRequestNum, duration) {
-		c.Status(http.StatusTooManyRequests)
-		c.Abort()
+		writeRateLimited(c, duration)
 		return
 	}
+}
+
+// writeRateLimited rejects the request with 429 and a Retry-After hint so
+// clients can back off instead of treating the rejection as a fatal error.
+// The in-memory limiter cannot report the remaining window, so callers
+// without a TTL pass the full window duration as a conservative upper bound.
+func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
+	if retryAfterSeconds > 0 {
+		c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
+	}
+	c.Status(http.StatusTooManyRequests)
+	c.Abort()
 }
 
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
@@ -101,12 +149,11 @@ func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gi
 		return func(c *gin.Context) {
 			redisRateLimiter(c, maxRequestNum, duration, mark)
 		}
-	} else {
-		// It's safe to call multi times.
-		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
-		return func(c *gin.Context) {
-			memoryRateLimiter(c, maxRequestNum, duration, mark)
-		}
+	}
+	// It's safe to call multi times.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+	return func(c *gin.Context) {
+		memoryRateLimiter(c, maxRequestNum, duration, mark)
 	}
 }
 
@@ -131,6 +178,17 @@ func CriticalRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+func UserCriticalRateLimit(scope string) func(c *gin.Context) {
+	if !common.CriticalRateLimitEnable {
+		return defNext
+	}
+	return userRateLimitFactory(
+		common.CriticalRateLimitNum,
+		common.CriticalRateLimitDuration,
+		"UC:"+scope,
+	)
+}
+
 func DownloadRateLimit() func(c *gin.Context) {
 	return rateLimitFactory(common.DownloadRateLimitNum, common.DownloadRateLimitDuration, "DW")
 }
@@ -145,29 +203,27 @@ func UploadRateLimit() func(c *gin.Context) {
 func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
-			userId := c.GetInt("id")
-			if userId == 0 {
+			userID := c.GetInt("id")
+			if userID == 0 {
 				c.Status(http.StatusUnauthorized)
 				c.Abort()
 				return
 			}
-			key := fmt.Sprintf("rateLimit:%s:user:%d", mark, userId)
-			userRedisRateLimiter(c, maxRequestNum, duration, key)
+			userRedisRateLimiter(c, maxRequestNum, duration, redisUserRateLimitKey(mark, userID))
 		}
 	}
 	// It's safe to call multi times.
 	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
-		userId := c.GetInt("id")
-		if userId == 0 {
+		userID := c.GetInt("id")
+		if userID == 0 {
 			c.Status(http.StatusUnauthorized)
 			c.Abort()
 			return
 		}
-		key := fmt.Sprintf("%s:user:%d", mark, userId)
+		key := fmt.Sprintf("%s:user:%d", mark, userID)
 		if !inMemoryRateLimiter.Request(key, maxRequestNum, duration) {
-			c.Status(http.StatusTooManyRequests)
-			c.Abort()
+			writeRateLimited(c, duration)
 			return
 		}
 	}
@@ -176,7 +232,16 @@ func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c
 // userRedisRateLimiter is like redisRateLimiter but accepts a pre-built key
 // (to support user-ID-based keys).
 func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key string) {
-	applyRedisRateLimit(c, maxRequestNum, duration, key)
+	allowed, _, ttlSeconds, err := redisFixedWindowTake(c.Request.Context(), key, maxRequestNum, duration)
+	if err != nil {
+		logger.LogError(c.Request.Context(), fmt.Sprintf("rate limit check failed (key=%s): %v", key, err))
+		c.Status(http.StatusInternalServerError)
+		c.Abort()
+		return
+	}
+	if !allowed {
+		writeRateLimited(c, ttlSeconds)
+	}
 }
 
 // SearchRateLimit returns a per-user rate limiter for search endpoints.

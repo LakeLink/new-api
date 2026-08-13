@@ -10,15 +10,15 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel/minimax"
 	"github.com/QuantumNous/new-api/relay/channel/siliconflow"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -33,11 +33,13 @@ func refreshFinalRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, for
 		return nil, errors.New("final request billing context is unavailable")
 	}
 	info.FinalRequestEstimateReady = false
+
 	materializedJSON, err := materializeFinalProviderToolCaps(format, jsonData)
 	if err != nil {
 		return nil, err
 	}
 	jsonData = materializedJSON
+
 	var request dto.Request
 	switch format {
 	case types.RelayFormatOpenAI:
@@ -50,12 +52,12 @@ func refreshFinalRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, for
 		}
 		request = materialized
 	case types.RelayFormatOpenAIResponses:
-		if err := refreshFinalResponsesRequest(info, jsonData); err != nil {
-			return nil, err
-		}
 		materialized := &dto.OpenAIResponsesRequest{}
 		if err := common.Unmarshal(jsonData, materialized); err != nil {
 			return nil, fmt.Errorf("decode final Responses request: %w", err)
+		}
+		if err := helper.ValidateResponsesRequest(materialized); err != nil {
+			return nil, fmt.Errorf("final Responses request is invalid: %w", err)
 		}
 		request = materialized
 	case types.RelayFormatClaude:
@@ -84,6 +86,16 @@ func refreshFinalRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, for
 			return nil, fmt.Errorf("final Gemini request is invalid: %w", err)
 		}
 		request = materialized
+	case types.RelayFormatRerank:
+		if err := refreshFinalCohereRerankBilling(c, info, jsonData); err != nil {
+			return nil, err
+		}
+		return jsonData, nil
+	case types.RelayFormatOpenAIImage:
+		if _, err := refreshFinalOpenAIImageBilling(c, info, jsonData); err != nil {
+			return nil, err
+		}
+		return jsonData, nil
 	default:
 		if err := refreshUnknownFinalBilling(c, info, jsonData); err != nil {
 			return nil, err
@@ -97,10 +109,6 @@ func refreshFinalRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, for
 	return jsonData, nil
 }
 
-// materializeFinalProviderToolCaps makes the gateway's billing limits real
-// provider-side limits. A conservative reservation is not a bound when the
-// exact outbound JSON still lets the provider execute an unbounded number of
-// server tools.
 func materializeFinalProviderToolCaps(format types.RelayFormat, jsonData []byte) ([]byte, error) {
 	switch format {
 	case types.RelayFormatOpenAIResponses:
@@ -132,19 +140,11 @@ func materializeFinalResponsesToolCap(jsonData []byte) ([]byte, error) {
 		if allowedTools != nil && !allowedTools[toolType] && !(webSearch && allowedTools[priceKey]) {
 			continue
 		}
-		if webSearch || toolType == dto.BuildInToolFileSearch || toolType == "image_generation" {
+		if webSearch || toolType == dto.BuildInToolFileSearch || toolType == dto.BuildInToolImageGeneration {
 			hasMeteredTool = true
 		}
 	}
-	if !hasMeteredTool {
-		return jsonData, nil
-	}
-
-	effectiveCap := uint(common.MaxTextToolCallCount)
-	if request.MaxToolCalls != nil {
-		effectiveCap = *request.MaxToolCalls
-	}
-	if request.MaxToolCalls != nil && *request.MaxToolCalls == effectiveCap {
+	if !hasMeteredTool || request.MaxToolCalls != nil {
 		return jsonData, nil
 	}
 
@@ -152,7 +152,7 @@ func materializeFinalResponsesToolCap(jsonData []byte) ([]byte, error) {
 	if err := common.Unmarshal(jsonData, &root); err != nil {
 		return nil, fmt.Errorf("decode final Responses request: %w", err)
 	}
-	rawCap, err := common.Marshal(effectiveCap)
+	rawCap, err := common.Marshal(uint(common.MaxTextToolCallCount))
 	if err != nil {
 		return nil, fmt.Errorf("encode final Responses max_tool_calls: %w", err)
 	}
@@ -262,11 +262,7 @@ func refreshFinalOpenAIImageBilling(c *gin.Context, info *relaycommon.RelayInfo,
 	if info != nil {
 		relayMode = info.RelayMode
 	}
-	if err := helper.ValidateOpenAIImageRequest(
-		request,
-		relayMode,
-		relayMode == relayconstant.RelayModeImagesEdits,
-	); err != nil {
+	if err := helper.ValidateOpenAIImageRequest(request, relayMode, relayMode == relayconstant.RelayModeImagesEdits); err != nil {
 		return nil, fmt.Errorf("final image request is invalid: %w", err)
 	}
 	if (info != nil && (info.ApiType == constant.APITypeXai || info.ChannelType == constant.ChannelTypeXai)) ||
@@ -326,6 +322,7 @@ func refreshFinalModelReservation(c *gin.Context, info *relaycommon.RelayInfo, f
 	if err := reserveFinalBillingTarget(c, info, target); err != nil {
 		return err
 	}
+	info.PriceData = priceData
 	info.FinalRequestEstimateReady = true
 	return nil
 }
@@ -340,9 +337,6 @@ func reserveFinalBillingTarget(c *gin.Context, info *relaycommon.RelayInfo, targ
 		}
 		return nil
 	}
-	// A model may be configured as free while an enabled server tool is not.
-	// Create a billing session here so tool charges are still reserved before
-	// the provider can execute them.
 	if apiErr := service.PreConsumeBilling(c, target, info); apiErr != nil {
 		return apiErr
 	}
@@ -384,11 +378,7 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 				callPricePer1K = math.Max(callPricePer1K, operation_setting.GetToolPriceForModel(priceKey, info.OriginModelName))
 			case toolType == dto.BuildInToolFileSearch:
 				callPricePer1K = math.Max(callPricePer1K, operation_setting.GetToolPriceForModel(dto.BuildInToolFileSearch, info.OriginModelName))
-			case toolType == "image_generation":
-				// Responses max_tool_calls is one global cap across all
-				// built-in tools. Express the per-image price in the same
-				// per-1K-call unit and reserve the most expensive possible
-				// call for every slot in that global budget.
+			case toolType == dto.BuildInToolImageGeneration:
 				imageModel := common.Interface2String(tool["model"])
 				if imageModel == "" {
 					imageModel = "gpt-image-1"
@@ -413,8 +403,7 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 				if !ok {
 					return 0, fmt.Errorf("server-tool reservation has invalid partial image pricing for model %s", imageModel)
 				}
-				imagePricePer1K := (imagePrice + partialPrice) * 1000
-				callPricePer1K = math.Max(callPricePer1K, imagePricePer1K)
+				callPricePer1K = math.Max(callPricePer1K, (imagePrice+partialPrice)*1000)
 			}
 		}
 	case *dto.ClaudeRequest:
@@ -425,28 +414,6 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 		if configured {
 			callLimit = limit
 			callPricePer1K = operation_setting.GetToolPrice("web_search")
-			if materialized.ToolChoice != nil {
-				encoded, encodeErr := common.Marshal(materialized.ToolChoice)
-				if encodeErr != nil {
-					return 0, fmt.Errorf("encode final Claude tool_choice: %w", encodeErr)
-				}
-				var choice struct {
-					Type string `json:"type"`
-				}
-				if common.Unmarshal(encoded, &choice) == nil {
-					switch strings.ToLower(choice.Type) {
-					case "none":
-						callLimit = 0
-					case "tool":
-						var forcedTool struct {
-							Name string `json:"name"`
-						}
-						if common.Unmarshal(encoded, &forcedTool) == nil && forcedTool.Name != "web_search" {
-							callLimit = 0
-						}
-					}
-				}
-			}
 		}
 	case *dto.GeminiChatRequest:
 		toolNames, err := geminiGroundingReservationTools(materialized)
@@ -458,13 +425,6 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 		}
 		if callPricePer1K > 0 {
 			callLimit = 1
-			if strings.HasPrefix(info.OriginModelName, "gemini-3") ||
-				info.OriginModelName == "gemini-flash-latest" ||
-				info.OriginModelName == "gemini-flash-lite-latest" ||
-				info.OriginModelName == "gemini-pro-latest" ||
-				strings.HasPrefix(info.OriginModelName, "gemini-robotics-er-1.6") {
-				callLimit = uint(common.MaxTextToolCallCount)
-			}
 		}
 	case *dto.GeneralOpenAIRequest:
 		if strings.HasSuffix(info.OriginModelName, "search-preview") {
@@ -481,9 +441,6 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 			Mul(decimal.NewFromFloat(common.CurrentQuotaPerUnit())).
 			Mul(decimal.NewFromFloat(groupRatio))
 	}
-	// Settlement applies shared request ratios to tool surcharges. Never let a
-	// discount ratio lower this conservative reservation; any excess is safely
-	// refunded during settlement.
 	withRatios := info.PriceData.ApplyOtherRatiosToDecimal(quota)
 	if withRatios.GreaterThan(quota) {
 		quota = withRatios
@@ -498,9 +455,6 @@ func finalServerToolReservationQuota(info *relaycommon.RelayInfo, request dto.Re
 	return result, nil
 }
 
-// responsesAllowedServerTools resolves tool_choice restrictions relevant to
-// metered server tools. A nil map means every configured tool remains
-// possible; disabled is true when no tool can run.
 func responsesAllowedServerTools(rawChoice json.RawMessage) (map[string]bool, bool) {
 	if len(rawChoice) == 0 {
 		return nil, false
@@ -529,7 +483,7 @@ func responsesAllowedServerTools(rawChoice json.RawMessage) (map[string]bool, bo
 		return allowed, len(allowed) == 0
 	case dto.BuildInToolWebSearch, dto.BuildInToolWebSearch20250826,
 		dto.BuildInToolWebSearchPreview, dto.BuildInToolWebSearchPreview20250311,
-		dto.BuildInToolFileSearch, "image_generation":
+		dto.BuildInToolFileSearch, dto.BuildInToolImageGeneration:
 		return map[string]bool{choiceObject.Type: true}, false
 	default:
 		if choiceObject.Type != "" && !strings.EqualFold(choiceObject.Type, "auto") && !strings.EqualFold(choiceObject.Type, "required") {
@@ -565,11 +519,6 @@ func geminiGroundingReservationTools(request *dto.GeminiChatRequest) ([]string, 
 	return result, nil
 }
 
-func validateFinalBillableScalars(jsonData []byte) error {
-	_, err := parseFinalBillableScalars(nil, jsonData)
-	return err
-}
-
 type finalBillableScalars struct {
 	maxTokens            uint
 	hasMaxTokens         bool
@@ -583,7 +532,6 @@ type finalBillableScalars struct {
 	hasReplicateOutputs  bool
 	imagenCount          uint
 	hasImagenCount       bool
-	aliPromptExtend      bool
 	finalModel           string
 }
 
@@ -593,20 +541,6 @@ func parseFinalBillableScalars(info *relaycommon.RelayInfo, jsonData []byte) (fi
 	if err := common.Unmarshal(jsonData, &root); err != nil {
 		return result, fmt.Errorf("decode final request: %w", err)
 	}
-
-	recordMaxTokens := func(value uint) {
-		if !result.hasMaxTokens || value > result.maxTokens {
-			result.maxTokens = value
-			result.hasMaxTokens = true
-		}
-	}
-	recordCount := func(value uint) {
-		if !result.hasCount || value > result.count {
-			result.count = value
-			result.hasCount = true
-		}
-	}
-
 	if rawModel, exists := root["model"]; exists && strings.TrimSpace(string(rawModel)) != "null" {
 		_ = common.Unmarshal(rawModel, &result.finalModel)
 	}
@@ -615,73 +549,33 @@ func parseFinalBillableScalars(info *relaycommon.RelayInfo, jsonData []byte) (fi
 		if err != nil {
 			return result, err
 		}
-		if exists {
-			recordMaxTokens(value)
+		if exists && (!result.hasMaxTokens || value > result.maxTokens) {
+			result.maxTokens = value
+			result.hasMaxTokens = true
 		}
 	}
-
-	rootCount, exists, err := parseFinalBoundedUint(root["n"], "n", 1, dto.MaxChatCompletionsN)
+	count, exists, err := parseFinalBoundedUint(root["n"], "n", 1, dto.MaxChatCompletionsN)
 	if err != nil {
 		return result, err
 	}
 	if exists {
-		recordCount(rootCount)
-	}
-
-	if rawGenerationConfig, exists := root["generationConfig"]; exists && strings.TrimSpace(string(rawGenerationConfig)) != "null" {
-		var generationConfig map[string]json.RawMessage
-		if err := common.Unmarshal(rawGenerationConfig, &generationConfig); err != nil {
-			return result, fmt.Errorf("final generationConfig must be an object: %w", err)
-		}
-		value, exists, err := parseFinalBoundedUint(generationConfig["maxOutputTokens"], "generationConfig.maxOutputTokens", 0, common.MaxTokensLimit)
-		if err != nil {
-			return result, err
-		}
-		if exists {
-			recordMaxTokens(value)
-		}
-		value, exists, err = parseFinalBoundedUint(generationConfig["candidateCount"], "generationConfig.candidateCount", 1, dto.MaxChatCompletionsN)
-		if err != nil {
-			return result, err
-		}
-		if exists {
-			recordCount(value)
-		}
+		result.count = count
+		result.hasCount = true
 	}
 
 	apiType := 0
 	if info != nil && info.ChannelMeta != nil {
 		apiType = info.ApiType
 	}
-
-	if apiType == constant.APITypeAws {
-		if rawInferenceConfig, exists := root["inferenceConfig"]; exists && strings.TrimSpace(string(rawInferenceConfig)) != "null" {
-			var inferenceConfig map[string]json.RawMessage
-			if err := common.Unmarshal(rawInferenceConfig, &inferenceConfig); err != nil {
-				return result, fmt.Errorf("final inferenceConfig must be an object: %w", err)
-			}
-			value, exists, err := parseFinalBoundedUint(inferenceConfig["maxTokens"], "inferenceConfig.maxTokens", 0, common.MaxTokensLimit)
-			if err != nil {
-				return result, err
-			}
-			if exists {
-				recordMaxTokens(value)
-			}
-		}
-	}
-
-	if apiType == constant.APITypeSiliconFlow {
+	switch apiType {
+	case constant.APITypeSiliconFlow:
 		batchSize, exists, err := parseFinalBoundedUint(root["batch_size"], "batch_size", 1, dto.MaxSiliconFlowImageBatchSize)
 		if err != nil {
 			return result, err
 		}
-		if exists {
-			result.siliconFlowBatchSize = batchSize
-			result.hasSiliconFlowBatch = true
-		}
-	}
-
-	if apiType == constant.APITypeReplicate {
+		result.siliconFlowBatchSize = batchSize
+		result.hasSiliconFlowBatch = exists
+	case constant.APITypeReplicate:
 		if rawInput, exists := root["input"]; exists && strings.TrimSpace(string(rawInput)) != "null" {
 			var input map[string]json.RawMessage
 			if err := common.Unmarshal(rawInput, &input); err != nil {
@@ -691,10 +585,8 @@ func parseFinalBillableScalars(info *relaycommon.RelayInfo, jsonData []byte) (fi
 			if err != nil {
 				return result, err
 			}
-			if exists {
-				result.replicateOutputCount = value
-				result.hasReplicateOutputs = true
-			}
+			result.replicateOutputCount = value
+			result.hasReplicateOutputs = exists
 		}
 	}
 
@@ -711,26 +603,16 @@ func parseFinalBillableScalars(info *relaycommon.RelayInfo, jsonData []byte) (fi
 				if err != nil {
 					return result, err
 				}
-				if exists {
-					result.aliCount = value
-					result.hasAliCount = true
-				}
-
-				if rawPromptExtend, exists := parameters["prompt_extend"]; exists && strings.TrimSpace(string(rawPromptExtend)) != "null" {
-					if err := common.Unmarshal(rawPromptExtend, &result.aliPromptExtend); err != nil {
-						return result, errors.New("final parameters.prompt_extend must be a boolean")
-					}
-				}
+				result.aliCount = value
+				result.hasAliCount = exists
 			}
 			if parseImagenParameters {
 				value, exists, err := parseFinalBoundedUint(parameters["sampleCount"], "parameters.sampleCount", 1, relaycommon.MaxImagenImageCount)
 				if err != nil {
 					return result, err
 				}
-				if exists {
-					result.imagenCount = value
-					result.hasImagenCount = true
-				}
+				result.imagenCount = value
+				result.hasImagenCount = exists
 			}
 		}
 	}
@@ -763,116 +645,27 @@ func refreshUnknownFinalBilling(c *gin.Context, info *relaycommon.RelayInfo, jso
 		return errors.New("final Ollama native request supports exactly one choice")
 	}
 	if info.RelayFormat == types.RelayFormatOpenAIImage {
-		if err := refreshUnknownFinalImageBilling(c, info, scalars); err != nil {
-			return err
-		}
-		return nil
+		return refreshUnknownFinalImageBilling(c, info, scalars)
 	}
-	if !scalars.hasMaxTokens && scalars.hasCount {
-		if original, ok := info.Request.(*dto.GeneralOpenAIRequest); ok {
-			scalars.maxTokens = original.GetMaxTokens()
-			scalars.hasMaxTokens = true
-		}
-	}
-	if !scalars.hasMaxTokens || info.PriceData.UsePrice {
-		return nil
-	}
-	count := scalars.count
-	if !scalars.hasCount {
-		count = 1
-	}
-	effectiveMax := int64(scalars.maxTokens) * int64(count)
-	originalMax := int64(0)
-	if info.Request != nil {
-		if meta := info.Request.GetTokenCountMeta(); meta != nil && meta.MaxTokens > 0 {
-			originalMax = int64(meta.MaxTokens)
-		}
-	}
-	if effectiveMax <= originalMax {
-		return nil
-	}
-	if info.TieredBillingSnapshot != nil {
-		return errors.New("final overridden max-token fields cannot be safely repriced for an unrecognized tiered request format")
-	}
-
-	completionQuota := decimal.NewFromInt(effectiveMax).
-		Mul(decimal.NewFromFloat(info.PriceData.CompletionRatio)).
-		Mul(decimal.NewFromFloat(info.PriceData.ModelRatio)).
-		Mul(decimal.NewFromFloat(info.PriceData.GroupRatioInfo.GroupRatio))
-	completionPriceData := info.PriceData
-	completionPriceData.ReplaceOtherRatios(info.PriceData.OtherRatios())
-	if scalars.hasCount {
-		// effectiveMax already includes the final output count. Some native
-		// converters also store it as OtherRatio "n"; remove that one dimension
-		// before applying unrelated request ratios so count is not squared.
-		completionPriceData.RemoveOtherRatio("n")
-	}
-	completionQuota = completionPriceData.ApplyOtherRatiosToDecimal(completionQuota)
-	// Add the full final completion bound to the existing reservation. This is
-	// deliberately conservative because unknown provider DTOs may hide output
-	// multipliers that cannot be reconstructed after conversion.
-	target, clamp := common.QuotaFromDecimalChecked(
-		decimal.NewFromInt(int64(info.PriceData.QuotaToPreConsume)).Add(completionQuota),
-	)
-	if clamp != nil {
-		if info.QuotaClamp == nil {
-			info.QuotaClamp = clamp
-		}
-		return clamp
-	}
-	if err := reserveFinalBillingTarget(c, info, target); err != nil {
-		return err
-	}
-	info.PriceData.QuotaToPreConsume = target
 	return nil
 }
 
 func refreshUnknownFinalImageBilling(c *gin.Context, info *relaycommon.RelayInfo, scalars finalBillableScalars) error {
 	if info == nil || isFinalImagenRequest(info) {
-		// Imagen has different fixed-price and token-priced reservation formulas.
-		// refreshFinalImagenRequest validates and reserves its sampleCount after
-		// this generic final-request pass.
 		return nil
 	}
-
 	if info.ApiType == constant.APITypeSiliconFlow && scalars.hasSiliconFlowBatch {
 		batchSize := scalars.siliconFlowBatchSize
 		if err := siliconflow.ValidateImageBatchSize(info.UpstreamModelName, &batchSize); err != nil {
 			return err
 		}
 	}
-
 	imageCount, hasImageCount := scalars.imageCountFor(info)
 	if !hasImageCount {
 		imageCount = 1
 	}
 	if info.ChannelMeta != nil && info.ApiType == constant.APITypeMiniMax && imageCount > minimax.MaxMiniMaxImageN {
-		return fmt.Errorf(
-			"final MiniMax image n must be an integer between 1 and %d",
-			minimax.MaxMiniMaxImageN,
-		)
-	}
-	if info.TieredBillingSnapshot != nil {
-		initialCount, ok := initialImageRequestCount(info)
-		if !ok {
-			return errors.New("cannot verify final native image count for tiered billing")
-		}
-		if imageCount != initialCount {
-			return errors.New("final native image count changed after tiered pre-consume and cannot be safely repriced")
-		}
-		if info.ApiType == constant.APITypeAli {
-			finalModel := scalars.finalModel
-			if finalModel == "" {
-				finalModel = info.UpstreamModelName
-			}
-			if strings.Contains(finalModel, "z-image") &&
-				scalars.aliPromptExtend != info.PriceData.HasOtherRatio("prompt_extend") {
-				return errors.New("final z-image prompt_extend changed after tiered pre-consume and cannot be safely repriced")
-			}
-		}
-		// The expression snapshot is the billing contract and may already use
-		// param("n") or provider-native paths. Do not multiply it again.
-		return nil
+		return fmt.Errorf("final MiniMax image n must be an integer between 1 and %d", minimax.MaxMiniMaxImageN)
 	}
 
 	priceData := info.PriceData
@@ -880,37 +673,13 @@ func refreshUnknownFinalImageBilling(c *gin.Context, info *relaycommon.RelayInfo
 	priceData.RemoveOtherRatio("n")
 	priceData.AddOtherRatio("n", float64(imageCount))
 
-	if info.ApiType == constant.APITypeAli {
-		// The converter may have provisionally applied this ratio before channel
-		// overrides. Reconcile it from the exact outbound payload so an override
-		// cannot enable it without funding or disable it while leaving a stale 2x.
-		priceData.RemoveOtherRatio("prompt_extend")
-		finalModel := scalars.finalModel
-		if finalModel == "" {
-			finalModel = info.UpstreamModelName
-		}
-		if strings.Contains(finalModel, "z-image") && scalars.aliPromptExtend {
-			priceData.AddOtherRatio("prompt_extend", 2)
-		}
-	}
-
-	var targetDecimal decimal.Decimal
+	targetDecimal := decimal.NewFromInt(int64(info.PriceData.QuotaToPreConsume)).Mul(decimal.NewFromInt(int64(imageCount)))
 	if priceData.UsePrice {
 		targetDecimal = decimal.NewFromFloat(priceData.ModelPrice).
 			Mul(decimal.NewFromFloat(common.CurrentQuotaPerUnit())).
 			Mul(decimal.NewFromFloat(priceData.GroupRatioInfo.GroupRatio))
 		targetDecimal = priceData.ApplyOtherRatiosToDecimal(targetDecimal)
-	} else {
-		// Ratio/tiered image pricing does not apply ImageRequest.BillingRatios
-		// during initial pre-consume. Scale that already-priced reservation only
-		// by the native output count and z-image prompt-extension surcharge.
-		targetDecimal = decimal.NewFromInt(int64(info.PriceData.QuotaToPreConsume)).
-			Mul(decimal.NewFromInt(int64(imageCount)))
-		if priceData.HasOtherRatio("prompt_extend") {
-			targetDecimal = targetDecimal.Mul(decimal.NewFromInt(2))
-		}
 	}
-
 	target, clamp := common.QuotaFromDecimalChecked(targetDecimal)
 	if clamp != nil {
 		if info.QuotaClamp == nil {
@@ -942,14 +711,6 @@ func (s finalBillableScalars) imageCountFor(info *relaycommon.RelayInfo) (uint, 
 		}
 	}
 	return s.count, s.hasCount
-}
-
-func cloneUint(value *uint) *uint {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
 }
 
 func finalRequestBillingAPIError(err error, paramOverride bool) *types.NewAPIError {

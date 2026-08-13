@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -107,12 +107,14 @@ func TestConvertOpenAIRequestKimiK25AcceptsOfficialParameters(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			request := &dto.GeneralOpenAIRequest{
 				Model:            "kimi-k2.5",
-				THINKING:         []byte(test.thinking),
 				Temperature:      common.GetPointer(test.temperature),
 				TopP:             common.GetPointer(0.95),
 				N:                common.GetPointer(1),
 				PresencePenalty:  common.GetPointer(0.0),
 				FrequencyPenalty: common.GetPointer(0.0),
+			}
+			if test.thinking != "" {
+				request.THINKING = []byte(test.thinking)
 			}
 
 			converted, err := (&Adaptor{}).ConvertOpenAIRequest(nil, nil, request)
@@ -148,12 +150,14 @@ func TestConvertOpenAIRequestKimiK27AcceptsOnlyThinkingMode(t *testing.T) {
 			t.Run(model+"/"+thinking, func(t *testing.T) {
 				request := &dto.GeneralOpenAIRequest{
 					Model:            model,
-					THINKING:         []byte(thinking),
 					Temperature:      common.GetPointer(1.0),
 					TopP:             common.GetPointer(0.95),
 					N:                common.GetPointer(1),
 					PresencePenalty:  common.GetPointer(0.0),
 					FrequencyPenalty: common.GetPointer(0.0),
+				}
+				if thinking != "" {
+					request.THINKING = []byte(thinking)
 				}
 
 				converted, err := (&Adaptor{}).ConvertOpenAIRequest(nil, nil, request)

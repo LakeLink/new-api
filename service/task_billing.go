@@ -212,7 +212,7 @@ func taskRefundFinalization(task *model.Task, reason string) *model.TaskBillingF
 	other := taskBillingOther(task)
 	other["task_id"] = task.TaskID
 	other["reason"] = reason
-	return &model.TaskBillingFinalizationPayload{
+	payload := &model.TaskBillingFinalizationPayload{
 		Adjustment:         taskBillingAdjustment(task, model.BillingAdjustmentRefund, -quota),
 		ChannelCreatedTime: task.PrivateData.ChannelCreatedTime,
 		Log: model.TaskBillingFinalizationLog{
@@ -228,6 +228,12 @@ func taskRefundFinalization(task *model.Task, reason string) *model.TaskBillingF
 			CreatedAt: common.GetTimestamp(),
 		},
 	}
+	if task.ID > 0 {
+		payload.TaskDatabaseID = task.ID
+		payload.UpdateTaskQuota = true
+		payload.TargetTaskQuota = 0
+	}
+	return payload
 }
 
 func taskRecalculationFinalization(task *model.Task, actualQuota int, reason string, clamps ...*common.QuotaClamp) *model.TaskBillingFinalizationPayload {
@@ -294,6 +300,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 		logger.LogWarn(ctx, fmt.Sprintf("持久化任务退款失败 task %s: %s", task.TaskID, err.Error()))
 		return
 	}
+	task.Quota = 0
 }
 
 // RecalculateTaskQuota 通用的异步差额结算。

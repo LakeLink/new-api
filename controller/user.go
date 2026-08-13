@@ -11,18 +11,17 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting"
 
 	"github.com/QuantumNous/new-api/constant"
 
-	"github.com/bytedance/gopkg/util/gopool"
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -32,16 +31,13 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
-const pendingTwoFALoginTimeout = 5 * time.Minute
-
 var (
 	errUserPasswordUnset    = errors.New("user password is not set")
 	errOriginalPasswordFail = errors.New("original password is incorrect")
-	errSessionInvalid       = errors.New("session is invalid or has been revoked")
 )
 
 func Login(c *gin.Context) {
-	if !common.GetLegacyOptionBool("PasswordLoginEnabled", &common.PasswordLoginEnabled) {
+	if !common.PasswordLoginEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordLoginDisabled)
 		return
 	}
@@ -75,41 +71,28 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// A failed 2FA lookup must stop authentication. Treating a database error as
-	// "2FA disabled" would let a password-only login bypass the second factor.
+	// 检查是否启用2FA
 	twoFAEnabled, err := model.IsTwoFAEnabled(user.Id)
 	if err != nil {
-		common.SysLog(fmt.Sprintf("Login 2FA lookup error for user %d: %v", user.Id, err))
+		common.SysLog(fmt.Sprintf("Login failed to load 2FA status for user %d: %v", user.Id, err))
 		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
 		return
 	}
 	if twoFAEnabled {
-		// 设置pending session，等待2FA验证
-		session := sessions.Default(c)
-		previousUserID, previousUserIDOK := session.Get("id").(int)
-		previousSessionID, previousSessionIDOK := session.Get(
-			constant.SessionKeyBrowserSessionID,
-		).(string)
-		if previousUserIDOK &&
-			previousUserID > 0 &&
-			previousSessionIDOK &&
-			previousSessionID != "" {
-			if err := model.RevokeBrowserSession(
-				previousUserID,
-				previousSessionID,
-			); err != nil {
-				common.ApiErrorI18n(c, i18n.MsgDatabaseError)
-				return
-			}
-		}
-		session.Clear()
-		session.Set("pending_username", user.Username)
-		session.Set("pending_user_id", user.Id)
-		session.Set("pending_login_at", time.Now().Unix())
-		session.Set("pending_session_version", user.SessionVersion)
-		err := session.Save()
+		expiresAt := time.Now().Add(5 * time.Minute)
+		payload, err := common.Marshal(twoFALoginFlowPayload{AuthVersion: user.AuthVersion})
 		if err != nil {
-			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
+			common.ApiError(c, err)
+			return
+		}
+		flowToken, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+			Purpose:   model.AuthFlowPurposeTwoFALogin,
+			UserId:    user.Id,
+			Payload:   string(payload),
+			ExpiresAt: expiresAt,
+		})
+		if err != nil {
+			common.ApiError(c, err)
 			return
 		}
 
@@ -118,6 +101,8 @@ func Login(c *gin.Context) {
 			"success": true,
 			"data": map[string]interface{}{
 				"require_2fa": true,
+				"flow_token":  flowToken,
+				"expires_at":  expiresAt.Unix(),
 			},
 		})
 		return
@@ -163,157 +148,66 @@ func recordLoginAudit(user *model.User, c *gin.Context) {
 	}, extra)
 }
 
-// setup session & cookies and then return user info
+// setupLogin creates a server-controlled login Session and returns the shared
+// authentication bundle used by every login method.
 func setupLogin(user *model.User, c *gin.Context) {
-	session := sessions.Default(c)
-	previousUserID, _ := session.Get("id").(int)
-	previousSessionID, _ := session.Get(
-		constant.SessionKeyBrowserSessionID,
-	).(string)
-	now := time.Now().Unix()
-	browserSessionID, err := model.RotateBrowserSession(
-		user.Id,
-		previousUserID,
-		previousSessionID,
-		now,
-	)
+	setupLoginAtAuthVersion(user, 0, c)
+}
+
+func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin.Context) {
+	if user == nil || user.Id <= 0 || user.Status != common.UserStatusEnabled {
+		common.ApiErrorI18n(c, i18n.MsgAuthUserBanned)
+		return
+	}
+	currentUser, err := model.GetUserById(user.Id, false)
 	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		common.ApiError(c, err)
+		return
+	}
+	var bundle *service.AuthBundle
+	if expectedAuthVersion > 0 {
+		bundle, err = service.CreateLoginSessionAtAuthVersion(
+			user.Id,
+			expectedAuthVersion,
+			loginMethodFromContext(c),
+			c.ClientIP(),
+			c.Request.UserAgent(),
+		)
+	} else {
+		bundle, err = service.CreateLoginSession(
+			user.Id,
+			loginMethodFromContext(c),
+			c.ClientIP(),
+			c.Request.UserAgent(),
+		)
+	}
+	if err != nil {
+		writeAuthSessionError(c, err)
 		return
 	}
 	model.UpdateUserLastLoginAt(user.Id)
-	// Rotate all application session state at the authentication boundary. The
-	// cookie store is signed but client-side, so retaining pre-login state would
-	// otherwise allow pending or step-up markers to survive account changes.
-	session.Clear()
-	session.Set("id", user.Id)
-	session.Set("username", user.Username)
-	session.Set("role", user.Role)
-	session.Set("status", user.Status)
-	session.Set("group", user.Group)
-	session.Set("session_version", user.SessionVersion)
-	session.Set(constant.SessionKeyBrowserSessionID, browserSessionID)
-	err = session.Save()
-	if err != nil {
-		if revokeErr := model.RevokeBrowserSession(user.Id, browserSessionID); revokeErr != nil {
-			common.SysLog("failed to revoke browser session after cookie save error: " + revokeErr.Error())
-		}
-		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
-		return
-	}
-	if gin.Mode() != gin.TestMode {
-		gopool.Go(func() {
-			if _, cleanupErr := model.CleanupExpiredBrowserSessions(now); cleanupErr != nil {
-				common.SysLog("failed to clean expired browser sessions: " + cleanupErr.Error())
-			}
-		})
-	}
+	service.WriteRefreshCookie(c, bundle.RefreshToken)
+	setAuthNoStore(c)
 	recordLoginAudit(user, c)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,
-		"data": map[string]any{
-			"id":           user.Id,
-			"username":     user.Username,
-			"display_name": user.DisplayName,
-			"role":         user.Role,
-			"status":       user.Status,
-			"group":        user.Group,
+		"data": gin.H{
+			"access_token":      bundle.AccessToken,
+			"token_type":        bundle.TokenType,
+			"access_expires_at": bundle.AccessExpiresAt,
+			"session":           bundle.Session,
+			"user":              buildSelfUserData(currentUser),
 		},
 	})
 }
 
-func getCurrentSessionUser(c *gin.Context) (*model.User, error) {
-	session := sessions.Default(c)
-	id, ok := session.Get("id").(int)
-	if !ok || id == 0 {
-		return nil, errSessionInvalid
-	}
-	browserSessionID, ok := session.Get(
-		constant.SessionKeyBrowserSessionID,
-	).(string)
-	if !ok || browserSessionID == "" {
-		return nil, errSessionInvalid
-	}
-	user, err := model.GetUserByBrowserSession(
-		id,
-		browserSessionID,
-		time.Now().Unix(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, errSessionInvalid
-	}
-	version := int64(0)
-	if rawVersion := session.Get("session_version"); rawVersion != nil {
-		var versionOK bool
-		version, versionOK = rawVersion.(int64)
-		if !versionOK {
-			session.Clear()
-			_ = session.Save()
-			return nil, errSessionInvalid
-		}
-	}
-	if version != user.SessionVersion || user.Status != common.UserStatusEnabled {
-		session.Clear()
-		_ = session.Save()
-		return nil, errSessionInvalid
-	}
-	return user, nil
-}
-
-func Logout(c *gin.Context) {
-	session := sessions.Default(c)
-	userID, userIDOK := session.Get("id").(int)
-	browserSessionID, sessionIDOK := session.Get(
-		constant.SessionKeyBrowserSessionID,
-	).(string)
-	if userIDOK && userID > 0 && sessionIDOK && browserSessionID != "" {
-		if err := model.RevokeBrowserSession(userID, browserSessionID); err != nil {
-			common.ApiErrorI18n(c, i18n.MsgDatabaseError)
-			return
-		}
-	}
-	session.Clear()
-	err := session.Save()
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"message": err.Error(),
-			"success": false,
-		})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"message": "",
-		"success": true,
-	})
-}
-
-// LogoutAll revokes all browser sessions, including the current one. API keys
-// and dashboard access tokens are separate credentials and are not changed.
-func LogoutAll(c *gin.Context) {
-	userId := c.GetInt("id")
-	if err := model.RevokeUserSessions(userId); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	session := sessions.Default(c)
-	session.Clear()
-	if err := session.Save(); err != nil {
-		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
-}
-
 func Register(c *gin.Context) {
-	if !common.GetLegacyOptionBool("RegisterEnabled", &common.RegisterEnabled) {
+	if !common.RegisterEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
 		return
 	}
-	if !common.GetLegacyOptionBool("PasswordRegisterEnabled", &common.PasswordRegisterEnabled) {
+	if !common.PasswordRegisterEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordRegisterDisabled)
 		return
 	}
@@ -444,7 +338,8 @@ func Register(c *gin.Context) {
 
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.GetAllUsers(pageInfo)
+	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
+	users, total, err := model.GetAllUsers(pageInfo, sortOptions)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -473,7 +368,8 @@ func SearchUsers(c *gin.Context) {
 		}
 	}
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
+	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -524,12 +420,15 @@ func GenerateAccessToken(c *gin.Context) {
 		common.SysLog("failed to generate key: " + err.Error())
 		return
 	}
-	if err := model.UpdateUserAccessToken(id, key); err != nil {
-		common.SysLog(fmt.Sprintf("failed to rotate access token for user %d: %v", id, err))
-		common.ApiErrorI18n(c, i18n.MsgGenerateFailed)
+	if model.DB.Where("access_token = ?", key).First(&model.User{}).RowsAffected != 0 {
+		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
 		return
 	}
-	recordUserSecurityAudit(c, id, "user.access_token_rotate", nil)
+
+	if err := model.UpdateUserAccessToken(id, key); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -586,18 +485,30 @@ func GetSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	// Hide admin remarks: set to empty to trigger omitempty tag, ensuring the remark field is not included in JSON returned to regular users
-	user.Remark = ""
-
-	// 计算用户权限信息
+	responseData := buildSelfUserData(user)
+	// The authenticated role is loaded from GetUserCache. It should equal the
+	// row role, but use it for capabilities so GetSelf and login/refresh remain
+	// consistent with the authorization decision made for this request.
 	permissions := calculateUserPermissions(userRole)
 	permissions["admin_permissions"] = authz.Capabilities(id, userRole)
+	responseData["permissions"] = permissions
 
-	// 获取用户设置并提取sidebar_modules
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    responseData,
+	})
+	return
+}
+
+// buildSelfUserData is the single safe dashboard-user DTO used by GetSelf,
+// login and refresh. It intentionally excludes password, management PAT and
+// administrator-only remarks.
+func buildSelfUserData(user *model.User) map[string]interface{} {
 	userSetting := user.GetSetting()
-
-	// 构建响应数据，包含用户信息和权限
-	responseData := map[string]interface{}{
+	permissions := calculateUserPermissions(user.Role)
+	permissions["admin_permissions"] = authz.Capabilities(user.Id, user.Role)
+	return map[string]interface{}{
 		"id":                user.Id,
 		"username":          user.Username,
 		"display_name":      user.DisplayName,
@@ -622,15 +533,8 @@ func GetSelf(c *gin.Context) {
 		"setting":           user.Setting,
 		"stripe_customer":   user.StripeCustomer,
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
-		"permissions":       permissions,                // 新增权限字段
+		"permissions":       permissions,
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    responseData,
-	})
-	return
 }
 
 // 计算用户权限的辅助函数
@@ -693,24 +597,22 @@ func generateDefaultSidebarConfig(userRole int) string {
 	if userRole == common.RoleAdminUser {
 		// 管理员可以访问管理员区域，但不能访问系统设置
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":        true,
-			"channel":        true,
-			"models":         true,
-			"redemption":     true,
-			"user":           true,
-			"activeRequests": true,
-			"setting":        false, // 管理员不能访问系统设置
+			"enabled":    true,
+			"channel":    true,
+			"models":     true,
+			"redemption": true,
+			"user":       true,
+			"setting":    false, // 管理员不能访问系统设置
 		}
 	} else if userRole == common.RoleRootUser {
 		// 超级管理员可以访问所有功能
 		defaultConfig["admin"] = map[string]interface{}{
-			"enabled":        true,
-			"channel":        true,
-			"models":         true,
-			"redemption":     true,
-			"user":           true,
-			"activeRequests": true,
-			"setting":        true,
+			"enabled":    true,
+			"channel":    true,
+			"models":     true,
+			"redemption": true,
+			"user":       true,
+			"setting":    true,
 		}
 	}
 	// 普通用户不包含admin区域
@@ -737,48 +639,26 @@ func GetUserModels(c *gin.Context) {
 	}
 	groups := service.GetUserUsableGroups(user.Group)
 	group := c.Query("group")
-	if group != "" {
-		if _, ok := groups[group]; !ok {
-			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"message": "",
-				"data":    []string{},
-			})
-			return
+	var groupsToQuery []string
+	switch {
+	case group == "":
+		for g := range groups {
+			groupsToQuery = append(groupsToQuery, g)
 		}
-
-		models, err := model.GetGroupEnabledModels(group)
-		if err != nil {
-			common.ApiError(c, err)
-			return
+	case group == "auto":
+		if _, ok := groups[group]; ok {
+			groupsToQuery = service.GetUserAutoGroup(user.Group)
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "",
-			"data":    models,
-		})
-		return
-	}
-
-	var models []string
-	for group := range groups {
-		groupModels, err := model.GetGroupEnabledModels(group)
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		for _, g := range groupModels {
-			if !common.StringsContains(models, g) {
-				models = append(models, g)
-			}
+	default:
+		if _, ok := groups[group]; ok {
+			groupsToQuery = []string{group}
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    models,
+		"data":    service.GetGroupsEnabledModels(groupsToQuery),
 	})
-	return
 }
 
 func UpdateUser(c *gin.Context) {
@@ -832,13 +712,20 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	if authzTouched {
-		authz.MarkUserFailClosed(updatedUser.Id)
 		if err := authz.ReloadPolicy(); err != nil {
-			common.SysError(fmt.Sprintf("failed to reload authz policy after updating user %d; permissions remain fail-closed: %s", updatedUser.Id, err.Error()))
+			common.ApiError(c, err)
+			return
 		}
 	}
-	if err := model.InvalidateUserCache(updatedUser.Id); err != nil {
-		common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", updatedUser.Id, err.Error()))
+	if updatedUser.AuthVersion > originUser.AuthVersion {
+		if _, err := model.RevokeAllUserSessions(updatedUser.Id, "admin_user_update"); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if err := model.PublishUserAuthCache(updatedUser.Id); err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	recordManageAuditFor(c, updatedUser.Id, "user.update", map[string]interface{}{
 		"username": originUser.Username,
@@ -994,30 +881,45 @@ func UpdateSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := cleanUser.Update(updatePassword); err != nil {
+	if updatePassword {
+		identity, ok := middleware.GetSessionAuthIdentity(c)
+		if !ok {
+			common.ApiError(c, errors.New("当前认证方式不支持安全验证"))
+			return
+		}
+		if err := model.DB.Transaction(func(tx *gorm.DB) error {
+			return cleanUser.UpdateWithTx(tx, true)
+		}); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if err := model.PublishUserAuthCache(cleanUser.Id); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		bundle, err := service.AdvanceCurrentSessionToUserVersion(identity, "password_changed")
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+			"data": gin.H{
+				"access_token":      bundle.AccessToken,
+				"token_type":        bundle.TokenType,
+				"access_expires_at": bundle.AccessExpiresAt,
+				"session":           bundle.Session,
+			},
+		})
+		return
+	}
+	if err := cleanUser.Update(false); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if updatePassword {
-		session := sessions.Default(c)
-		session.Set("session_version", cleanUser.SessionVersion)
-		session.Delete(SecureVerificationSessionKey)
-		session.Delete(secureVerificationMethodSessionKey)
-		session.Delete(secureVerificationUserIDSessionKey)
-		session.Delete(secureVerificationBrowserSessionKey)
-		session.Delete(PasskeyReadySessionKey)
-		session.Delete(passkeyReadyUserIDSessionKey)
-		session.Delete(passkeyReadyBrowserSessionKey)
-		if err := session.Save(); err != nil {
-			common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
-			return
-		}
-	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-	})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 	return
 }
 
@@ -1092,12 +994,6 @@ func DeleteSelf(c *gin.Context) {
 	err = model.DeleteUserById(id)
 	if err != nil {
 		common.ApiError(c, err)
-		return
-	}
-	session := sessions.Default(c)
-	session.Clear()
-	if err := session.Save(); err != nil {
-		common.ApiErrorI18n(c, i18n.MsgUserSessionSaveFailed)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1197,18 +1093,12 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	if req.Id <= 0 {
-		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
-		return
-	}
 	user := model.User{
 		Id: req.Id,
 	}
-	if err := model.DB.Unscoped().First(&user, req.Id).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			common.ApiError(c, err)
-			return
-		}
+	// Fill attributes
+	model.DB.Unscoped().Where(&user).First(&user)
+	if user.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
 		return
 	}
@@ -1217,8 +1107,6 @@ func ManageUser(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
-	expectedRole := user.Role
-	expectedStatus := user.Status
 	switch req.Action {
 	case "disable":
 		user.Status = common.UserStatusDisabled
@@ -1240,9 +1128,8 @@ func ManageUser(c *gin.Context) {
 			})
 			return
 		}
-		if err := model.InvalidateUserCache(user.Id); err != nil {
-			common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", user.Id, err.Error()))
-		}
+		// 删除用户后，强制清理 Redis 中所有该用户令牌的缓存，
+		// 避免已缓存的令牌在 TTL 过期前仍能通过 TokenAuth 校验。
 		if err := model.InvalidateUserTokensCache(user.Id); err != nil {
 			common.SysLog(fmt.Sprintf("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
 		}
@@ -1326,55 +1213,40 @@ func ManageUser(c *gin.Context) {
 		return
 	}
 
-	authzTouched := false
 	if req.Action == "demote" {
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
-			updated, err := model.UpdateUserAdministrationWithTx(
-				tx,
-				user.Id,
-				expectedRole,
-				expectedStatus,
-				user.Role,
-				user.Status,
-			)
-			if err != nil {
+			if err := user.UpdateWithTx(tx, false); err != nil {
 				return err
 			}
-			user = *updated
-			authzTouched = true
 			return authz.ClearUserAuthorizationInTx(tx, user.Id)
 		}); err != nil {
 			common.ApiError(c, err)
 			return
 		}
-		if authzTouched {
-			authz.MarkUserFailClosed(user.Id)
-			if err := authz.ReloadPolicy(); err != nil {
-				common.SysError(fmt.Sprintf("failed to reload authz policy after demoting user %d; permissions remain fail-closed: %s", user.Id, err.Error()))
-			}
-		}
-	} else {
-		updated, err := model.UpdateUserAdministration(
-			user.Id,
-			expectedRole,
-			expectedStatus,
-			user.Role,
-			user.Status,
-		)
-		if err != nil {
+		if err := authz.ReloadPolicy(); err != nil {
 			common.ApiError(c, err)
 			return
 		}
-		user = *updated
+		if err := model.PublishUserAuthCache(user.Id); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if _, err := model.RevokeAllUserSessions(user.Id, "admin_demote"); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	} else {
+		if err := user.Update(false); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
-	if req.Action == "disable" || req.Action == "enable" ||
-		req.Action == "promote" || req.Action == "demote" {
-		if err := model.InvalidateUserCache(user.Id); err != nil {
-			common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", user.Id, err.Error()))
-		}
-		if err := model.InvalidateUserTokensCache(user.Id); err != nil {
-			common.SysLog(fmt.Sprintf("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
-		}
+	// Update/UpdateWithTx has already published the new user hash and revoked
+	// browser sessions exactly once. Only PAT/relay token caches still need an
+	// explicit invalidation; deleting the user hash here would discard the
+	// freshly published auth-version floor.
+	if err := model.InvalidateUserTokensCache(user.Id); err != nil {
+		common.SysLog(fmt.Sprintf("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
 	}
 	recordManageAuditFor(c, user.Id, "user.manage", map[string]interface{}{
 		"action":   req.Action,
@@ -1404,32 +1276,26 @@ func EmailBind(c *gin.Context) {
 		common.ApiError(c, errors.New("invalid request body"))
 		return
 	}
-	user, err := getCurrentSessionUser(c)
-	if err != nil {
-		common.ApiErrorI18n(c, i18n.MsgAuthNotLoggedIn)
-		return
-	}
 	email := req.Email
 	email = model.NormalizeEmail(email)
 	code := req.Code
-	if err := model.EnsureEmailAvailable(email, user.Id); err != nil {
-		if errors.Is(err, model.ErrEmailAlreadyTaken) {
-			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
-			return
-		}
-		common.ApiError(c, err)
-		return
-	}
-	valid, verifyErr := common.ConsumeVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
-	if verifyErr != nil {
-		common.ApiError(c, verifyErr)
-		return
-	}
-	if !valid {
+	if !common.VerifyCodeWithKey(email, code, common.EmailVerificationPurpose) {
 		common.ApiErrorI18n(c, i18n.MsgUserVerificationCodeError)
 		return
 	}
-	if err := model.BindEmailToUser(user, email); err != nil {
+	user := model.User{
+		Id: c.GetInt("id"),
+	}
+	if user.Id == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "not authenticated"})
+		return
+	}
+	err := user.FillUserById()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := model.BindEmailToUser(&user, email); err != nil {
 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
 			return

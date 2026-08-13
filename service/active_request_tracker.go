@@ -39,7 +39,7 @@ type ActiveRequest struct {
 	InputTokens    int                `json:"input_tokens"`
 	OutputChunks   int32              `json:"output_chunks"`
 	Completed      bool               `json:"completed"`
-	LastOutputNano int64              `json:"-"` // atomic unix nano
+	LastOutputNano int64              `json:"-"`
 	CancelFunc     context.CancelFunc `json:"-"`
 }
 
@@ -88,6 +88,9 @@ var GlobalActiveRequestTracker = &ActiveRequestTracker{
 
 // Register adds a new active request to the tracker.
 func (t *ActiveRequestTracker) Register(info *relaycommon.RelayInfo, c *gin.Context) {
+	if info == nil || c == nil {
+		return
+	}
 	now := time.Now()
 	channelId := common.GetContextKeyInt(c, constant.ContextKeyChannelId)
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
@@ -111,7 +114,6 @@ func (t *ActiveRequestTracker) Register(info *relaycommon.RelayInfo, c *gin.Cont
 		IsStream:       info.IsStream,
 		ClientIP:       c.ClientIP(),
 		InputTokens:    info.GetEstimatePromptTokens(),
-		OutputChunks:   0,
 		LastOutputNano: 0,
 		CancelFunc:     info.RelayCancelFunc,
 	}
@@ -174,14 +176,12 @@ func (t *ActiveRequestTracker) RecordOutput(requestId string) {
 func (t *ActiveRequestTracker) UpdateInputTokens(requestId string, tokens int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	req, ok := t.entries[requestId]
-	if ok {
+	if req, ok := t.entries[requestId]; ok {
 		req.InputTokens = tokens
 	}
 }
 
-// UpdateChannel refreshes the channel shown by the monitor after a retry or
-// fallback selects a different upstream channel.
+// UpdateChannel refreshes the channel shown by the monitor after retry/fallback.
 func (t *ActiveRequestTracker) UpdateChannel(requestId string, channelId int, channelType int, channelName string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -244,12 +244,7 @@ func (t *ActiveRequestTracker) pruneCompletedLocked(now time.Time, retentionSeco
 		clear(t.completed)
 		return
 	}
-	retention := common.SafeIntervalDuration(
-		retentionSeconds,
-		time.Second,
-		10*time.Second,
-		"active request retention",
-	)
+	retention := common.SafeIntervalDuration(retentionSeconds, time.Second, 10*time.Second, "active request retention")
 	for requestId, req := range t.completed {
 		if req.EndTime.IsZero() || now.Sub(req.EndTime) > retention {
 			delete(t.completed, requestId)

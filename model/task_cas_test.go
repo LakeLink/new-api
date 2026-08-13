@@ -39,28 +39,26 @@ func TestMain(m *testing.M) {
 	if err := db.AutoMigrate(
 		&Task{},
 		&User{},
-		&BrowserSession{},
-		&AffiliateReward{},
+		&UserSession{},
+		&AuthFlow{},
+		&ExternalIdentityClaim{},
 		&Token{},
+		&PasskeyCredential{},
+		&TwoFA{},
+		&TwoFABackupCode{},
 		&Log{},
 		&Channel{},
 		&QuotaData{},
 		&Ability{},
-		&Model{},
-		&Vendor{},
 		&TopUp{},
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},
-		&SubscriptionProviderPayment{},
 		&UserSubscription{},
-		&SubscriptionPreConsumeRecord{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
-		&BillingReservation{},
-		&TaskBillingFinalization{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -72,27 +70,27 @@ func truncateTables(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
 		DB.Exec("DELETE FROM tasks")
-		DB.Exec("DELETE FROM browser_sessions")
-		DB.Exec("DELETE FROM users")
-		DB.Exec("DELETE FROM affiliate_rewards")
+		DB.Exec("DELETE FROM auth_flows")
+		DB.Exec("DELETE FROM external_identity_claims")
+		DB.Exec("DELETE FROM user_sessions")
+		DB.Exec("DELETE FROM passkey_credentials")
+		DB.Exec("DELETE FROM two_fa_backup_codes")
+		DB.Exec("DELETE FROM two_fas")
 		DB.Exec("DELETE FROM tokens")
+		DB.Exec("DELETE FROM user_oauth_bindings")
+		DB.Exec("DELETE FROM users")
 		DB.Exec("DELETE FROM logs")
 		DB.Exec("DELETE FROM channels")
 		DB.Exec("DELETE FROM quota_data")
 		DB.Exec("DELETE FROM abilities")
 		DB.Exec("DELETE FROM top_ups")
 		DB.Exec("DELETE FROM subscription_orders")
-		DB.Exec("DELETE FROM subscription_provider_payments")
 		DB.Exec("DELETE FROM subscription_plans")
-		DB.Exec("DELETE FROM subscription_pre_consume_records")
 		DB.Exec("DELETE FROM user_subscriptions")
-		DB.Exec("DELETE FROM user_oauth_bindings")
 		DB.Exec("DELETE FROM perf_metrics")
 		DB.Exec("DELETE FROM system_instances")
 		DB.Exec("DELETE FROM system_task_locks")
 		DB.Exec("DELETE FROM system_tasks")
-		DB.Exec("DELETE FROM billing_reservations")
-		DB.Exec("DELETE FROM task_billing_finalizations")
 	})
 }
 

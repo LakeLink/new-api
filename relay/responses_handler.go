@@ -7,32 +7,28 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-	appconstant "github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
 
 func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
-	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
-		switch info.ApiType {
-		case appconstant.APITypeOpenAI, appconstant.APITypeCodex:
-		default:
-			return types.NewErrorWithStatusCode(
-				fmt.Errorf("unsupported endpoint %q for api type %d", "/v1/responses/compact", info.ApiType),
-				types.ErrorCodeInvalidRequest,
-				http.StatusBadRequest,
-				types.ErrOptionWithSkipRetry(),
-			)
-		}
+	if info.RelayMode == relayconstant.RelayModeResponsesCompact &&
+		!common.IsResponsesCompactAPIType(info.ApiType) {
+		return types.NewErrorWithStatusCode(
+			fmt.Errorf("unsupported endpoint %q for api type %d", "/v1/responses/compact", info.ApiType),
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 
 	var responsesReq *dto.OpenAIResponsesRequest
@@ -86,35 +82,13 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		if info.RelayMode == relayconstant.RelayModeResponses {
-			jsonData, err := storage.Bytes()
-			if err != nil {
-				return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
-			}
-			jsonData, err = refreshFinalRequestBilling(c, info, types.RelayFormatOpenAIResponses, jsonData)
-			if err != nil {
-				return finalRequestBillingAPIError(err, false)
-			}
-			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-			if err != nil {
-				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-			}
-			defer closer.Close()
-			info.UpstreamRequestBodySize = size
-			requestBody = body
-		} else {
-			requestBody = common.ReaderOnly(storage)
-		}
+		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
-			return types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
-		}
-		if err := validateConvertedRequest(convertedRequest); err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
-		finalRequestFormat, _ := relaycommon.GuessRelayFormatFromRequest(convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -134,23 +108,13 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		if info.RelayMode == relayconstant.RelayModeResponses {
-			jsonData, err = refreshFinalRequestBilling(c, info, finalRequestFormat, jsonData)
-			if err != nil {
-				return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
-			}
-		} else if err := validateFinalBillableScalars(jsonData); err != nil {
-			return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
-		}
-
-		logger.LogDebug(c, "Responses upstream request prepared: bytes=%d", len(jsonData))
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+		logger.LogDebug(c, "requestBody: %s", jsonData)
+		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		defer closer.Close()
 		jsonData = nil
-		info.UpstreamRequestBodySize = size
 		requestBody = body
 	}
 

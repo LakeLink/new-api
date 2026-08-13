@@ -3,33 +3,57 @@ package ali
 import (
 	"testing"
 
-	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestRequestOpenAI2AliPreservesOmittedTopP(t *testing.T) {
-	converted := requestOpenAI2Ali(dto.GeneralOpenAIRequest{Model: "qwen-plus"})
-
-	require.NotNil(t, converted)
-	assert.Nil(t, converted.TopP)
-}
-
-func TestRequestOpenAI2AliBoundsExplicitTopP(t *testing.T) {
-	for _, test := range []struct {
+func TestRequestOpenAI2AliTopP(t *testing.T) {
+	tests := []struct {
 		name string
-		in   float64
-		want float64
+		topP *float64
+		want *float64
 	}{
-		{name: "zero", in: 0, want: 0.001},
-		{name: "one", in: 1, want: 0.999},
-		{name: "interior", in: 0.5, want: 0.5},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			converted := requestOpenAI2Ali(dto.GeneralOpenAIRequest{Model: "qwen-plus", TopP: &test.in})
+		{
+			name: "omitted top_p is not injected",
+			topP: nil,
+			want: nil,
+		},
+		{
+			name: "in-range top_p is preserved",
+			topP: lo.ToPtr(0.8),
+			want: lo.ToPtr(0.8),
+		},
+		{
+			name: "top_p of 1 is clamped to two decimals",
+			topP: lo.ToPtr(1.0),
+			want: lo.ToPtr(0.99),
+		},
+		{
+			name: "top_p above 1 is clamped to two decimals",
+			topP: lo.ToPtr(1.5),
+			want: lo.ToPtr(0.99),
+		},
+		{
+			name: "top_p of 0 is clamped to two decimals",
+			topP: lo.ToPtr(0.0),
+			want: lo.ToPtr(0.01),
+		},
+		{
+			name: "negative top_p is clamped to two decimals",
+			topP: lo.ToPtr(-0.3),
+			want: lo.ToPtr(0.01),
+		},
+	}
 
-			require.NotNil(t, converted.TopP)
-			assert.Equal(t, test.want, *converted.TopP)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := requestOpenAI2Ali(dto.GeneralOpenAIRequest{
+				Model: "qwen-plus",
+				TopP:  tt.topP,
+			}, "qwen-plus")
+
+			assert.Equal(t, tt.want, got.TopP)
 		})
 	}
 }

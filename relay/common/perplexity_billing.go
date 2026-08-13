@@ -1,6 +1,6 @@
 package common
 
-import "github.com/QuantumNous/new-api/dto"
+import "github.com/QuantumNous/new-api/relaykit/dto"
 
 // PerplexityRequestPricingParams extracts the request fields that select the
 // provider's per-request search fee. Responses requests do not expose these

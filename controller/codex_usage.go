@@ -99,7 +99,7 @@ func fetchCodexChannelWhamData(
 		return
 	}
 
-	client, err := service.NewProxyHttpClient(ch.GetSetting().Proxy)
+	client, err := service.GetHttpClientWithProxy(ch.GetSetting().Proxy)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -120,50 +120,29 @@ func fetchCodexChannelWhamData(
 		defer refreshCancel()
 
 		res, refreshErr := service.RefreshCodexOAuthTokenWithProxy(refreshCtx, oauthKey.RefreshToken, ch.GetSetting().Proxy)
-		if refreshErr != nil {
-			common.SysError(logPrefix + " token refresh: " + refreshErr.Error())
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": userMessage})
-			return
-		}
-		oauthKey.AccessToken = res.AccessToken
-		oauthKey.RefreshToken = res.RefreshToken
-		oauthKey.LastRefresh = time.Now().Format(time.RFC3339)
-		oauthKey.Expired = res.ExpiresAt.Format(time.RFC3339)
-		if strings.TrimSpace(oauthKey.Type) == "" {
-			oauthKey.Type = "codex"
-		}
-
-		encoded, encErr := common.Marshal(oauthKey)
-		if encErr != nil {
-			common.SysError(logPrefix + " encode refreshed credentials: " + encErr.Error())
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": userMessage})
-			return
-		}
-		update := model.DB.Model(&model.Channel{}).
-			Where("id = ?", ch.Id).
-			Update("key", string(encoded))
-		if update.Error != nil || update.RowsAffected != 1 {
-			if update.Error != nil {
-				common.SysError(logPrefix + " persist refreshed credentials: " + update.Error.Error())
-			} else {
-				common.SysError(logPrefix + " persist refreshed credentials: channel changed concurrently")
+		if refreshErr == nil {
+			oauthKey.AccessToken = res.AccessToken
+			oauthKey.RefreshToken = res.RefreshToken
+			oauthKey.LastRefresh = time.Now().Format(time.RFC3339)
+			oauthKey.Expired = res.ExpiresAt.Format(time.RFC3339)
+			if strings.TrimSpace(oauthKey.Type) == "" {
+				oauthKey.Type = "codex"
 			}
-			// Refresh-token rotation is stateful. Never perform the requested
-			// usage/reset operation with credentials that were not durably
-			// stored, or a successful external mutation can strand the channel.
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": userMessage})
-			return
-		}
-		model.InitChannelCache()
-		service.ResetProxyClientCache()
 
-		ctx2, cancel2 := context.WithTimeout(c.Request.Context(), 15*time.Second)
-		defer cancel2()
-		statusCode, body, err = fetch(ctx2, client, ch.GetBaseURL(), oauthKey.AccessToken, accountID)
-		if err != nil {
-			common.SysError(logPrefix + " after refresh: " + err.Error())
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": userMessage})
-			return
+			encoded, encErr := common.Marshal(oauthKey)
+			if encErr == nil {
+				_ = model.DB.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("key", string(encoded)).Error
+				model.InitChannelCache()
+			}
+
+			ctx2, cancel2 := context.WithTimeout(c.Request.Context(), 15*time.Second)
+			defer cancel2()
+			statusCode, body, err = fetch(ctx2, client, ch.GetBaseURL(), oauthKey.AccessToken, accountID)
+			if err != nil {
+				common.SysError(logPrefix + " after refresh: " + err.Error())
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": userMessage})
+				return
+			}
 		}
 	}
 

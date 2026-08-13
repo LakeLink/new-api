@@ -129,9 +129,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 				return nil, "", fmt.Errorf("%s does not support ClickHouse; use SQLite, MySQL, or PostgreSQL for the primary database and LOG_SQL_DSN for ClickHouse logs", envName)
 			}
 			common.SysLog("using ClickHouse as log database")
-			db, err := gorm.Open(clickhouse.Open(normalizeClickHouseDSN(dsn)), &gorm.Config{
-				PrepareStmt: false,
-			})
+			db, err := gorm.Open(clickhouse.Open(normalizeClickHouseDSN(dsn)), newGormConfig(false))
 			return db, common.DatabaseTypeClickHouse, err
 		}
 		if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
@@ -140,16 +138,12 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 			db, err := gorm.Open(postgres.New(postgres.Config{
 				DSN:                  dsn,
 				PreferSimpleProtocol: true, // disables implicit prepared statement usage
-			}), &gorm.Config{
-				PrepareStmt: true, // precompile SQL
-			})
+			}), newGormConfig(true))
 			return db, common.DatabaseTypePostgreSQL, err
 		}
 		if strings.HasPrefix(dsn, "local") {
 			common.SysLog("SQL_DSN not set, using SQLite as database")
-			db, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{
-				PrepareStmt: true, // precompile SQL
-			})
+			db, err := gorm.Open(sqlite.Open(common.SQLitePath), newGormConfig(true))
 			return db, common.DatabaseTypeSQLite, err
 		}
 		// Use MySQL
@@ -162,16 +156,12 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 				dsn += "?parseTime=true"
 			}
 		}
-		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-			PrepareStmt: true, // precompile SQL
-		})
+		db, err := gorm.Open(mysql.Open(dsn), newGormConfig(true))
 		return db, common.DatabaseTypeMySQL, err
 	}
 	// Use SQLite
 	common.SysLog("SQL_DSN not set, using SQLite as database")
-	db, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{
-		PrepareStmt: true, // precompile SQL
-	})
+	db, err := gorm.Open(sqlite.Open(common.SQLitePath), newGormConfig(true))
 	return db, common.DatabaseTypeSQLite, err
 }
 
@@ -259,17 +249,9 @@ func InitLogDB() (err error) {
 
 func migrateDB() error {
 	// Migrate price_amount column from float/double to decimal for existing tables
-	if err := migrateSubscriptionPlanPriceAmount(); err != nil {
-		return err
-	}
+	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables
 	if err := migrateTokenModelLimitsToText(); err != nil {
-		return err
-	}
-	if err := migratePortableJSONColumnsToText(); err != nil {
-		return err
-	}
-	if err := prepareCrossDatabaseIdentityColumns(); err != nil {
 		return err
 	}
 
@@ -277,7 +259,9 @@ func migrateDB() error {
 		&Channel{},
 		&Token{},
 		&User{},
-		&AffiliateReward{},
+		&UserSession{},
+		&AuthFlow{},
+		&ExternalIdentityClaim{},
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
@@ -316,14 +300,11 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
-	if err := migrateCrossDatabaseIdentityHashes(); err != nil {
-		return fmt.Errorf("migrate cross-database identity hashes: %w", err)
+	if err := InitializeUserAuthVersions(); err != nil {
+		return err
 	}
-	if err := migrateUserOAuthBindingHashes(); err != nil {
-		return fmt.Errorf("migrate custom OAuth identity hashes: %w", err)
-	}
-	if err := backfillBuiltInOAuthIdentities(); err != nil {
-		return fmt.Errorf("backfill built-in OAuth identities: %w", err)
+	if err := InitializeExternalIdentityClaims(); err != nil {
+		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
@@ -354,7 +335,9 @@ func migrateDBFast() error {
 		{&Channel{}, "Channel"},
 		{&Token{}, "Token"},
 		{&User{}, "User"},
-		{&AffiliateReward{}, "AffiliateReward"},
+		{&UserSession{}, "UserSession"},
+		{&AuthFlow{}, "AuthFlow"},
+		{&ExternalIdentityClaim{}, "ExternalIdentityClaim"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},
@@ -411,14 +394,11 @@ func migrateDBFast() error {
 			return err
 		}
 	}
-	if err := migrateCrossDatabaseIdentityHashes(); err != nil {
-		return fmt.Errorf("migrate cross-database identity hashes: %w", err)
+	if err := InitializeUserAuthVersions(); err != nil {
+		return err
 	}
-	if err := migrateUserOAuthBindingHashes(); err != nil {
-		return fmt.Errorf("migrate custom OAuth identity hashes: %w", err)
-	}
-	if err := backfillBuiltInOAuthIdentities(); err != nil {
-		return fmt.Errorf("backfill built-in OAuth identities: %w", err)
+	if err := InitializeExternalIdentityClaims(); err != nil {
+		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {

@@ -18,6 +18,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -309,7 +310,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 				return nil, service.TaskErrorFromAPIError(apiErr)
 			}
 		} else if err := info.Billing.Reserve(info.PriceData.Quota); err != nil {
-			var apiErr *types.NewAPIError
+			var apiErr *relaytypes.NewAPIError
 			if errors.As(err, &apiErr) {
 				return nil, service.TaskErrorFromAPIError(apiErr)
 			}

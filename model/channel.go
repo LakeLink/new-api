@@ -11,9 +11,9 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -476,14 +476,17 @@ func BatchInsertChannels(channels []Channel) error {
 	return tx.Commit().Error
 }
 
-func BatchDeleteChannels(ids []int) error {
+func BatchDeleteChannels(ids []int) (int64, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		_, err := deleteChannelsByIDsTx(tx, ids)
+	var deletedCount int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		deletedCount, err = deleteChannelsByIDsTx(tx, ids)
 		return err
 	})
+	return deletedCount, err
 }
 
 func normalizeChannelIDs(ids []int) []int {
@@ -756,7 +759,8 @@ func (channel *Channel) Delete() error {
 	if channel == nil || channel.Id <= 0 {
 		return errors.New("channel ID is invalid")
 	}
-	return BatchDeleteChannels([]int{channel.Id})
+	_, err := BatchDeleteChannels([]int{channel.Id})
+	return err
 }
 
 var channelStatusLock sync.Mutex
@@ -1146,6 +1150,12 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if _, err := common.ParseProxyURLStrict(channelParams.Proxy); err != nil {
+		return fmt.Errorf("invalid channel proxy: %w", err)
+	}
+	if err := channelParams.ValidateHTTPTransport(); err != nil {
+		return err
+	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
@@ -1169,6 +1179,11 @@ func (channel *Channel) ValidateSettings() error {
 	if channelOtherSettings.AdvancedCustom != nil {
 		if err := channelOtherSettings.AdvancedCustom.Validate(); err != nil {
 			return err
+		}
+	}
+	if channel.Type == constant.ChannelTypeAdvancedCustom && channelOtherSettings.UpstreamModelUpdateCheckEnabled {
+		if _, ok := channelOtherSettings.AdvancedCustom.ModelListRoute(); !ok {
+			return fmt.Errorf("advanced custom channels require a %s route when upstream model update checks are enabled", dto.AdvancedCustomModelListPath)
 		}
 	}
 	return nil

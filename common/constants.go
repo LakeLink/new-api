@@ -19,7 +19,7 @@ var Footer = ""
 var Logo = ""
 var TopUpLink = ""
 
-var themeValue atomic.Value // stores string; safe for concurrent read/write
+var themeValue atomic.Value
 
 func init() {
 	themeValue.Store("classic")
@@ -38,10 +38,9 @@ func SetTheme(t string) {
 }
 
 // ThemeAwarePath rewrites legacy /console/* paths to the default-theme
-// equivalents when the active theme is "default".  For "classic" (or any
-// other theme) the path is returned unchanged.  The function only touches
-// known prefixes so it is safe to call with arbitrary suffixes and query
-// strings.
+// equivalents when the active theme is "default". For "classic" the path is
+// returned unchanged. Only known prefixes are touched, so it is safe to call
+// with arbitrary suffixes and query strings.
 func ThemeAwarePath(suffix string) string {
 	if GetTheme() != "default" {
 		return suffix
@@ -76,6 +75,22 @@ var SessionSecret = uuid.New().String()
 var CryptoSecret = uuid.New().String()
 var SessionCookieSecure = false
 var SessionCookieTrustedURLs []string
+
+const (
+	DefaultUserSessionActiveLimit           = 50
+	DefaultUserSessionIssuanceLimit         = 100
+	DefaultUserSessionIssuanceWindowSeconds = 24 * 60 * 60
+	DefaultUserSessionRevokedRetentionDays  = 7
+	DefaultUserSessionHourlyAlertThreshold  = 5000
+)
+
+var (
+	UserSessionActiveLimit           = DefaultUserSessionActiveLimit
+	UserSessionIssuanceLimit         = DefaultUserSessionIssuanceLimit
+	UserSessionIssuanceWindowSeconds = int64(DefaultUserSessionIssuanceWindowSeconds)
+	UserSessionRevokedRetentionDays  = DefaultUserSessionRevokedRetentionDays
+	UserSessionHourlyAlertThreshold  = DefaultUserSessionHourlyAlertThreshold
+)
 
 var OptionMap map[string]string
 var OptionMapRWMutex sync.RWMutex

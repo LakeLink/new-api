@@ -104,10 +104,6 @@ func ReverseDurableQuotaAdjustment(relayInfo *relaycommon.RelayInfo, originalPur
 	}
 	fundingSource := durableQuotaAdjustmentFundingSource(relayInfo)
 	adjustment := model.BillingAdjustment{
-		// A settlement can be reversed exactly once. Canonicalizing the request ID
-		// makes retries with a different local reason resolve to the same payload;
-		// model.EnqueueBillingAdjustment independently keys every reversal by the
-		// original task ID to enforce the invariant atomically.
 		RequestID:        fmt.Sprintf("reversal-of:%s", originalTaskID),
 		Kind:             model.BillingAdjustmentRefund,
 		FundingSource:    fundingSource,
@@ -140,8 +136,7 @@ func persistAndProcessDurableQuotaAdjustment(adjustment model.BillingAdjustment,
 	if err != nil {
 		return model.BillingAdjustmentResult{}, false, fmt.Errorf("%s billing adjustment queued for retry: %w", purpose, err)
 	}
-	applied := !result.AlreadyProcessed
-	if !applied {
+	if result.AlreadyProcessed {
 		return result, false, nil
 	}
 	return result, true, nil

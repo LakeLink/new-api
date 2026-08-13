@@ -6,9 +6,10 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -135,7 +136,7 @@ func TestOpenRouterCacheCreationInferenceRejectsInvalidArithmetic(t *testing.T) 
 	common.QuotaPerUnit = 1
 
 	usage := dto.Usage{PromptTokens: 10, Cost: 15.0}
-	priceData := types.PriceData{ModelRatio: 1, CompletionRatio: 1, CacheRatio: 0.1, CacheCreationRatio: 2}
+	priceData := hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 1, CacheRatio: 0.1, CacheCreationRatio: 2}
 	require.Equal(t, 5, CalcOpenRouterCacheCreateTokens(usage, priceData))
 
 	usage.Cost = math.Inf(1)

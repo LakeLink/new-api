@@ -6,14 +6,13 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,22 +47,10 @@ func RerankHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		jsonData, err := storage.Bytes()
-		if err != nil {
-			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
-		}
-		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeCohere {
-			if err := refreshFinalCohereRerankBilling(c, info, jsonData); err != nil {
-				return finalRequestBillingAPIError(err, false)
-			}
-		}
-		requestBody = common.ReaderOnly(storage)
+		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertRerankRequest(c, info.RelayMode, *request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-		}
-		if err := validateConvertedRequest(convertedRequest); err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
@@ -79,22 +66,14 @@ func RerankHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				return newAPIErrorFromParamOverride(err)
 			}
 		}
-		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeCohere {
-			if err := refreshFinalCohereRerankBilling(c, info, jsonData); err != nil {
-				return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
-			}
-		} else if err := refreshUnknownFinalBilling(c, info, jsonData); err != nil {
-			return finalRequestBillingAPIError(err, len(info.ParamOverride) > 0)
-		}
 
-		logger.LogDebug(c, "rerank upstream request prepared: bytes=%d", len(jsonData))
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+		logger.LogDebug(c, "Rerank request body: %s", jsonData)
+		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		defer closer.Close()
 		jsonData = nil
-		info.UpstreamRequestBodySize = size
 		requestBody = body
 	}
 

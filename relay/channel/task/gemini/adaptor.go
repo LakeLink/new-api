@@ -13,11 +13,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
@@ -42,20 +43,20 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
-func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
+func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
 	return ValidateVeoTaskRequest(c, info, false, 1)
 }
 
 // ValidateFinalRequest rechecks model-specific capabilities after channel
 // model mapping, before the mapped model is priced or sent upstream.
-func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
 	return ValidateVeoTaskRequest(c, info, false, 1)
 }
 
 // ValidateVeoTaskRequest validates the shared Veo request shape before its
 // duration and resolution are used as billing multipliers. Vertex supports
 // generateAudio; the Gemini API always generates audio and has no toggle.
-func ValidateVeoTaskRequest(c *gin.Context, info *relaycommon.RelayInfo, allowGenerateAudio bool, maxSampleCount int) (taskErr *dto.TaskError) {
+func ValidateVeoTaskRequest(c *gin.Context, info *relaycommon.RelayInfo, allowGenerateAudio bool, maxSampleCount int) (taskErr *taskdto.TaskError) {
 	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionTextGenerate); taskErr != nil {
 		return taskErr
 	}
@@ -197,7 +198,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 // DoResponse handles upstream response, returns taskID etc.
-func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
+func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
 	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)

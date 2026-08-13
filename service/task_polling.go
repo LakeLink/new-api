@@ -16,11 +16,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/samber/lo"
@@ -483,7 +484,7 @@ func pollSunoTaskGroup(
 		common.SysLog(fmt.Sprintf("Get Suno Task parse body error: %v", err))
 		return err
 	}
-	var responseItems dto.TaskResponse[[]dto.SunoDataResponse]
+	var responseItems taskdto.TaskResponse[[]taskdto.SunoDataResponse]
 	err = common.Unmarshal(responseBody, &responseItems)
 	if err != nil {
 		logger.LogError(
@@ -587,7 +588,7 @@ func pollSunoTaskGroup(
 }
 
 // taskNeedsUpdate 检查 Suno 任务是否需要更新
-func taskNeedsUpdate(oldTask *model.Task, newTask dto.SunoDataResponse) bool {
+func taskNeedsUpdate(oldTask *model.Task, newTask taskdto.SunoDataResponse) bool {
 	if oldTask.SubmitTime != newTask.SubmitTime {
 		return true
 	}
@@ -741,8 +742,6 @@ func ApplyTaskPollingResult(
 			task.FinishTime = now
 		}
 		if strings.HasPrefix(taskResult.Url, "data:") {
-			// data: URI (e.g. Vertex base64 encoded video) — keep in Data, not
-			// in ResultURL.
 			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 		} else if taskResult.Url != "" {
 			task.PrivateData.ResultURL = taskResult.Url
@@ -787,9 +786,6 @@ func ApplyTaskPollingResult(
 	if isDone && snap.Status != task.Status {
 		won, err := persistTaskTerminalTransition(ctx, task, snap.Status, billingFinalization)
 		if err != nil {
-			// Realtime fetch callers render this same object after a failed
-			// persistence attempt. Do not leak an upstream-only terminal state
-			// when the atomic status/billing transaction did not commit.
 			*task = original
 			return fmt.Errorf("persist terminal task %s: %w", task.TaskID, err)
 		}
@@ -807,8 +803,6 @@ func ApplyTaskPollingResult(
 	}
 	won, err := task.UpdateWithStatus(snap.Status)
 	if err != nil {
-		// Keep the returned object aligned with durable state on write errors.
-		// Background polling discards the object, but realtime fetches do not.
 		*task = original
 		return fmt.Errorf("persist task %s polling state: %w", task.TaskID, err)
 	}
@@ -869,8 +863,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	)
 
 	taskResult := &relaycommon.TaskInfo{}
-	// try parse as New API response format
-	var responseItems dto.TaskResponse[model.Task]
+	var responseItems taskdto.TaskResponse[model.Task]
 	if err = common.Unmarshal(responseBody, &responseItems); err == nil && responseItems.IsSuccess() {
 		logger.LogDebug(
 			ctx,
@@ -889,6 +882,18 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	if taskResult == nil {
 		return fmt.Errorf("parseTaskResult returned no result for task %s", taskId)
+	}
+	if taskResult.Status == "" {
+		errorResult := &dto.GeneralErrorResponse{}
+		if err = common.Unmarshal(responseBody, &errorResult); err == nil {
+			openaiError := errorResult.TryToOpenAIError()
+			if openaiError != nil && openaiError.Code == "429" {
+				return nil
+			}
+			if openaiError != nil {
+				taskResult = relaycommon.FailTaskInfo("upstream returned error")
+			}
+		}
 	}
 	logger.LogDebug(
 		ctx,

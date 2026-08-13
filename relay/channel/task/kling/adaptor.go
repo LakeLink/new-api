@@ -22,10 +22,11 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 )
 
@@ -129,50 +130,9 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
-func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
+func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
+	// Use the standard validation method for TaskSubmitReq
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
-}
-
-func (a *TaskAdaptor) ValidateFinalRequest(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
-	req, err := relaycommon.GetTaskRequest(c)
-	if err != nil {
-		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
-	}
-	if _, err := a.convertToRequestPayload(&req, info); err != nil {
-		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
-	}
-	return nil
-}
-
-// EstimateBilling keeps std/5s as the configured per-call base. Kling's video
-// SKU doubles for 10s and legacy pro mode is 3.5x; master models have no
-// std/pro distinction. See the provider specification linked from
-// https://app.klingai.com/global/dev/document-api/quickStart/productIntroduction/overview.
-func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
-	req, err := relaycommon.GetTaskRequest(c)
-	if err != nil {
-		return nil
-	}
-	payload, err := a.convertToRequestPayload(&req, info)
-	if err != nil {
-		return nil
-	}
-	duration, err := strconv.Atoi(payload.Duration)
-	if err != nil {
-		return nil
-	}
-
-	ratios := make(map[string]float64, 2)
-	if duration > 5 {
-		ratios["duration"] = float64(duration) / 5
-	}
-	if payload.Mode == "pro" && !strings.Contains(strings.ToLower(payload.ModelName), "master") {
-		ratios["quality"] = 3.5
-	}
-	if len(ratios) == 0 {
-		return nil
-	}
-	return ratios
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -234,10 +194,8 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 // DoResponse handles upstream response, returns taskID etc.
-func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	defer service.CloseResponseBodyGracefully(resp)
-
-	responseBody, err := service.ReadUpstreamResponseBody(resp.Body)
+func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return

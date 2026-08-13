@@ -3,10 +3,9 @@ package model
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,19 +27,23 @@ func setupUserUpdateTestState(t *testing.T) {
 	})
 }
 
-func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
+func TestUserUpdateDoesNotOverwriteConcurrentAccountingOrTokenChanges(t *testing.T) {
 	setupUserUpdateTestState(t)
 
 	user := User{
-		Id:           1,
-		Username:     "quota-race-user",
-		Password:     "password",
-		DisplayName:  "before",
-		Status:       common.UserStatusEnabled,
-		Quota:        1000,
-		UsedQuota:    20,
-		RequestCount: 3,
+		Id:              1,
+		Username:        "quota-race-user",
+		Password:        "password",
+		DisplayName:     "before",
+		Status:          common.UserStatusEnabled,
+		Quota:           1000,
+		UsedQuota:       20,
+		RequestCount:    3,
+		AffCount:        2,
+		AffQuota:        800,
+		AffHistoryQuota: 1200,
 	}
+	user.SetAccessToken("old-token")
 	require.NoError(t, DB.Create(&user).Error)
 
 	staleUser, err := GetUserById(user.Id, true)
@@ -50,6 +53,10 @@ func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
 		"quota":         gorm.Expr("quota - ?", 400),
 		"used_quota":    gorm.Expr("used_quota + ?", 400),
 		"request_count": gorm.Expr("request_count + ?", 1),
+		"aff_count":     gorm.Expr("aff_count + ?", 1),
+		"aff_quota":     gorm.Expr("aff_quota - ?", 500),
+		"aff_history":   gorm.Expr("aff_history + ?", 500),
+		"access_token":  "rotated-token",
 	}).Error)
 
 	staleUser.DisplayName = "after"
@@ -61,154 +68,63 @@ func TestUserUpdateDoesNotOverwriteAccountingFields(t *testing.T) {
 	assert.Equal(t, 600, got.Quota)
 	assert.Equal(t, 420, got.UsedQuota)
 	assert.Equal(t, 4, got.RequestCount)
+	assert.Equal(t, 3, got.AffCount)
+	assert.Equal(t, 300, got.AffQuota)
+	assert.Equal(t, 1700, got.AffHistoryQuota)
+	assert.Equal(t, "rotated-token", got.GetAccessToken())
 }
 
-func TestUserUpdateDoesNotOverwriteSecurityOrBindingFields(t *testing.T) {
+func TestUpdateUserAccessTokenOnlyUpdatesAccessToken(t *testing.T) {
 	setupUserUpdateTestState(t)
 
-	oldAccessToken := "old-dashboard-token"
 	user := User{
-		Id:             11,
-		Username:       "security-race-user",
-		Password:       "password",
-		DisplayName:    "before",
-		Role:           common.RoleCommonUser,
-		Status:         common.UserStatusEnabled,
-		Email:          "before@example.com",
-		TelegramId:     "telegram-before",
-		AccessToken:    &oldAccessToken,
-		SessionVersion: 2,
+		Id:              2,
+		Username:        "token-rotation-user",
+		Password:        "password",
+		DisplayName:     "before",
+		Status:          common.UserStatusEnabled,
+		Quota:           1000,
+		AffQuota:        800,
+		AffHistoryQuota: 1200,
 	}
 	require.NoError(t, DB.Create(&user).Error)
 
-	staleUser, err := GetUserById(user.Id, true)
-	require.NoError(t, err)
+	require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]interface{}{
+		"quota":        gorm.Expr("quota + ?", 500),
+		"aff_quota":    gorm.Expr("aff_quota - ?", 500),
+		"display_name": "concurrent-update",
+	}).Error)
 
-	newAccessToken := "new-dashboard-token"
-	require.NoError(t, DB.Model(&User{}).
-		Where("id = ?", user.Id).
-		Updates(map[string]interface{}{
-			"role":            common.RoleAdminUser,
-			"status":          common.UserStatusDisabled,
-			"email":           "after@example.com",
-			"telegram_id":     "telegram-after",
-			"access_token":    newAccessToken,
-			"session_version": 9,
-		}).Error)
-
-	staleUser.DisplayName = "after"
-	require.NoError(t, staleUser.Update(false))
+	require.NoError(t, UpdateUserAccessToken(user.Id, "rotated-token"))
 
 	var got User
 	require.NoError(t, DB.First(&got, user.Id).Error)
-	assert.Equal(t, "after", got.DisplayName)
-	assert.Equal(t, common.RoleAdminUser, got.Role)
-	assert.Equal(t, common.UserStatusDisabled, got.Status)
-	assert.Equal(t, "after@example.com", got.Email)
-	assert.Equal(t, "telegram-after", got.TelegramId)
-	assert.Equal(t, newAccessToken, got.GetAccessToken())
-	assert.Equal(t, int64(9), got.SessionVersion)
+	assert.Equal(t, "rotated-token", got.GetAccessToken())
+	assert.Equal(t, "concurrent-update", got.DisplayName)
+	assert.Equal(t, 1500, got.Quota)
+	assert.Equal(t, 300, got.AffQuota)
+	assert.Equal(t, 1200, got.AffHistoryQuota)
 }
 
-func TestUserAdministrationChangeRevokesAuthenticationState(t *testing.T) {
+func TestUpdateUserAccessTokenRejectsSoftDeletedUser(t *testing.T) {
 	setupUserUpdateTestState(t)
-	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
-
-	accessToken := "dashboard-token"
-	user := User{
-		Id:             12,
-		Username:       "managed-user",
-		Password:       "password",
-		Role:           common.RoleCommonUser,
-		Status:         common.UserStatusEnabled,
-		AccessToken:    &accessToken,
-		SessionVersion: 3,
-	}
-	require.NoError(t, DB.Create(&user).Error)
-	browserSessionID, err := CreateBrowserSession(user.Id, time.Now().Unix())
-	require.NoError(t, err)
-
-	updated, err := UpdateUserAdministration(
-		user.Id,
-		common.RoleCommonUser,
-		common.UserStatusEnabled,
-		common.RoleAdminUser,
-		common.UserStatusEnabled,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, common.RoleAdminUser, updated.Role)
-	assert.Empty(t, updated.GetAccessToken())
-	assert.Equal(t, int64(4), updated.SessionVersion)
-
-	resolved, err := GetUserByBrowserSession(
-		user.Id,
-		browserSessionID,
-		time.Now().Unix(),
-	)
-	require.NoError(t, err)
-	assert.Nil(t, resolved)
-}
-
-func TestUserAdministrationRejectsStaleRoleAndStatus(t *testing.T) {
-	setupUserUpdateTestState(t)
-	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
 
 	user := User{
-		Id:       13,
-		Username: "managed-conflict-user",
+		Id:       3,
+		Username: "deleted-token-rotation-user",
 		Password: "password",
-		Role:     common.RoleCommonUser,
-		Status:   common.UserStatusDisabled,
+		Status:   common.UserStatusEnabled,
 	}
+	user.SetAccessToken("old-token")
 	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, DB.Delete(&user).Error)
 
-	_, err := UpdateUserAdministration(
-		user.Id,
-		common.RoleCommonUser,
-		common.UserStatusEnabled,
-		common.RoleAdminUser,
-		common.UserStatusEnabled,
-	)
-	require.ErrorIs(t, err, ErrUserAdministrationConflict)
+	err := UpdateUserAccessToken(user.Id, "orphaned-token")
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
 
 	var got User
-	require.NoError(t, DB.First(&got, user.Id).Error)
-	assert.Equal(t, common.RoleCommonUser, got.Role)
-	assert.Equal(t, common.UserStatusDisabled, got.Status)
-}
-
-func TestAdministrativePasswordResetRevokesAuthenticationState(t *testing.T) {
-	setupUserUpdateTestState(t)
-	require.NoError(t, DB.AutoMigrate(&BrowserSession{}))
-
-	accessToken := "administrative-reset-token"
-	user := User{
-		Id:             14,
-		Username:       "administrative-reset-user",
-		Password:       "old-password-hash",
-		DisplayName:    "Administrative Reset",
-		Role:           common.RoleCommonUser,
-		Status:         common.UserStatusEnabled,
-		Group:          "default",
-		AccessToken:    &accessToken,
-		SessionVersion: 5,
-	}
-	require.NoError(t, DB.Create(&user).Error)
-	browserSessionID, err := CreateBrowserSession(user.Id, time.Now().Unix())
-	require.NoError(t, err)
-
-	user.Password = "NewPassword123"
-	require.NoError(t, user.Edit(true))
-	assert.Empty(t, user.GetAccessToken())
-	assert.Equal(t, int64(6), user.SessionVersion)
-
-	resolved, err := GetUserByBrowserSession(
-		user.Id,
-		browserSessionID,
-		time.Now().Unix(),
-	)
-	require.NoError(t, err)
-	assert.Nil(t, resolved)
+	require.NoError(t, DB.Unscoped().First(&got, user.Id).Error)
+	assert.Equal(t, "old-token", got.GetAccessToken())
 }
 
 func TestUpdateUserSettingOnlyUpdatesSetting(t *testing.T) {

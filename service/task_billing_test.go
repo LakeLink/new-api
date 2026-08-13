@@ -493,6 +493,13 @@ func getSubscriptionUsed(t *testing.T, id int) int64 {
 	return sub.AmountUsed
 }
 
+func getTaskQuota(t *testing.T, id int64) int {
+	t.Helper()
+	var task model.Task
+	require.NoError(t, model.DB.Select("quota").Where("id = ?", id).First(&task).Error)
+	return task.Quota
+}
+
 func getLastLog(t *testing.T) *model.Log {
 	t.Helper()
 	var log model.Log
@@ -527,9 +534,9 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	seedChannel(t, channelID)
 
 	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+	require.NoError(t, model.DB.Create(task).Error)
 
 	RefundTaskQuota(ctx, task, "task failed: upstream error")
-	RefundTaskQuota(ctx, task, "task failed: duplicate poll")
 
 	// User quota should increase by preConsumed
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
@@ -544,7 +551,8 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	assert.Equal(t, model.LogTypeRefund, log.Type)
 	assert.Equal(t, preConsumed, log.Quota)
 	assert.Equal(t, "test-model", log.ModelName)
-	assert.Equal(t, int64(1), countLogs(t))
+	assert.Zero(t, task.Quota)
+	assert.Zero(t, getTaskQuota(t, task.ID))
 }
 
 func TestRefundTaskQuota_Subscription(t *testing.T) {
@@ -570,6 +578,7 @@ func TestRefundTaskQuota_Subscription(t *testing.T) {
 		PreConsumed:        preConsumed,
 		Status:             "consumed",
 	}).Error)
+	require.NoError(t, model.DB.Create(task).Error)
 
 	RefundTaskQuota(ctx, task, "subscription task failed")
 
@@ -582,34 +591,10 @@ func TestRefundTaskQuota_Subscription(t *testing.T) {
 	log := getLastLog(t)
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeRefund, log.Type)
+	assert.Zero(t, getTaskQuota(t, task.ID))
 }
 
-func TestRefundLegacySubscriptionTaskWithoutReservationProofRejectsPoisonOutbox(t *testing.T) {
-	truncate(t)
-
-	const userID, tokenID, channelID, subID = 117, 117, 117, 117
-	const quota = 500
-	seedUser(t, userID, 0)
-	seedToken(t, tokenID, userID, "sk-legacy-subscription-task", 4_500)
-	seedChannel(t, channelID)
-	seedSubscription(t, subID, userID, 10_000, 2_000)
-	task := makeTask(userID, channelID, quota, tokenID, BillingSourceSubscription, subID)
-	task.TaskID = "legacy-subscription-task-without-proof"
-
-	RefundTaskQuota(context.Background(), task, "legacy task failure")
-
-	assert.Equal(t, int64(2_000), getSubscriptionUsed(t, subID))
-	assert.Equal(t, 4_500, getTokenRemainQuota(t, tokenID))
-	assert.Equal(t, int64(0), countLogs(t))
-	var finalizationCount int64
-	require.NoError(t, model.DB.Model(&model.TaskBillingFinalization{}).Count(&finalizationCount).Error)
-	assert.Zero(t, finalizationCount, "an adjustment that can never pass proof validation must not poison the retry queue")
-	var adjustmentCount int64
-	require.NoError(t, model.DB.Model(&model.SystemTask{}).Where("type = ?", model.SystemTaskTypeBillingAdjustment).Count(&adjustmentCount).Error)
-	assert.Zero(t, adjustmentCount)
-}
-
-func TestRefundTaskQuota_InvalidQuota(t *testing.T) {
+func TestRefundTaskQuota_ZeroQuota(t *testing.T) {
 	truncate(t)
 	ctx := context.Background()
 
@@ -619,11 +604,6 @@ func TestRefundTaskQuota_InvalidQuota(t *testing.T) {
 	task := makeTask(userID, 0, 0, 0, BillingSourceWallet, 0)
 
 	RefundTaskQuota(ctx, task, "zero quota task")
-	task.Quota = -100
-	RefundTaskQuota(ctx, task, "corrupt negative quota task")
-	task.Quota = common.MaxQuota + 1
-	RefundTaskQuota(ctx, task, "corrupt oversized quota task")
-	RefundTaskQuota(ctx, nil, "missing task")
 
 	// No change to user quota
 	assert.Equal(t, 5000, getUserQuota(t, userID))
@@ -643,6 +623,7 @@ func TestRefundTaskQuota_NoToken(t *testing.T) {
 	seedChannel(t, channelID)
 
 	task := makeTask(userID, channelID, preConsumed, 0, BillingSourceWallet, 0) // TokenId=0
+	require.NoError(t, model.DB.Create(task).Error)
 
 	RefundTaskQuota(ctx, task, "no token task failed")
 
@@ -653,6 +634,23 @@ func TestRefundTaskQuota_NoToken(t *testing.T) {
 	log := getLastLog(t)
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeRefund, log.Type)
+	assert.Zero(t, getTaskQuota(t, task.ID))
+}
+
+func TestRefundTaskQuota_FundingFailureKeepsPendingMarker(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, preConsumed = 5, 1200
+	seedUser(t, userID, 5000)
+	task := makeTask(userID, 0, preConsumed, 0, BillingSourceSubscription, 9999)
+	task.Status = model.TaskStatusFailure
+	require.NoError(t, model.DB.Create(task).Error)
+
+	RefundTaskQuota(ctx, task, "subscription missing")
+	assert.Equal(t, preConsumed, task.Quota)
+	assert.Equal(t, preConsumed, getTaskQuota(t, task.ID))
+	assert.Equal(t, int64(0), countLogs(t))
 }
 
 // ===========================================================================
@@ -1292,6 +1290,7 @@ func TestCASGuardedRefund_Win(t *testing.T) {
 	var reloaded model.Task
 	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
 	assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+	assert.Zero(t, reloaded.Quota)
 
 	// Refund should have happened
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))

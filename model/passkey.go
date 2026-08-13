@@ -72,7 +72,7 @@ func (p *PasskeyCredential) TransportList() []protocol.AuthenticatorTransport {
 		return nil
 	}
 	var transports []string
-	if err := common.UnmarshalJsonStr(p.Transports, &transports); err != nil {
+	if err := common.Unmarshal([]byte(p.Transports), &transports); err != nil {
 		return nil
 	}
 	result := make([]protocol.AuthenticatorTransport, 0, len(transports))
@@ -147,24 +147,6 @@ func NewPasskeyCredentialFromWebAuthn(userID int, credential *webauthn.Credentia
 	return passkey
 }
 
-func (p *PasskeyCredential) ApplyValidatedCredential(credential *webauthn.Credential) {
-	if credential == nil || p == nil {
-		return
-	}
-	p.CredentialID = base64.StdEncoding.EncodeToString(credential.ID)
-	p.PublicKey = base64.StdEncoding.EncodeToString(credential.PublicKey)
-	p.AttestationType = credential.AttestationType
-	p.AAGUID = base64.StdEncoding.EncodeToString(credential.Authenticator.AAGUID)
-	p.SignCount = credential.Authenticator.SignCount
-	p.CloneWarning = credential.Authenticator.CloneWarning
-	p.UserPresent = credential.Flags.UserPresent
-	p.UserVerified = credential.Flags.UserVerified
-	p.BackupEligible = credential.Flags.BackupEligible
-	p.BackupState = credential.Flags.BackupState
-	p.Attachment = string(credential.Authenticator.Attachment)
-	p.SetTransports(credential.Transport)
-}
-
 func GetPasskeyByUserID(userID int) (*PasskeyCredential, error) {
 	if userID == 0 {
 		common.SysLog("GetPasskeyByUserID: empty user ID")
@@ -208,138 +190,88 @@ func GetPasskeyByCredentialID(credentialID []byte) (*PasskeyCredential, error) {
 	return &credential, nil
 }
 
-func UpsertPasskeyCredential(credential *PasskeyCredential) error {
-	if credential == nil {
-		common.SysLog("UpsertPasskeyCredential: nil credential provided")
+// UpdatePasskeyAssertionState persists only fields produced by a successful
+// assertion. Registration identity (credential ID, public key, AAGUID,
+// transports and attestation metadata) is immutable on this path.
+func UpdatePasskeyAssertionState(userID int, credential *webauthn.Credential, lastUsedAt time.Time) error {
+	if userID <= 0 || credential == nil || len(credential.ID) == 0 || lastUsedAt.IsZero() {
 		return fmt.Errorf("Passkey 保存失败，请重试")
 	}
-	credentialID, credentialIDHash, err := normalizePasskeyCredentialID(credential.CredentialID)
-	if err != nil || credential.UserID <= 0 {
-		common.SysLog("UpsertPasskeyCredential: invalid credential identity")
-		return fmt.Errorf("Passkey 保存失败，请重试")
+	credentialID := base64.StdEncoding.EncodeToString(credential.ID)
+	result := DB.Model(&PasskeyCredential{}).
+		Where("user_id = ? AND credential_id = ?", userID, credentialID).
+		Updates(map[string]interface{}{
+			"sign_count":      credential.Authenticator.SignCount,
+			"clone_warning":   credential.Authenticator.CloneWarning,
+			"user_present":    credential.Flags.UserPresent,
+			"user_verified":   credential.Flags.UserVerified,
+			"backup_eligible": credential.Flags.BackupEligible,
+			"backup_state":    credential.Flags.BackupState,
+			"last_used_at":    lastUsedAt,
+		})
+	if result.Error != nil {
+		return result.Error
 	}
-	credential.CredentialID = credentialID
-	credential.CredentialIDHash = &credentialIDHash
-	return DB.Transaction(func(tx *gorm.DB) error {
-		var user User
-		if err := lockForUpdate(tx).
-			Select("id").
-			Where("id = ?", credential.UserID).
-			First(&user).Error; err != nil {
-			common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to lock user %d: %v", credential.UserID, err))
-			return fmt.Errorf("Passkey 保存失败，请重试")
-		}
-		// 使用Unscoped()进行硬删除，避免唯一索引冲突
-		if err := tx.Unscoped().Where("user_id = ?", credential.UserID).Delete(&PasskeyCredential{}).Error; err != nil {
-			common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to delete existing credential for user %d: %v", credential.UserID, err))
-			return fmt.Errorf("Passkey 保存失败，请重试")
-		}
-		if err := tx.Create(credential).Error; err != nil {
-			common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to create credential for user %d: %v", credential.UserID, err))
-			return fmt.Errorf("Passkey 保存失败，请重试")
-		}
-		return nil
-	})
+	if result.RowsAffected != 1 {
+		return ErrPasskeyNotFound
+	}
+	return nil
 }
 
-// UpdatePasskeyCredentialAfterAssertion persists the mutable state returned by
-// a successful WebAuthn assertion without replacing the credential row. The
-// row lock closes the window where two assertions can both validate against
-// the same stored signature counter and then overwrite each other.
-func UpdatePasskeyCredentialAfterAssertion(
-	userID int,
-	validated *webauthn.Credential,
-	lastUsedAt time.Time,
-) error {
-	if userID <= 0 || validated == nil || lastUsedAt.IsZero() {
-		return errors.New("Passkey 验证结果无效")
+func upsertPasskeyCredentialWithTx(tx *gorm.DB, credential *PasskeyCredential) error {
+	if err := tx.Unscoped().Where("user_id = ?", credential.UserID).Delete(&PasskeyCredential{}).Error; err != nil {
+		common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to delete existing credential for user %d: %v", credential.UserID, err))
+		return fmt.Errorf("Passkey 保存失败，请重试")
 	}
-	incoming := NewPasskeyCredentialFromWebAuthn(userID, validated)
-	if incoming == nil {
-		return errors.New("Passkey 验证结果无效")
+	if err := tx.Create(credential).Error; err != nil {
+		common.SysLog(fmt.Sprintf("UpsertPasskeyCredential: failed to create credential for user %d: %v", credential.UserID, err))
+		return fmt.Errorf("Passkey 保存失败，请重试")
 	}
-	credentialID, credentialIDHash, err := normalizePasskeyCredentialID(
-		incoming.CredentialID,
-	)
-	if err != nil {
-		return errors.New("Passkey 验证结果无效")
-	}
-	incoming.CredentialID = credentialID
-	incoming.CredentialIDHash = &credentialIDHash
+	return nil
+}
 
-	counterConflict := false
-	err = DB.Transaction(func(tx *gorm.DB) error {
-		var current PasskeyCredential
-		if err := lockForUpdate(tx).
-			Where("user_id = ?", userID).
-			First(&current).Error; err != nil {
+// UpsertPasskeyCredentialWithAuthVersion is reserved for enrollment changes;
+// assertion sign-count updates must use UpdatePasskeyAssertionState.
+func UpsertPasskeyCredentialWithAuthVersion(credential *PasskeyCredential) error {
+	if credential == nil || credential.UserID <= 0 {
+		return fmt.Errorf("Passkey 保存失败，请重试")
+	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if _, err := IncrementUserAuthVersionWithTx(tx, credential.UserID); err != nil {
+			return err
+		}
+		return upsertPasskeyCredentialWithTx(tx, credential)
+	}); err != nil {
+		return err
+	}
+	return PublishUserAuthCache(credential.UserID)
+}
+
+func DeletePasskeyByUserIDWithAuthVersion(userID int) error {
+	if userID == 0 {
+		return fmt.Errorf("删除失败，请重试")
+	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		var credential PasskeyCredential
+		if err := lockForUpdate(tx).Where("user_id = ?", userID).First(&credential).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrPasskeyNotFound
 			}
 			return err
 		}
-		if current.CredentialID != incoming.CredentialID ||
-			current.CredentialIDHash == nil ||
-			*current.CredentialIDHash != credentialIDHash ||
-			current.PublicKey != incoming.PublicKey {
-			return errors.New("Passkey 凭证与验证结果不匹配")
+		if _, err := IncrementUserAuthVersionWithTx(tx, userID); err != nil {
+			return err
 		}
-
-		// A library-reported clone warning is already based on the exact
-		// counter used for this assertion and remains sticky. A non-warning
-		// result that is no longer ahead of the locked row means another
-		// request advanced the counter after this request loaded its snapshot.
-		if !incoming.CloneWarning &&
-			(incoming.SignCount != 0 || current.SignCount != 0) &&
-			incoming.SignCount <= current.SignCount {
-			counterConflict = true
-			result := tx.Model(&current).Update("clone_warning", true)
-			if result.Error != nil {
-				return result.Error
-			}
-			if result.RowsAffected != 1 {
-				return errors.New("Passkey 凭证在验证期间发生变化")
-			}
-			return nil
-		}
-
-		result := tx.Model(&current).Updates(map[string]any{
-			"sign_count":      incoming.SignCount,
-			"clone_warning":   current.CloneWarning || incoming.CloneWarning,
-			"user_present":    incoming.UserPresent,
-			"user_verified":   incoming.UserVerified,
-			"backup_eligible": incoming.BackupEligible,
-			"backup_state":    incoming.BackupState,
-			"transports":      incoming.Transports,
-			"attachment":      incoming.Attachment,
-			"last_used_at":    &lastUsedAt,
-		})
+		result := tx.Unscoped().Delete(&credential)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return errors.New("Passkey 凭证在验证期间发生变化")
+			return ErrPasskeyNotFound
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
-	if counterConflict {
-		return ErrPasskeyCounterConflict
-	}
-	return nil
-}
-
-func DeletePasskeyByUserID(userID int) error {
-	if userID == 0 {
-		common.SysLog("DeletePasskeyByUserID: empty user ID")
-		return fmt.Errorf("删除失败，请重试")
-	}
-	// 使用Unscoped()进行硬删除，避免唯一索引冲突
-	if err := DB.Unscoped().Where("user_id = ?", userID).Delete(&PasskeyCredential{}).Error; err != nil {
-		common.SysLog(fmt.Sprintf("DeletePasskeyByUserID: failed to delete passkey for user %d: %v", userID, err))
-		return fmt.Errorf("删除失败，请重试")
-	}
-	return nil
+	return PublishUserAuthCache(userID)
 }

@@ -12,10 +12,11 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
+	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,45 @@ type taskPollingFetchAdaptor struct {
 	blockStarted chan struct{}
 	releaseBlock chan struct{}
 	blockOnce    sync.Once
+}
+
+type sunoFailurePollingAdaptor struct {
+	failReason string
+}
+
+func (a *sunoFailurePollingAdaptor) Init(_ *relaycommon.RelayInfo) {}
+
+func (a *sunoFailurePollingAdaptor) FetchTask(_ context.Context, _ string, _ string, body map[string]any, _ string) (*http.Response, error) {
+	taskIDs, _ := body["ids"].([]string)
+	items := make([]taskdto.SunoDataResponse, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		items = append(items, taskdto.SunoDataResponse{
+			TaskID:     taskID,
+			Status:     string(model.TaskStatusFailure),
+			FailReason: a.failReason,
+			FinishTime: time.Now().Unix(),
+		})
+	}
+
+	responseBody, err := common.Marshal(taskdto.TaskResponse[[]taskdto.SunoDataResponse]{
+		Code: taskdto.TaskSuccessCode,
+		Data: items,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(responseBody)),
+	}, nil
+}
+
+func (a *sunoFailurePollingAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) {
+	return nil, nil
+}
+
+func (a *sunoFailurePollingAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
+	return 0
 }
 
 func (a *taskPollingFetchAdaptor) Init(_ *relaycommon.RelayInfo) {}
@@ -57,8 +97,8 @@ func (a *taskPollingFetchAdaptor) FetchTask(_ context.Context, _ string, key str
 		}
 	}
 
-	response := dto.TaskResponse[model.Task]{
-		Code: dto.TaskSuccessCode,
+	response := taskdto.TaskResponse[model.Task]{
+		Code: taskdto.TaskSuccessCode,
 		Data: model.Task{
 			TaskID:   taskID,
 			Status:   model.TaskStatusInProgress,
@@ -162,15 +202,15 @@ func (a *taskPollingRouteAdaptor) FetchTask(_ context.Context, baseURL string, k
 		proxy:   proxy,
 		taskIDs: append([]string(nil), taskIDs...),
 	})
-	items := make([]dto.SunoDataResponse, 0, len(taskIDs))
+	items := make([]taskdto.SunoDataResponse, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
-		items = append(items, dto.SunoDataResponse{
+		items = append(items, taskdto.SunoDataResponse{
 			TaskID: taskID,
 			Status: string(model.TaskStatusInProgress),
 		})
 	}
-	responseBody, err := common.Marshal(dto.TaskResponse[[]dto.SunoDataResponse]{
-		Code: dto.TaskSuccessCode,
+	responseBody, err := common.Marshal(taskdto.TaskResponse[[]taskdto.SunoDataResponse]{
+		Code: taskdto.TaskSuccessCode,
 		Data: items,
 	})
 	if err != nil {
@@ -618,9 +658,9 @@ func TestUpdateSunoTasksUsesDefaultBaseURLWhenChannelBaseURLIsNil(t *testing.T) 
 	task.Platform = constant.TaskPlatformSuno
 	require.NoError(t, model.DB.Model(task).Update("platform", task.Platform).Error)
 
-	responseBody, err := common.Marshal(dto.TaskResponse[[]dto.SunoDataResponse]{
-		Code: dto.TaskSuccessCode,
-		Data: []dto.SunoDataResponse{{
+	responseBody, err := common.Marshal(taskdto.TaskResponse[[]taskdto.SunoDataResponse]{
+		Code: taskdto.TaskSuccessCode,
+		Data: []taskdto.SunoDataResponse{{
 			TaskID: upstreamTaskID,
 			Status: string(task.Status),
 			Data:   task.Data,
@@ -711,11 +751,11 @@ func TestTaskNeedsUpdateComparesJSONSemantically(t *testing.T) {
 		Data:   []byte(`{"a":1,"b":2}`),
 	}
 
-	assert.True(t, taskNeedsUpdate(task, dto.SunoDataResponse{
+	assert.True(t, taskNeedsUpdate(task, taskdto.SunoDataResponse{
 		Status: string(task.Status),
 		Data:   []byte(`{"a":2,"b":1}`),
 	}), "JSON payloads with the same byte multiset can still carry different values")
-	assert.False(t, taskNeedsUpdate(task, dto.SunoDataResponse{
+	assert.False(t, taskNeedsUpdate(task, taskdto.SunoDataResponse{
 		Status: string(task.Status),
 		Data:   []byte(`{"b":2,"a":1}`),
 	}), "object key order must not create a false update")
@@ -1056,4 +1096,130 @@ func TestUpdateVideoTasksMixedChannelSleepSettings(t *testing.T) {
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.ElementsMatch(t, []string{"upstream_sleepy_1", "upstream_fast_1", "upstream_fast_2"}, adaptor.fetchedTaskIDs())
+}
+
+func TestUpdateSunoTasksStalePollsRefundExactlyOnce(t *testing.T) {
+	truncate(t)
+
+	const userID, tokenID, channelID = 401, 401, 401
+	const initialUserQuota, initialTokenQuota, taskQuota = 10_000, 6_000, 2_500
+	const publicTaskID, upstreamTaskID = "suno_public_refund_once", "suno_upstream_refund_once"
+
+	seedUser(t, userID, initialUserQuota)
+	seedToken(t, tokenID, userID, "sk-suno-refund-once", initialTokenQuota)
+	baseURL := "https://suno.invalid"
+	require.NoError(t, model.DB.Create(&model.Channel{
+		Id:      channelID,
+		Type:    constant.ChannelTypeSunoAPI,
+		Name:    "suno_refund_once",
+		Key:     "sk-suno-channel",
+		Status:  common.ChannelStatusEnabled,
+		BaseURL: &baseURL,
+	}).Error)
+
+	task := makeTask(userID, channelID, taskQuota, tokenID, BillingSourceWallet, 0)
+	task.TaskID = publicTaskID
+	task.Platform = constant.TaskPlatformSuno
+	task.Status = model.TaskStatusInProgress
+	task.Progress = "50%"
+	task.SubmitTime = time.Now().Unix()
+	task.PrivateData.UpstreamTaskID = upstreamTaskID
+	require.NoError(t, model.DB.Create(task).Error)
+
+	var firstPollTask model.Task
+	var staleSecondPollTask model.Task
+	require.NoError(t, model.DB.First(&firstPollTask, task.ID).Error)
+	require.NoError(t, model.DB.First(&staleSecondPollTask, task.ID).Error)
+
+	adaptor := &sunoFailurePollingAdaptor{failReason: "upstream failed"}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	require.NoError(t, updateSunoTasks(context.Background(), channelID, []string{upstreamTaskID}, map[string]*model.Task{
+		upstreamTaskID: &firstPollTask,
+	}))
+	require.NoError(t, updateSunoTasks(context.Background(), channelID, []string{upstreamTaskID}, map[string]*model.Task{
+		upstreamTaskID: &staleSecondPollTask,
+	}))
+
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+	assert.Zero(t, reloaded.Quota)
+	assert.Equal(t, initialUserQuota+taskQuota, getUserQuota(t, userID))
+	assert.Equal(t, initialTokenQuota+taskQuota, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, int64(1), countLogs(t))
+}
+
+func TestRunTaskPollingOnceDoesNotRefundHistoricalFailedTask(t *testing.T) {
+	truncate(t)
+
+	const userID, initialQuota, taskQuota = 402, 10_000, 1_200
+	seedUser(t, userID, initialQuota)
+
+	task := makeTask(userID, 0, taskQuota, 0, BillingSourceWallet, 0)
+	task.TaskID = "historical_failed_already_refunded"
+	task.Status = model.TaskStatusFailure
+	task.Progress = "100%"
+	task.SubmitTime = time.Now().Add(-90 * 24 * time.Hour).Unix()
+	task.UpdatedAt = time.Now().Add(-time.Minute).Unix()
+	require.NoError(t, model.DB.Create(task).Error)
+
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor {
+		return &taskPollingFetchAdaptor{}
+	}
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	summary, err := RunTaskPollingOnce(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Zero(t, summary.UnfinishedTasks)
+	assert.Equal(t, initialQuota, getUserQuota(t, userID))
+	assert.Equal(t, taskQuota, getTaskQuota(t, task.ID))
+	assert.Equal(t, int64(0), countLogs(t))
+}
+
+func TestSweepTimedOutTasksHonorsRefundRolloutBoundary(t *testing.T) {
+	truncate(t)
+
+	const (
+		userID          = 403
+		initialQuota    = 10_000
+		legacyTaskQuota = 1_800
+		modernTaskQuota = 1_200
+	)
+	seedUser(t, userID, initialQuota)
+
+	legacyTask := makeTask(userID, 0, legacyTaskQuota, 0, BillingSourceWallet, 0)
+	legacyTask.TaskID = "legacy_timeout_without_refund"
+	legacyTask.Progress = "50%"
+	legacyTask.SubmitTime = 1771718399 // 2026-02-21 23:59:59 UTC
+	require.NoError(t, model.DB.Create(legacyTask).Error)
+
+	modernTask := makeTask(userID, 0, modernTaskQuota, 0, BillingSourceWallet, 0)
+	modernTask.TaskID = "modern_timeout_with_refund"
+	modernTask.Progress = "50%"
+	modernTask.SubmitTime = 1771718400 // 2026-02-22 00:00:00 UTC
+	require.NoError(t, model.DB.Create(modernTask).Error)
+
+	previousTimeout := constant.TaskTimeoutMinutes
+	constant.TaskTimeoutMinutes = 1
+	t.Cleanup(func() { constant.TaskTimeoutMinutes = previousTimeout })
+
+	sweepTimedOutTasks(context.Background())
+
+	var reloadedLegacy model.Task
+	var reloadedModern model.Task
+	require.NoError(t, model.DB.First(&reloadedLegacy, legacyTask.ID).Error)
+	require.NoError(t, model.DB.First(&reloadedModern, modernTask.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, reloadedLegacy.Status)
+	assert.EqualValues(t, model.TaskStatusFailure, reloadedModern.Status)
+	assert.Equal(t, legacyTaskQuota, reloadedLegacy.Quota)
+	assert.Zero(t, reloadedModern.Quota)
+	assert.Contains(t, reloadedLegacy.FailReason, "旧系统遗留任务")
+	assert.Contains(t, reloadedModern.FailReason, "任务超时")
+	assert.Equal(t, initialQuota+modernTaskQuota, getUserQuota(t, userID))
+	assert.Equal(t, int64(1), countLogs(t))
 }

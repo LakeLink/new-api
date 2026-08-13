@@ -1,12 +1,14 @@
 package operation_setting
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
 	"sync/atomic"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
 )
 
@@ -18,46 +20,48 @@ import (
 //   - "tool_name"              → default price for all models
 //   - "tool_name:model_prefix*" → override for models matching the prefix
 //
-// Lookup order: longest prefix match → default → hardcoded fallback → 0
+// Effective index: hardcoded defaults → hardcoded model overrides → valid
+// operator values. Lookup uses the longest model prefix before the tool
+// default, and a matched numeric zero is terminal.
 // ---------------------------------------------------------------------------
 
-var defaultToolPrices = map[string]float64{
-	"web_search":         10.0, // OpenAI web search (all models) / Claude web search
-	"web_search_preview": 10.0, // OpenAI web search preview (default: reasoning models)
-	"file_search":        2.5,  // OpenAI file search (Responses API)
-	"google_search":      14.0, // Gemini Grounding with Google Search
-	"google_maps":        14.0, // Gemini 3 Grounding with Google Maps
-}
+const ToolPriceOptionKey = "tool_price_setting.prices"
 
-var defaultToolPriceOverrides = map[string]float64{
-	"web_search_preview:gpt-4o*":       25.0, // non-reasoning models
-	"web_search_preview:gpt-4.1*":      25.0,
-	"web_search_preview:gpt-4o-mini*":  25.0,
-	"web_search_preview:gpt-4.1-mini*": 25.0,
-	"google_search:gemini-2.5*":        35.0, // Gemini 2.5 bills per grounded prompt
-	"google_maps:gemini-2.5*":          25.0, // Gemini 2.5 bills per grounded prompt
+const (
+	defaultWebSearchToolPrice        = 10.0
+	defaultWebSearchPreviewToolPrice = 10.0
+	defaultFileSearchToolPrice       = 2.5
+	defaultGoogleSearchToolPrice     = 14.0
+	defaultImageGenerationToolPrice  = 150.0
+	defaultSearchPreviewModelPrice   = 25.0
+)
+
+// seedHardcodedToolPrices injects compile-time built-in fallbacks (tool
+// defaults and model-prefix overrides) into the destination. The source is
+// constants, not a mutable package map or operator configuration.
+func seedHardcodedToolPrices(prices map[string]float64) {
+	prices["web_search"] = defaultWebSearchToolPrice
+	prices["web_search_preview"] = defaultWebSearchPreviewToolPrice
+	prices["file_search"] = defaultFileSearchToolPrice
+	prices["google_search"] = defaultGoogleSearchToolPrice
+	prices["google_maps"] = defaultGoogleSearchToolPrice
+	prices["image_generation"] = defaultImageGenerationToolPrice
+	prices["web_search_preview:gpt-4o*"] = defaultSearchPreviewModelPrice
+	prices["web_search_preview:gpt-4.1*"] = defaultSearchPreviewModelPrice
+	prices["web_search_preview:gpt-4o-mini*"] = defaultSearchPreviewModelPrice
+	prices["web_search_preview:gpt-4.1-mini*"] = defaultSearchPreviewModelPrice
+	prices["google_search:gemini-2.5*"] = 35.0
+	prices["google_maps:gemini-2.5*"] = 25.0
 }
 
 // ToolPriceSetting is managed by config.GlobalConfig.Register.
+// Prices holds operator overrides only; hardcoded fallbacks live in the index.
 type ToolPriceSetting struct {
 	Prices map[string]float64 `json:"prices"`
 }
 
-func (s ToolPriceSetting) Validate() error {
-	return ValidateToolPriceMap(s.Prices)
-}
-
 var toolPriceSetting = ToolPriceSetting{
-	Prices: func() map[string]float64 {
-		m := make(map[string]float64, len(defaultToolPrices)+len(defaultToolPriceOverrides))
-		for k, v := range defaultToolPrices {
-			m[k] = v
-		}
-		for k, v := range defaultToolPriceOverrides {
-			m[k] = v
-		}
-		return m
-	}(),
+	Prices: make(map[string]float64),
 }
 
 func init() {
@@ -81,19 +85,75 @@ type toolPriceIndex struct {
 
 var currentIndex atomic.Pointer[toolPriceIndex]
 
+func isValidToolPrice(price float64) bool {
+	return price >= 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
+}
+
+func decodeToolPricesJSON(value string, ignoreInvalidEntries bool) (map[string]float64, error) {
+	rawValue := json.RawMessage(strings.TrimSpace(value))
+	if common.GetJsonType(rawValue) != "object" {
+		return nil, fmt.Errorf("工具价格必须是 JSON 对象")
+	}
+
+	var rawPrices map[string]json.RawMessage
+	if err := common.Unmarshal(rawValue, &rawPrices); err != nil {
+		return nil, fmt.Errorf("解析工具价格失败: %w", err)
+	}
+
+	prices := make(map[string]float64, len(rawPrices))
+	for name, rawPrice := range rawPrices {
+		var entryErr error
+		if common.GetJsonType(rawPrice) != "number" {
+			entryErr = fmt.Errorf("工具价格 %q 必须是非负数字", name)
+		} else {
+			var price float64
+			if err := common.Unmarshal(rawPrice, &price); err != nil {
+				entryErr = fmt.Errorf("解析工具价格 %q 失败: %w", name, err)
+			} else if !isValidToolPrice(price) {
+				entryErr = fmt.Errorf("工具价格 %q 必须是有限的非负数字", name)
+			} else {
+				prices[name] = price
+			}
+		}
+
+		if entryErr == nil {
+			continue
+		}
+		if !ignoreInvalidEntries {
+			return nil, entryErr
+		}
+		common.SysError(entryErr.Error())
+	}
+	return prices, nil
+}
+
+// ValidateToolPricesJSON validates an operator-supplied complete price map.
+// A numeric zero is valid and intentionally disables the matching rule.
+func ValidateToolPricesJSON(value string) error {
+	_, err := decodeToolPricesJSON(value, false)
+	return err
+}
+
+// LoadToolPricesFromJSONString replaces the complete operator price map.
+// Invalid legacy entries are ignored individually so valid sibling overrides
+// survive, while missing built-in keys continue to use hardcoded fallbacks.
+func LoadToolPricesFromJSONString(value string) {
+	prices, err := decodeToolPricesJSON(value, true)
+	if err != nil {
+		common.SysError("加载工具价格失败，将使用硬编码兜底: " + err.Error())
+		prices = make(map[string]float64)
+	}
+	toolPriceSetting.Prices = prices
+	RebuildToolPriceIndex()
+}
+
 // RebuildToolPriceIndex rebuilds the lookup index from the current config.
 // Called on init and after config updates. Not on the billing hot path.
 func RebuildToolPriceIndex() {
-	prices := config.Snapshot[ToolPriceSetting]("tool_price_setting").Prices
-	merged := make(map[string]float64, len(defaultToolPrices)+len(defaultToolPriceOverrides)+len(prices))
-	for k, v := range defaultToolPrices {
-		merged[k] = v
-	}
-	for k, v := range defaultToolPriceOverrides {
-		merged[k] = v
-	}
-	for k, v := range prices {
-		if strings.TrimSpace(k) == "" || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+	merged := make(map[string]float64, 9+len(toolPriceSetting.Prices))
+	seedHardcodedToolPrices(merged)
+	for k, v := range toolPriceSetting.Prices {
+		if !isValidToolPrice(v) {
 			continue
 		}
 		merged[k] = v
@@ -119,6 +179,9 @@ func RebuildToolPriceIndex() {
 	for tool := range idx.prefixes {
 		entries := idx.prefixes[tool]
 		sort.Slice(entries, func(i, j int) bool {
+			if len(entries[i].prefix) == len(entries[j].prefix) {
+				return entries[i].prefix < entries[j].prefix
+			}
 			return len(entries[i].prefix) > len(entries[j].prefix)
 		})
 		idx.prefixes[tool] = entries
@@ -170,10 +233,11 @@ func UpdateToolPrices(prices map[string]float64) error {
 func GetToolPriceForModel(toolName, modelName string) float64 {
 	idx := currentIndex.Load()
 	if idx == nil {
-		if v, ok := defaultToolPrices[toolName]; ok {
-			return v
+		RebuildToolPriceIndex()
+		idx = currentIndex.Load()
+		if idx == nil {
+			return 0
 		}
-		return 0
 	}
 
 	if entries, ok := idx.prefixes[toolName]; ok && modelName != "" {
@@ -195,48 +259,19 @@ func GetToolPrice(toolName string) float64 {
 	return GetToolPriceForModel(toolName, "")
 }
 
-// ---------------------------------------------------------------------------
-// GPT Image 1 per-call pricing (special: depends on quality + size)
-// ---------------------------------------------------------------------------
-
-const (
-	GPTImage1Low1024x1024    = 0.011
-	GPTImage1Low1024x1536    = 0.016
-	GPTImage1Low1536x1024    = 0.016
-	GPTImage1Medium1024x1024 = 0.042
-	GPTImage1Medium1024x1536 = 0.063
-	GPTImage1Medium1536x1024 = 0.063
-	GPTImage1High1024x1024   = 0.167
-	GPTImage1High1024x1536   = 0.25
-	GPTImage1High1536x1024   = 0.25
-)
-
-func GetGPTImage1PriceOnceCall(quality string, size string) float64 {
-	prices := map[string]map[string]float64{
-		"low": {
-			"1024x1024": GPTImage1Low1024x1024,
-			"1024x1536": GPTImage1Low1024x1536,
-			"1536x1024": GPTImage1Low1536x1024,
-		},
-		"medium": {
-			"1024x1024": GPTImage1Medium1024x1024,
-			"1024x1536": GPTImage1Medium1024x1536,
-			"1536x1024": GPTImage1Medium1536x1024,
-		},
-		"high": {
-			"1024x1024": GPTImage1High1024x1024,
-			"1024x1536": GPTImage1High1024x1536,
-			"1536x1024": GPTImage1High1536x1024,
-		},
+// SetToolPriceForTest injects a tool price and rebuilds the lookup index. Tests only.
+func SetToolPriceForTest(name string, price float64) {
+	if toolPriceSetting.Prices == nil {
+		toolPriceSetting.Prices = make(map[string]float64)
 	}
+	toolPriceSetting.Prices[name] = price
+	RebuildToolPriceIndex()
+}
 
-	if qualityMap, exists := prices[quality]; exists {
-		if price, exists := qualityMap[size]; exists {
-			return price
-		}
-	}
-
-	return GPTImage1High1024x1024
+// DeleteToolPriceForTest removes an injected tool price and rebuilds the index. Tests only.
+func DeleteToolPriceForTest(name string) {
+	delete(toolPriceSetting.Prices, name)
+	RebuildToolPriceIndex()
 }
 
 // ---------------------------------------------------------------------------
@@ -259,23 +294,32 @@ func GetGeminiInputAudioPricePerMillionTokens(modelName string) float64 {
 	if strings.HasPrefix(modelName, "gemini-2.5-flash-native-audio") ||
 		strings.HasPrefix(modelName, "gemini-2.5-flash-preview-native-audio") {
 		return Gemini25FlashNativeAudioInputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-lite") {
+	}
+	if strings.HasPrefix(modelName, "gemini-2.5-flash-lite") {
 		return 0.30
-	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-preview-lite") {
+	}
+	if strings.HasPrefix(modelName, "gemini-2.5-flash-preview-lite") {
 		return Gemini25FlashLitePreviewInputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-preview") {
+	}
+	if strings.HasPrefix(modelName, "gemini-2.5-flash-preview") {
 		return Gemini25FlashPreviewInputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-2.5-flash") {
+	}
+	if strings.HasPrefix(modelName, "gemini-2.5-flash") {
 		return Gemini25FlashProductionInputAudioPrice
-	} else if modelName == "gemini-3.1-flash-lite" || modelName == "gemini-flash-lite-latest" {
+	}
+	if modelName == "gemini-3.1-flash-lite" || modelName == "gemini-flash-lite-latest" {
 		return Gemini31FlashLiteInputAudioPrice
-	} else if modelName == "gemini-3-flash-preview" {
+	}
+	if modelName == "gemini-3-flash-preview" {
 		return Gemini3FlashPreviewInputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-2.0-flash") {
+	}
+	if strings.HasPrefix(modelName, "gemini-2.0-flash") {
 		return Gemini20FlashInputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-robotics-er-1.5") {
+	}
+	if strings.HasPrefix(modelName, "gemini-robotics-er-1.5") {
 		return GeminiRoboticsER15InputAudioPrice
-	} else if strings.HasPrefix(modelName, "gemini-robotics-er-1.6") {
+	}
+	if strings.HasPrefix(modelName, "gemini-robotics-er-1.6") {
 		return GeminiRoboticsER16InputAudioPrice
 	}
 	return 0

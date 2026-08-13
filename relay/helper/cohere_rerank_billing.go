@@ -6,10 +6,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -19,7 +19,7 @@ import (
 // price from a per-request charge into the provider's documented per-search
 // charge. It uses a conservative chunk bound so the later provider-reported
 // settlement normally refunds quota instead of unexpectedly overdrawing it.
-func applyCohereRerankSearchUnitPreConsume(c *gin.Context, info *relaycommon.RelayInfo, priceData *types.PriceData) error {
+func applyCohereRerankSearchUnitPreConsume(c *gin.Context, info *relaycommon.RelayInfo, priceData *hosttypes.PriceData) error {
 	if info == nil || priceData == nil || info.RelayMode != relayconstant.RelayModeRerank ||
 		common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeCohere {
 		return nil

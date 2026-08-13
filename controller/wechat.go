@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 
@@ -193,11 +194,6 @@ func WeChatBind(c *gin.Context) {
 		})
 		return
 	}
-	user, err := getCurrentSessionUser(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "请先登录"})
-		return
-	}
 	code := req.Code
 	wechatId, err := getWeChatIdByCode(c.Request.Context(), code)
 	if err != nil {
@@ -217,6 +213,21 @@ func WeChatBind(c *gin.Context) {
 			"success": false,
 			"message": "该微信账号已被绑定",
 		})
+		return
+	}
+
+	identity, ok := middleware.GetSessionAuthIdentity(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "请先登录"})
+		return
+	}
+	user, err := model.GetUserById(identity.UserID, false)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if user == nil || user.Status != common.UserStatusEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "请先登录"})
 		return
 	}
 	err = model.DB.Transaction(func(tx *gorm.DB) error {

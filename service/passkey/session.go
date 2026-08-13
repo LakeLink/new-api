@@ -6,110 +6,56 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/gin-contrib/sessions"
-	"github.com/gin-gonic/gin"
+
 	webauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
 var errSessionNotFound = errors.New("Passkey 会话不存在或已过期")
 
-func SaveSessionData(c *gin.Context, key string, data *webauthn.SessionData) error {
-	session := sessions.Default(c)
-	previousChallenge := challengeFromSessionValue(session.Get(key))
+const passkeyFlowTTL = 5 * time.Minute
+
+type flowPayload struct {
+	SessionData webauthn.SessionData `json:"session_data"`
+	Scope       string               `json:"scope,omitempty"`
+}
+
+func CreateSessionDataFlow(purpose string, userID int, sessionID, scope string, data *webauthn.SessionData) (string, int64, error) {
 	if data == nil {
-		if previousChallenge != "" {
-			if err := model.DeleteAuthenticationToken(key, previousChallenge); err != nil {
-				return err
-			}
-		}
-		session.Delete(key)
-		return session.Save()
+		return "", 0, errors.New("Passkey 会话数据不能为空")
 	}
-	if data.Challenge == "" || data.Expires.IsZero() {
-		return errors.New("Passkey 会话格式无效")
-	}
-	payload, err := common.Marshal(data)
+	payload, err := common.Marshal(flowPayload{SessionData: *data, Scope: scope})
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	now := time.Now().UnixMilli()
-	if err := model.RotateAuthenticationToken(
-		key,
-		previousChallenge,
-		data.Challenge,
-		data.Expires.UnixMilli(),
-		now,
-	); err != nil {
-		return err
+	expiresAt := time.Now().Add(passkeyFlowTTL)
+	token, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose:   purpose,
+		UserId:    userID,
+		SessionId: sessionID,
+		Payload:   string(payload),
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return "", 0, err
 	}
-	session.Set(key, string(payload))
-	if err := session.Save(); err != nil {
-		if deleteErr := model.DeleteAuthenticationToken(
-			key,
-			data.Challenge,
-		); deleteErr != nil {
-			common.SysLog("failed to revoke Passkey challenge after session save error: " + deleteErr.Error())
-		}
-		return err
-	}
-	return nil
+	return token, expiresAt.Unix(), nil
 }
 
-func PopSessionData(c *gin.Context, key string) (*webauthn.SessionData, error) {
-	session := sessions.Default(c)
-	raw := session.Get(key)
-	if raw == nil {
-		return nil, errSessionNotFound
-	}
-	var data webauthn.SessionData
-	switch value := raw.(type) {
-	case string:
-		if err := common.UnmarshalJsonStr(value, &data); err != nil {
-			return nil, err
-		}
-	case []byte:
-		if err := common.Unmarshal(value, &data); err != nil {
-			return nil, err
-		}
-	default:
-		session.Delete(key)
-		_ = session.Save()
-		return nil, errors.New("Passkey 会话格式无效")
-	}
-	claimed, err := model.ConsumeAuthenticationToken(
-		key,
-		data.Challenge,
-		time.Now().UnixMilli(),
-	)
-	session.Delete(key)
-	if saveErr := session.Save(); saveErr != nil {
-		return nil, saveErr
-	}
+func PopSessionDataFlow(token, purpose string, userID int, sessionID string) (*webauthn.SessionData, string, error) {
+	flow, err := model.ConsumeAuthFlow(token, model.AuthFlowMatch{
+		Purpose:   purpose,
+		UserId:    userID,
+		SessionId: sessionID,
+	})
 	if err != nil {
-		return nil, err
-	}
-	if !claimed {
-		return nil, errSessionNotFound
-	}
-	return &data, nil
-}
-
-func challengeFromSessionValue(raw any) string {
-	if raw == nil {
-		return ""
-	}
-	var data webauthn.SessionData
-	switch value := raw.(type) {
-	case string:
-		if err := common.UnmarshalJsonStr(value, &data); err != nil {
-			return ""
+		if errors.Is(err, model.ErrAuthFlowInvalid) || errors.Is(err, model.ErrAuthFlowExpired) || errors.Is(err, model.ErrAuthFlowConsumed) {
+			return nil, "", errSessionNotFound
 		}
-	case []byte:
-		if err := common.Unmarshal(value, &data); err != nil {
-			return ""
-		}
-	default:
-		return ""
+		return nil, "", err
 	}
-	return data.Challenge
+	var payload flowPayload
+	if err := common.UnmarshalJsonStr(flow.Payload, &payload); err != nil {
+		return nil, "", err
+	}
+	return &payload.SessionData, payload.Scope, nil
 }

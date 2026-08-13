@@ -8,35 +8,77 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 )
 
-func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*OllamaChatRequest, error) {
-	if r.N != nil && *r.N != 1 {
-		return nil, fmt.Errorf("Ollama native chat supports exactly one choice per request")
+func toOllamaResponseFormat(responseFormat *dto.ResponseFormat) (any, error) {
+	if responseFormat == nil {
+		return nil, nil
 	}
-	chatReq := &OllamaChatRequest{
-		Model:       r.Model,
-		Stream:      lo.FromPtrOr(r.Stream, false),
-		LogProbs:    r.LogProbs,
-		TopLogProbs: r.TopLogProbs,
-		Options:     map[string]any{},
-		Think:       r.Think,
-	}
-	if r.ResponseFormat != nil {
-		format, err := openAIResponseFormatToOllama(r.ResponseFormat)
-		if err != nil {
-			return nil, err
+	switch responseFormat.Type {
+	case "json", "json_object":
+		return "json", nil
+	case "json_schema":
+		if len(responseFormat.JsonSchema) == 0 {
+			return nil, nil
 		}
-		chatReq.Format = format
+		var jsonSchema dto.FormatJsonSchema
+		if err := common.Unmarshal(responseFormat.JsonSchema, &jsonSchema); err != nil {
+			return nil, fmt.Errorf("invalid ollama response format: %w", err)
+		}
+		return jsonSchema.Schema, nil
+	default:
+		return nil, nil
 	}
+}
+
+func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*OllamaChatRequest, error) {
+	think := r.Think
+	if len(think) == 0 {
+		effort := r.ReasoningEffort
+		if len(r.Reasoning) > 0 {
+			var reasoning dto.Reasoning
+			if err := common.Unmarshal(r.Reasoning, &reasoning); err != nil {
+				return nil, fmt.Errorf("invalid ollama reasoning: %w", err)
+			}
+			effort = lo.CoalesceOrEmpty(reasoning.Effort, effort)
+		}
+		if effort != "" {
+			var thinkValue any
+			switch effort {
+			case "none":
+				thinkValue = false
+			case "low", "medium", "high", "max":
+				thinkValue = effort
+			default:
+				return nil, fmt.Errorf("unsupported ollama reasoning effort %q", effort)
+			}
+			var err error
+			think, err = common.Marshal(thinkValue)
+			if err != nil {
+				return nil, fmt.Errorf("marshal ollama think: %w", err)
+			}
+		}
+	}
+
+	chatReq := &OllamaChatRequest{
+		Model:   r.Model,
+		Stream:  lo.FromPtrOr(r.Stream, false),
+		Options: map[string]any{},
+		Think:   think,
+	}
+	format, err := toOllamaResponseFormat(r.ResponseFormat)
+	if err != nil {
+		return nil, err
+	}
+	chatReq.Format = format
 
 	// options mapping
 	if r.Temperature != nil {
@@ -68,12 +110,10 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 		case []string:
 			chatReq.Options["stop"] = v
 		case []any:
-			arr := make([]string, 0, len(v))
-			for _, i := range v {
-				if s, ok := i.(string); ok {
-					arr = append(arr, s)
-				}
-			}
+			arr := lo.FilterMap(v, func(item any, _ int) (string, bool) {
+				value, ok := item.(string)
+				return value, ok
+			})
 			if len(arr) > 0 {
 				chatReq.Options["stop"] = arr
 			}
@@ -81,23 +121,20 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 	}
 
 	if len(r.Tools) > 0 {
-		tools := make([]OllamaTool, 0, len(r.Tools))
-		for _, t := range r.Tools {
-			tools = append(tools, OllamaTool{Type: "function", Function: OllamaToolFunction{Name: t.Function.Name, Description: t.Function.Description, Parameters: t.Function.Parameters}})
-		}
-		chatReq.Tools = tools
-	}
-
-	toolNameByCallID := make(map[string]string)
-	for _, message := range r.Messages {
-		for _, toolCall := range message.ParseToolCalls() {
-			if toolCall.ID != "" && toolCall.Function.Name != "" {
-				toolNameByCallID[toolCall.ID] = toolCall.Function.Name
+		chatReq.Tools = lo.Map(r.Tools, func(tool dto.ToolCallRequest, _ int) OllamaTool {
+			return OllamaTool{
+				Type: "function",
+				Function: OllamaToolFunction{
+					Name:        tool.Function.Name,
+					Description: tool.Function.Description,
+					Parameters:  tool.Function.Parameters,
+				},
 			}
-		}
+		})
 	}
 
 	chatReq.Messages = make([]OllamaChatMessage, 0, len(r.Messages))
+	toolNamesByCallID := make(map[string]string)
 	for _, m := range r.Messages {
 		var textBuilder strings.Builder
 		var images []string
@@ -126,12 +163,18 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 		if len(images) > 0 {
 			cm.Images = images
 		}
-		if m.Role == "tool" {
-			if m.Name != nil && *m.Name != "" {
-				cm.ToolName = *m.Name
-			} else if m.ToolCallId != "" {
-				cm.ToolName = toolNameByCallID[m.ToolCallId]
+		if m.Role == "assistant" {
+			if reasoning, ok := lo.Coalesce(m.ReasoningContent, m.Reasoning); ok {
+				thinking, err := common.Marshal(*reasoning)
+				if err != nil {
+					return nil, fmt.Errorf("marshal ollama thinking: %w", err)
+				}
+				cm.Thinking = thinking
 			}
+		}
+		if m.Role == "tool" {
+			cm.ToolCallID = m.ToolCallId
+			cm.ToolName = lo.CoalesceOrEmpty(lo.FromPtr(m.Name), toolNamesByCallID[m.ToolCallId])
 		}
 		if m.ToolCalls != nil && len(m.ToolCalls) > 0 {
 			parsed := m.ParseToolCalls()
@@ -145,10 +188,13 @@ func openAIChatToOllamaChat(c *gin.Context, r *dto.GeneralOpenAIRequest) (*Ollam
 					if args == nil {
 						args = map[string]any{}
 					}
-					oc := OllamaToolCall{}
+					oc := OllamaToolCall{ID: tc.ID}
 					oc.Function.Name = tc.Function.Name
 					oc.Function.Arguments = args
 					calls = append(calls, oc)
+					if tc.ID != "" {
+						toolNamesByCallID[tc.ID] = tc.Function.Name
+					}
 				}
 				cm.ToolCalls = calls
 			}
@@ -193,13 +239,11 @@ func openAIToGenerate(c *gin.Context, r *dto.GeneralOpenAIRequest) (*OllamaGener
 			gen.Suffix = s
 		}
 	}
-	if r.ResponseFormat != nil {
-		format, err := openAIResponseFormatToOllama(r.ResponseFormat)
-		if err != nil {
-			return nil, err
-		}
-		gen.Format = format
+	format, err := toOllamaResponseFormat(r.ResponseFormat)
+	if err != nil {
+		return nil, err
 	}
+	gen.Format = format
 	if r.Temperature != nil {
 		gen.Options["temperature"] = r.Temperature
 	}
@@ -228,12 +272,10 @@ func openAIToGenerate(c *gin.Context, r *dto.GeneralOpenAIRequest) (*OllamaGener
 		case []string:
 			gen.Options["stop"] = v
 		case []any:
-			arr := make([]string, 0, len(v))
-			for _, i := range v {
-				if s, ok := i.(string); ok {
-					arr = append(arr, s)
-				}
-			}
+			arr := lo.FilterMap(v, func(item any, _ int) (string, bool) {
+				value, ok := item.(string)
+				return value, ok
+			})
 			if len(arr) > 0 {
 				gen.Options["stop"] = arr
 			}
