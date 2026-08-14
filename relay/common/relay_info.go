@@ -337,7 +337,9 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	// 重置某些字段，例如模型名称等
 	if info.Request != nil {
 		info.Request.SetModelName(info.OriginModelName)
+		info.IsStream = info.Request.IsStream(c.Request)
 	}
+	info.UpstreamStreamForNonStream = false
 }
 
 func (info *RelayInfo) ToString() string {
@@ -892,6 +894,11 @@ func (info *RelayInfo) GetChannelType() int {
 
 func (info *RelayInfo) GetIsStream() bool {
 	return info != nil && info.IsStream
+}
+
+// IsEventStreamContentType reports whether a Content-Type header identifies an SSE response.
+func IsEventStreamContentType(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "text/event-stream")
 }
 
 func (info *RelayInfo) GetReasoningEffort() string {

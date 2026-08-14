@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -9,7 +8,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -20,31 +18,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
-type responsesBufferedScanResult struct {
-	line string
-	err  error
-	done bool
-}
-
-func responsesBufferedContext(c *gin.Context, info *relaycommon.RelayInfo) context.Context {
-	if info != nil && info.RelayCancelCtx != nil {
-		return info.RelayCancelCtx
-	}
-	if c != nil && c.Request != nil {
-		return c.Request.Context()
-	}
-	return context.Background()
-}
-
-func responsesBufferedIdleTimeout() time.Duration {
-	return common.SafeIntervalDuration(
-		constant.StreamingTimeout,
-		time.Second,
-		300*time.Second,
-		"responses buffered stream timeout",
-	)
-}
 
 func responsesResponseHasContent(resp *dto.OpenAIResponsesResponse) bool {
 	if resp == nil {
@@ -133,27 +106,12 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	var finalResponse *dto.OpenAIResponsesResponse
 	var streamErr *types.NewAPIError
 
-	scanner := helper.NewStreamScanner(resp.Body)
-	scanner.Split(bufio.ScanLines)
-	ctx, cancel := context.WithCancel(responsesBufferedContext(c, info))
+	ctx, cancel := context.WithCancel(bufferedStreamContext(c, info))
 	defer cancel()
 
-	scanResults := make(chan responsesBufferedScanResult, 1)
-	go func() {
-		for scanner.Scan() {
-			select {
-			case scanResults <- responsesBufferedScanResult{line: scanner.Text()}:
-			case <-ctx.Done():
-				return
-			}
-		}
-		select {
-		case scanResults <- responsesBufferedScanResult{err: scanner.Err(), done: true}:
-		case <-ctx.Done():
-		}
-	}()
+	scanResults := scanBufferedStream(ctx, resp.Body)
 
-	idleTimer := time.NewTimer(responsesBufferedIdleTimeout())
+	idleTimer := time.NewTimer(bufferedStreamIdleTimeout())
 	defer idleTimer.Stop()
 	scanDone := false
 
@@ -174,7 +132,7 @@ streamLoop:
 				default:
 				}
 			}
-			idleTimer.Reset(responsesBufferedIdleTimeout())
+			idleTimer.Reset(bufferedStreamIdleTimeout())
 			line := result.line
 			if len(line) < 6 || line[:5] != "data:" {
 				continue

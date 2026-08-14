@@ -1,13 +1,16 @@
 package openai
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -68,4 +71,111 @@ func TestAdaptorConvertsUpstreamChatStreamToNonStreamResponse(t *testing.T) {
 	assert.Equal(t, "call_1", toolCalls[0].ID)
 	assert.Equal(t, "lookup", toolCalls[0].Function.Name)
 	assert.Equal(t, `{"q":"x"}`, toolCalls[0].Function.Arguments)
+}
+
+func TestOaiStreamToNonStreamRejectsEmptyUpstreamStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+	}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"},
+		RelayMode:   relayconstant.RelayModeChatCompletions,
+		RelayFormat: types.RelayFormatOpenAI,
+	}
+
+	usage, apiErr := OaiStreamToNonStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeBadResponseBody, apiErr.GetErrorCode())
+	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	assert.Empty(t, recorder.Body.Bytes())
+}
+
+func TestOaiStreamToNonStreamReturnsUpstreamStreamErrorAsGatewayError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`data: {"error":{"message":"upstream failed","type":"server_error","code":"overloaded"}}` + "\n\n",
+		)),
+	}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"},
+		RelayMode:   relayconstant.RelayModeChatCompletions,
+		RelayFormat: types.RelayFormatOpenAI,
+	}
+
+	usage, apiErr := OaiStreamToNonStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+	assert.Equal(t, "upstream failed", apiErr.Error())
+	assert.Empty(t, recorder.Body.Bytes())
+}
+
+func TestOaiStreamToNonStreamStopsWhenRequestIsCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(requestContext)
+	reader, writer := io.Pipe()
+	resp := &http.Response{StatusCode: http.StatusOK, Body: reader}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"},
+		RelayMode:   relayconstant.RelayModeChatCompletions,
+		RelayFormat: types.RelayFormatOpenAI,
+	}
+
+	usage, apiErr := OaiStreamToNonStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusGatewayTimeout, apiErr.StatusCode)
+	require.NoError(t, writer.Close())
+}
+
+func TestOaiStreamToNonStreamReturnsIdleTimeout(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 1
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	resp := &http.Response{StatusCode: http.StatusOK, Body: reader}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-test"},
+		RelayMode:   relayconstant.RelayModeChatCompletions,
+		RelayFormat: types.RelayFormatOpenAI,
+	}
+	type handlerResult struct {
+		usage *dto.Usage
+		err   *types.NewAPIError
+	}
+	resultCh := make(chan handlerResult, 1)
+	go func() {
+		usage, apiErr := OaiStreamToNonStreamHandler(c, info, resp)
+		resultCh <- handlerResult{usage: usage, err: apiErr}
+	}()
+
+	select {
+	case result := <-resultCh:
+		require.Nil(t, result.usage)
+		require.NotNil(t, result.err)
+		assert.Equal(t, http.StatusGatewayTimeout, result.err.StatusCode)
+	case <-time.After(3 * time.Second):
+		t.Fatal("buffered stream did not stop after idle timeout")
+	}
 }

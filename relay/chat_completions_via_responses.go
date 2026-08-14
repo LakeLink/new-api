@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -198,7 +197,7 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 }
 
 func isResponsesEventStreamContentType(contentType string) bool {
-	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	return relaycommon.IsEventStreamContentType(contentType)
 }
 
 func isResponsesEventStream(resp *http.Response) bool {

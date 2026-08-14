@@ -13,6 +13,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestIsEventStreamContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{name: "plain", contentType: "text/event-stream", want: true},
+		{name: "mixed case with charset", contentType: " Text/Event-Stream; charset=utf-8 ", want: true},
+		{name: "json", contentType: "application/json", want: false},
+		{name: "empty", contentType: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsEventStreamContentType(tt.contentType))
+		})
+	}
+}
+
 func TestRelayInfoGetFinalRequestRelayFormatPrefersExplicitFinal(t *testing.T) {
 	info := &RelayInfo{
 		RelayFormat:             types.RelayFormatOpenAI,
@@ -169,8 +188,12 @@ func TestInitChannelMetaRestoresRequestReasoningEffortForRetry(t *testing.T) {
 	require.NoError(t, err)
 
 	info.SetReasoningEffort("high")
+	info.IsStream = true
+	info.UpstreamStreamForNonStream = true
 	info.InitChannelMeta(ctx)
 	assert.Equal(t, "max", info.ReasoningEffort)
+	assert.False(t, info.IsStream)
+	assert.False(t, info.UpstreamStreamForNonStream)
 
 	info.SetReasoningEffort("low")
 	info.InitChannelMeta(ctx)
