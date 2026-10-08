@@ -17,7 +17,7 @@ import (
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
-	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
+	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/api/active-requests/stream"})))
 	apiRouter.Use(middleware.AccessTokenAudit())
 	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
@@ -257,6 +257,7 @@ func SetApiRouter(router *gin.Engine) {
 		activeRequestRoute.Use(middleware.AdminAuth())
 		{
 			activeRequestRoute.GET("", controller.GetActiveRequests)
+			activeRequestRoute.GET("/stream", controller.StreamActiveRequests)
 			activeRequestRoute.DELETE("/:requestId", controller.TerminateActiveRequest)
 		}
 		ratioSyncRoute := apiRouter.Group("/ratio_sync")

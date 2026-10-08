@@ -16,12 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { Activity, RefreshCw, StopCircle, Wifi, WifiOff } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -41,6 +42,7 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
 
 import { getActiveRequests, terminateActiveRequest } from './api'
+import { useActiveRequestsStream } from './hooks/use-active-requests-stream'
 import type { ActiveRequestSnapshot } from './types'
 
 function formatElapsed(seconds: number): string {
@@ -60,24 +62,30 @@ function formatChannel(req: ActiveRequestSnapshot): string {
 export function ActiveRequestsPage() {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
-  const queryClient = useQueryClient()
   const [autoRefresh, setAutoRefresh] = useState(true)
 
   const {
     data: activeRequestsResponse,
-    isLoading,
+    isPending,
+    isError,
+    refetch,
     isFetching,
   } = useQuery({
     queryKey: ['active-requests'],
     queryFn: getActiveRequests,
-    refetchInterval: autoRefresh ? 1000 : false,
+    enabled: false,
   })
+
+  const { failed: streamFailed, reconnect } =
+    useActiveRequestsStream(autoRefresh)
+  const hasError = streamFailed || isError
+  const isLoading = isPending && autoRefresh && !hasError
 
   const terminateMutation = useMutation({
     mutationFn: terminateActiveRequest,
     onSuccess: () => {
       toast.success(t('Request terminated'))
-      queryClient.invalidateQueries({ queryKey: ['active-requests'] })
+      void refetch()
     },
     onError: () => {
       toast.error(t('Failed to terminate request'))
@@ -85,8 +93,9 @@ export function ActiveRequestsPage() {
   })
 
   const handleRefresh = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['active-requests'] })
-  }, [queryClient])
+    reconnect()
+    void refetch()
+  }, [refetch, reconnect])
 
   const requests = activeRequestsResponse?.data ?? []
   const activeCount = requests.filter(
@@ -114,7 +123,7 @@ export function ActiveRequestsPage() {
               onCheckedChange={setAutoRefresh}
             />
             <Label htmlFor='auto-refresh' className='text-sm'>
-              {t('Auto Refresh')} (1s)
+              {t('Auto Refresh')}
             </Label>
           </div>
           <Button
@@ -153,13 +162,16 @@ export function ActiveRequestsPage() {
                 <Spinner className='h-8 w-8' />
               </div>
             ) : null}
-            {!isLoading && requests.length === 0 ? (
+            {hasError ? (
+              <ErrorState title={t('Request failed')} onRetry={handleRefresh} />
+            ) : null}
+            {!isLoading && !hasError && requests.length === 0 ? (
               <div className='text-muted-foreground flex flex-col items-center justify-center py-12'>
                 <Activity className='mb-2 h-8 w-8' />
                 <p>{t('No active or recent requests')}</p>
               </div>
             ) : null}
-            {!isLoading && requests.length > 0 ? (
+            {!isLoading && !hasError && requests.length > 0 ? (
               <Table>
                 <TableHeader>
                   <TableRow>

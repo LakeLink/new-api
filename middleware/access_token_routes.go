@@ -238,6 +238,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/log/self/export":                  accessTokenScopeRule("usage:read"),
 	"GET /api/log/expr/schema":                  accessTokenScopeRule("usage:read"),
 	"GET /api/active-requests":                  accessTokenScopeRule("ops:read"),
+	"GET /api/active-requests/stream":           accessTokenScopeRule("ops:read"),
 	"DELETE /api/active-requests/:requestId":    accessTokenScopeRule("ops:write"),
 	"POST /api/option/waffo-pancake/catalog":    accessTokenScopeRule("option:read"),
 	"GET /api/log/stat":                         accessTokenScopeRule("log:read"),

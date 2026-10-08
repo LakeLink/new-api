@@ -191,6 +191,20 @@ func GetStepUpIdentity(c *gin.Context) (service.AuthIdentity, bool) {
 	return identity, ok && identity.UserID > 0 && identity.SessionID != ""
 }
 
+// RevalidateAdminAuth checks long-lived dashboard requests against current credentials and grants.
+// Do not reuse the per-request PAT lookup: its scope or validity may have changed.
+func RevalidateAdminAuth(c *gin.Context) bool {
+	c.Set(accessTokenLookupContextKey, nil)
+	user, _, useAccessToken, err := authenticateDashboardRequest(c)
+	if err != nil || user == nil || user.Status != common.UserStatusEnabled || user.Role < common.RoleAdminUser || !validUserInfo(user.Username, user.Role) {
+		return false
+	}
+	if useAccessToken {
+		return enforceAccessTokenRoute(c, requestAccessTokenLookup(c), false)
+	}
+	return true
+}
+
 func authenticateDashboardRequest(c *gin.Context) (*model.UserBase, service.AuthIdentity, bool, error) {
 	user, identity, credentialKind, err := classifyDashboardCredential(c)
 	if err != nil {

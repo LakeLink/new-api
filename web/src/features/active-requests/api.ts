@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type { ActiveRequestsResponse } from './types'
 
@@ -26,12 +27,14 @@ type ActiveRequestsApiResponse = ActiveRequestsResponse & {
 
 export async function getActiveRequests(): Promise<ActiveRequestsResponse> {
   const res = await api.get<ActiveRequestsApiResponse>('/api/active-requests')
+  const response = requireServerSuccess(res.data)
   return {
-    data: res.data.data ?? [],
-    completed_retention_seconds: res.data.completed_retention_seconds ?? 10,
+    data: response.data ?? [],
+    completed_retention_seconds: response.completed_retention_seconds ?? 10,
   }
 }
 
 export async function terminateActiveRequest(requestId: string): Promise<void> {
-  await api.delete(`/api/active-requests/${requestId}`)
+  const res = await api.delete(`/api/active-requests/${requestId}`)
+  requireServerSuccess(res.data)
 }
