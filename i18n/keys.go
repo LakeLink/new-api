@@ -1,5 +1,7 @@
 package i18n
 
+const MsgTaskPluginUnknownMetaField = "task_plugin.unknown_meta_field"
+
 // Message keys for i18n translations
 // Use these constants instead of hardcoded strings
 
@@ -38,6 +40,10 @@ const (
 	MsgAuthUserIdMismatch        = "auth.user_id_mismatch"
 	MsgAuthUserBanned            = "auth.user_banned"
 	MsgAuthInsufficientPrivilege = "auth.insufficient_privilege"
+	MsgAuthAccessTokenExpired    = "auth.access_token_expired"
+	MsgAuthLegacyTokenRetired    = "auth.legacy_access_token_retired"
+	MsgAuthAccessTokenScope      = "auth.access_token_scope_denied"
+	MsgAuthAccessTokenLimit      = "auth.access_token_limit"
 )
 
 // Token related messages
@@ -55,6 +61,9 @@ const (
 	MsgTokenExhausted            = "token.exhausted"
 	MsgTokenStatusUnavailable    = "token.status_unavailable"
 	MsgTokenDbError              = "token.db_error"
+	MsgTokenAutoGroupsTooMany    = "token.auto_groups_too_many"
+	MsgTokenAutoGroupsDuplicate  = "token.auto_groups_duplicate"
+	MsgTokenAutoGroupsInvalid    = "token.auto_groups_invalid"
 )
 
 // Redemption related messages
@@ -145,16 +154,16 @@ const (
 
 // Payment related messages
 const (
-	MsgPaymentNotConfigured      = "payment.not_configured"
-	MsgPaymentMethodNotExists    = "payment.method_not_exists"
-	MsgPaymentCallbackError      = "payment.callback_error"
-	MsgPaymentCreateFailed       = "payment.create_failed"
-	MsgPaymentStartFailed        = "payment.start_failed"
-	MsgPaymentAmountTooLow       = "payment.amount_too_low"
-	MsgPaymentStripeNotConfig    = "payment.stripe_not_configured"
-	MsgPaymentWebhookNotConfig   = "payment.webhook_not_configured"
-	MsgPaymentPriceIdNotConfig   = "payment.price_id_not_configured"
-	MsgPaymentCreemNotConfig     = "payment.creem_not_configured"
+	MsgPaymentNotConfigured    = "payment.not_configured"
+	MsgPaymentMethodNotExists  = "payment.method_not_exists"
+	MsgPaymentCallbackError    = "payment.callback_error"
+	MsgPaymentCreateFailed     = "payment.create_failed"
+	MsgPaymentStartFailed      = "payment.start_failed"
+	MsgPaymentAmountTooLow     = "payment.amount_too_low"
+	MsgPaymentStripeNotConfig  = "payment.stripe_not_configured"
+	MsgPaymentWebhookNotConfig = "payment.webhook_not_configured"
+	MsgPaymentPriceIdNotConfig = "payment.price_id_not_configured"
+	MsgPaymentCreemNotConfig   = "payment.creem_not_configured"
 )
 
 // Topup related messages
@@ -215,11 +224,14 @@ const (
 
 // Passkey related messages
 const (
-	MsgPasskeyCreateFailed  = "passkey.create_failed"
-	MsgPasskeyLoginAbnormal = "passkey.login_abnormal"
-	MsgPasskeyUpdateFailed  = "passkey.update_failed"
-	MsgPasskeyInvalidUserId = "passkey.invalid_user_id"
-	MsgPasskeyVerifyFailed  = "passkey.verify_failed"
+	MsgPasskeyCreateFailed            = "passkey.create_failed"
+	MsgPasskeyLoginAbnormal           = "passkey.login_abnormal"
+	MsgPasskeyUpdateFailed            = "passkey.update_failed"
+	MsgPasskeyInvalidUserId           = "passkey.invalid_user_id"
+	MsgPasskeyVerifyFailed            = "passkey.verify_failed"
+	MsgPasskeyRPIDInvalid             = "passkey.rp_id_invalid"
+	MsgPasskeyRPIDUnavailable         = "passkey.rp_id_unavailable"
+	MsgPasskeyRPIDRemovalConfirmation = "passkey.rp_id_removal_confirmation"
 )
 
 // 2FA related messages
@@ -291,6 +303,7 @@ const (
 	MsgOAuthUserBanned      = "oauth.user_banned"
 	MsgOAuthBindSuccess     = "oauth.bind_success"
 	MsgOAuthAlreadyBound    = "oauth.already_bound"
+	MsgOAuthNotAutoLinked   = "oauth.not_auto_linked"
 	MsgOAuthConnectFailed   = "oauth.connect_failed"
 	MsgOAuthTokenFailed     = "oauth.token_failed"
 	MsgOAuthUserInfoEmpty   = "oauth.user_info_empty"
@@ -307,19 +320,20 @@ const (
 
 // Distributor related messages
 const (
-	MsgDistributorInvalidRequest          = "distributor.invalid_request"
-	MsgDistributorInvalidChannelId        = "distributor.invalid_channel_id"
-	MsgDistributorChannelDisabled         = "distributor.channel_disabled"
-	MsgDistributorAffinityChannelDisabled = "distributor.affinity_channel_disabled"
-	MsgDistributorTokenNoModelAccess      = "distributor.token_no_model_access"
-	MsgDistributorTokenModelForbidden     = "distributor.token_model_forbidden"
-	MsgDistributorModelNameRequired       = "distributor.model_name_required"
-	MsgDistributorInvalidPlayground       = "distributor.invalid_playground_request"
-	MsgDistributorGroupAccessDenied       = "distributor.group_access_denied"
-	MsgDistributorGetChannelFailed        = "distributor.get_channel_failed"
-	MsgDistributorNoAvailableChannel      = "distributor.no_available_channel"
-	MsgDistributorInvalidMidjourney       = "distributor.invalid_midjourney_request"
-	MsgDistributorInvalidParseModel       = "distributor.invalid_request_parse_model"
+	MsgDistributorInvalidRequest               = "distributor.invalid_request"
+	MsgDistributorInvalidChannelId             = "distributor.invalid_channel_id"
+	MsgDistributorChannelDisabled              = "distributor.channel_disabled"
+	MsgDistributorAffinityChannelDisabled      = "distributor.affinity_channel_disabled"
+	MsgDistributorTokenNoModelAccess           = "distributor.token_no_model_access"
+	MsgDistributorTokenModelForbidden          = "distributor.token_model_forbidden"
+	MsgDistributorModelNameRequired            = "distributor.model_name_required"
+	MsgDistributorInvalidPlayground            = "distributor.invalid_playground_request"
+	MsgDistributorGroupAccessDenied            = "distributor.group_access_denied"
+	MsgDistributorGetChannelFailed             = "distributor.get_channel_failed"
+	MsgDistributorNoAvailableChannel           = "distributor.no_available_channel"
+	MsgDistributorNoAvailableChannelTaskPlugin = "distributor.no_available_channel_task_plugin"
+	MsgDistributorInvalidMidjourney            = "distributor.invalid_midjourney_request"
+	MsgDistributorInvalidParseModel            = "distributor.invalid_request_parse_model"
 )
 
 // Custom OAuth provider related messages

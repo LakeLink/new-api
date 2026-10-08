@@ -8,10 +8,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -71,7 +71,9 @@ func TestShouldRejectCrossProtocol(t *testing.T) {
 func TestProtocolMismatchErrorRetriesSelection(t *testing.T) {
 	err := types.NewError(errors.New("protocol mismatch"), types.ErrorCodeChannelProtocolMismatch)
 
-	require.True(t, shouldRetry(nil, err, 1))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	require.Equal(t, "retry", service.DecideRelayRetry(c, err, 1).Action)
 	require.True(t, types.IsChannelError(err))
 }
 

@@ -55,6 +55,11 @@ func GetAllLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if c.GetInt("role") < common.RoleRootUser {
+		model.FormatAdminLogs(logs)
+	} else {
+		model.FormatRootLogs(logs)
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
@@ -271,32 +276,6 @@ func GetLogsSelfStat(c *gin.Context) {
 	return
 }
 
-// DeleteHistoryLogs is the legacy synchronous log cleanup endpoint (DELETE /api/log/).
-// It deletes directly instead of going through the async system task. It is kept only
-// for the classic frontend; the default frontend uses POST /api/system-task/log-cleanup.
-// TODO: remove this handler (and its route) once the classic frontend is removed.
-func DeleteHistoryLogs(c *gin.Context) {
-	targetTimestamp, _ := strconv.ParseInt(c.Query("target_timestamp"), 10, 64)
-	if targetTimestamp == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "target timestamp is required",
-		})
-		return
-	}
-	count, err := model.DeleteOldLog(c.Request.Context(), targetTimestamp, 100)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    count,
-	})
-	return
-}
-
 func getLogQueryOptions(c *gin.Context) model.LogQueryOptions {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -408,6 +387,13 @@ func streamLogExport(c *gin.Context, opts model.LogQueryOptions, isAdmin bool) {
 	}
 
 	onRow := func(log *model.Log) error {
+		if isAdmin {
+			if c.GetInt("role") < common.RoleRootUser {
+				model.FormatAdminLogs([]*model.Log{log})
+			} else {
+				model.FormatRootLogs([]*model.Log{log})
+			}
+		}
 		rowCount++
 		if err := writeLogExportRow(bufferedWriter, csvWriter, format.name, log, rowCount); err != nil {
 			return err

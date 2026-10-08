@@ -1,11 +1,16 @@
 package model
 
 import (
+	"os"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func resetLogExportTables(t *testing.T) {
@@ -152,4 +157,78 @@ func TestStreamExportUserLogsWithOptionsScrubsAdminFieldsAndUsesDisplayIds(t *te
 	assert.Equal(t, "kept", other["safe"])
 	assert.NotContains(t, other, "admin_info")
 	assert.NotContains(t, other, "stream_status")
+}
+
+// Exercise the fork's query/export contract against independently configured
+// main and log databases, including SQL dialect quoting and user isolation.
+func TestLogExportDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var mainDriver, logDriver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				mainDriver, logDriver = sqlite.Open(":memory:"), sqlite.Open(":memory:")
+			case "mysql":
+				if os.Getenv("TEST_MYSQL_DSN") == "" || os.Getenv("TEST_MYSQL_LOG_DSN") == "" {
+					t.Skip("separate MySQL test databases not configured")
+				}
+				mainDriver, logDriver = mysql.Open(os.Getenv("TEST_MYSQL_DSN")), mysql.Open(os.Getenv("TEST_MYSQL_LOG_DSN"))
+			case "postgres":
+				if os.Getenv("TEST_POSTGRES_DSN") == "" || os.Getenv("TEST_POSTGRES_LOG_DSN") == "" {
+					t.Skip("separate PostgreSQL test databases not configured")
+				}
+				mainDriver, logDriver = postgres.Open(os.Getenv("TEST_POSTGRES_DSN")), postgres.Open(os.Getenv("TEST_POSTGRES_LOG_DSN"))
+			}
+			mainDB, err := gorm.Open(mainDriver, &gorm.Config{})
+			require.NoError(t, err)
+			logDB, err := gorm.Open(logDriver, &gorm.Config{})
+			require.NoError(t, err)
+			mainSQL, err := mainDB.DB()
+			require.NoError(t, err)
+			logSQL, err := logDB.DB()
+			require.NoError(t, err)
+			mainSQL.SetMaxOpenConns(1)
+			logSQL.SetMaxOpenConns(1)
+			previousDB, previousLogDB := DB, LOG_DB
+			previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+			previousBatchSize := logExportBatchSize
+			DB, LOG_DB = mainDB, logDB
+			common.SetDatabaseTypes(common.DatabaseType(dialect), common.DatabaseType(dialect))
+			initCol()
+			logExportBatchSize = 1
+			t.Cleanup(func() {
+				logDB.Where("request_id IN ?", []string{"merge-matrix-old", "merge-matrix-new", "merge-matrix-other"}).Delete(&Log{})
+				mainDB.Delete(&Channel{}, 900001)
+				DB, LOG_DB = previousDB, previousLogDB
+				common.SetDatabaseTypes(previousMainType, previousLogType)
+				initCol()
+				logExportBatchSize = previousBatchSize
+				require.NoError(t, mainSQL.Close())
+				require.NoError(t, logSQL.Close())
+			})
+			require.NoError(t, mainDB.AutoMigrate(&Channel{}))
+			require.NoError(t, logDB.AutoMigrate(&Log{}))
+			require.NoError(t, mainDB.Create(&Channel{Id: 900001, Name: "merge-primary", Key: "test-key"}).Error)
+			rows := []Log{
+				{UserId: 900001, CreatedAt: 1001, Type: LogTypeConsume, Group: "premium", ModelName: "gpt-test", ChannelId: 900001, RequestId: "merge-matrix-old", Other: `{"admin_info":{"node":"private"},"safe":"kept"}`},
+				{UserId: 900001, CreatedAt: 1002, Type: LogTypeConsume, Group: "premium", ModelName: "gpt-test", ChannelId: 900001, RequestId: "merge-matrix-new"},
+				{UserId: 900002, CreatedAt: 1003, Type: LogTypeConsume, Group: "premium", ModelName: "gpt-test", ChannelId: 900001, RequestId: "merge-matrix-other"},
+			}
+			require.NoError(t, logDB.Create(&rows).Error)
+			var exported []*Log
+			require.NoError(t, StreamExportAllLogsWithOptions(LogQueryOptions{Expr: `group == "premium" && model_name contains "gpt" && request_id startsWith "merge-matrix"`, NoLimit: true, IncludeAdminFields: true}, nil, func(log *Log) error { exported = append(exported, log); return nil }))
+			require.Len(t, exported, 3)
+			assert.Equal(t, "merge-matrix-other", exported[0].RequestId)
+			assert.Equal(t, "merge-primary", exported[0].ChannelName)
+			exported = nil
+			require.NoError(t, StreamExportUserLogsWithOptions(LogQueryOptions{UserId: 900001, Expr: `request_id == "merge-matrix-other" || group == "premium"`, NoLimit: true}, nil, func(log *Log) error { exported = append(exported, log); return nil }))
+			require.Len(t, exported, 2, "an OR expression must not bypass the user boundary")
+			assert.Equal(t, []string{"merge-matrix-new", "merge-matrix-old"}, []string{exported[0].RequestId, exported[1].RequestId})
+			assert.Equal(t, "", exported[1].ChannelName)
+			assert.JSONEq(t, `{"safe":"kept"}`, exported[1].Other)
+			_, _, err = GetAllLogsWithOptions(LogQueryOptions{Expr: `channel_name == "merge-primary"`, IncludeAdminFields: true, Num: 10})
+			require.Error(t, err, "cross-database joins must fail explicitly")
+			assert.Contains(t, err.Error(), "channel_name")
+		})
+	}
 }
