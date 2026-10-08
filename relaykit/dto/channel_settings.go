@@ -12,16 +12,19 @@ import (
 )
 
 type ChannelSettings struct {
- NonStreamUpstreamStream bool `json:"non_stream_upstream_stream,omitempty"`
- DenyCrossProtocol bool `json:"deny_cross_protocol,omitempty"`
-	TaskPluginKey             string `json:"task_plugin_key,omitempty"`
-	ForceFormat               bool   `json:"force_format,omitempty"`
-	ThinkingToContent         bool   `json:"thinking_to_content,omitempty"`
-	Proxy                     string `json:"proxy"`
-	PassThroughBodyEnabled    bool   `json:"pass_through_body_enabled,omitempty"`
-	ResponsesWebSocketEnabled bool   `json:"responses_websocket_enabled,omitempty"`
-	SystemPrompt              string `json:"system_prompt,omitempty"`
-	SystemPromptOverride      bool   `json:"system_prompt_override,omitempty"`
+	// Nil inherits global channel selection, including legacy channel_ids.
+	// An explicit value overrides channel selection, but not the global enable or model filters.
+	ChatCompletionsToResponses *bool  `json:"chat_completions_to_responses,omitempty"`
+	NonStreamUpstreamStream    bool   `json:"non_stream_upstream_stream,omitempty"`
+	DenyCrossProtocol          bool   `json:"deny_cross_protocol,omitempty"`
+	TaskPluginKey              string `json:"task_plugin_key,omitempty"`
+	ForceFormat                bool   `json:"force_format,omitempty"`
+	ThinkingToContent          bool   `json:"thinking_to_content,omitempty"`
+	Proxy                      string `json:"proxy"`
+	PassThroughBodyEnabled     bool   `json:"pass_through_body_enabled,omitempty"`
+	ResponsesWebSocketEnabled  bool   `json:"responses_websocket_enabled,omitempty"`
+	SystemPrompt               string `json:"system_prompt,omitempty"`
+	SystemPromptOverride       bool   `json:"system_prompt_override,omitempty"`
 	// TaskExtendPluginKeys lists the task plugins a New API channel (type 60)
 	// is extended with. The upstream gateway may host many plugins, so the
 	// channel serves every listed plugin's models while the request still pins

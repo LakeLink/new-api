@@ -37,18 +37,22 @@ func matchAnyModelPattern(patterns []string, model string) bool {
 	return false
 }
 
-func ShouldChatCompletionsUseResponsesPolicy(policy model_setting.ChatCompletionsToResponsesPolicy, channelID int, channelType int, model string) bool {
-	if !policy.IsChannelEnabled(channelID, channelType) {
+func ShouldChatCompletionsUseResponsesPolicy(policy model_setting.ChatCompletionsToResponsesPolicy, channelID int, channelType int, model string, channelOverride *bool) bool {
+	if !policy.Enabled || !matchAnyModelPattern(policy.ModelPatterns, model) {
 		return false
 	}
-	return matchAnyModelPattern(policy.ModelPatterns, model)
+	if channelOverride != nil {
+		return *channelOverride
+	}
+	return policy.IsChannelEnabled(channelID, channelType)
 }
 
-func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, model string) bool {
+func ShouldChatCompletionsUseResponsesGlobal(channelID int, channelType int, model string, channelOverride *bool) bool {
 	return ShouldChatCompletionsUseResponsesPolicy(
 		model_setting.GetGlobalSettings().ChatCompletionsToResponsesPolicy,
 		channelID,
 		channelType,
 		model,
+		channelOverride,
 	)
 }

@@ -210,6 +210,7 @@ import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
+import { ChatResponsesSetting } from '../chat-responses-setting'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
 import { ConfigureModelsDialog } from '../dialogs/configure-models-dialog'
 import {
@@ -297,6 +298,7 @@ const SENSITIVE_FORM_FIELDS = [
   'force_format',
   'deny_cross_protocol',
   'non_stream_upstream_stream',
+  'chat_completions_to_responses',
   'thinking_to_content',
   'proxy',
   'http_protocol',
@@ -4699,6 +4701,7 @@ export function ChannelMutateDrawer({
                 />
                 {formatFields}
                 {protocolPolicyFields}
+                <ChatResponsesSetting disabled={sensitiveLocked} />
                 {ollamaOpenAIChatFields}
                 {thinkingFields}
                 {currentType !== CHANNEL_TYPE_ADVANCED_CUSTOM &&

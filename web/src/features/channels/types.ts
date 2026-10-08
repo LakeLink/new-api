@@ -91,6 +91,7 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   deny_cross_protocol?: boolean
   non_stream_upstream_stream?: boolean
+  chat_completions_to_responses?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
 }

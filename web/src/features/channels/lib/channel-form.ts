@@ -275,6 +275,9 @@ export const channelFormSchema = z
     system_prompt_override: z.boolean().optional(),
     deny_cross_protocol: z.boolean().optional(),
     non_stream_upstream_stream: z.boolean().optional(),
+    chat_completions_to_responses: z
+      .enum(['inherit', 'enabled', 'disabled'])
+      .optional(),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -468,6 +471,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   system_prompt_override: false,
   deny_cross_protocol: false,
   non_stream_upstream_stream: false,
+  chat_completions_to_responses: 'inherit',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -514,11 +518,22 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     deny_cross_protocol: false,
     non_stream_upstream_stream: false,
+    chat_completions_to_responses: 'inherit' as
+      | 'inherit'
+      | 'enabled'
+      | 'disabled',
   }
 
   if (channel.setting) {
     try {
       const parsed = JSON.parse(channel.setting)
+      let chatCompletionsToResponses: ChannelFormValues['chat_completions_to_responses'] =
+        'inherit'
+      if (parsed.chat_completions_to_responses === true) {
+        chatCompletionsToResponses = 'enabled'
+      } else if (parsed.chat_completions_to_responses === false) {
+        chatCompletionsToResponses = 'disabled'
+      }
       const protocol = normalizeHttpProtocol(parsed.http_protocol)
       const shards = normalizeHttp2ConnectionShards(
         parsed.http2_connection_shards
@@ -538,6 +553,7 @@ export function transformChannelToFormDefaults(
         system_prompt_override: parsed.system_prompt_override || false,
         deny_cross_protocol: parsed.deny_cross_protocol || false,
         non_stream_upstream_stream: parsed.non_stream_upstream_stream === true,
+        chat_completions_to_responses: chatCompletionsToResponses,
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -674,6 +690,14 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     system_prompt_override: formData.system_prompt_override || false,
     deny_cross_protocol: formData.deny_cross_protocol || false,
     non_stream_upstream_stream: formData.non_stream_upstream_stream === true,
+  }
+
+  if (
+    formData.chat_completions_to_responses === 'enabled' ||
+    formData.chat_completions_to_responses === 'disabled'
+  ) {
+    settingObj.chat_completions_to_responses =
+      formData.chat_completions_to_responses === 'enabled'
   }
 
   const protocol = normalizeHttpProtocol(formData.http_protocol)

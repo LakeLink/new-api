@@ -36,6 +36,24 @@ func (p ChatCompletionsToResponsesPolicy) IsChannelEnabled(channelID int, channe
 	return false
 }
 
+// ValidateChatCompletionsToResponsesPolicy rejects malformed policies before they
+// replace the active configuration. Patterns use the same Go regexp syntax as routing.
+func ValidateChatCompletionsToResponsesPolicy(value string) error {
+	var policy *ChatCompletionsToResponsesPolicy
+	if err := common.UnmarshalJsonStr(value, &policy); err != nil {
+		return fmt.Errorf("invalid ChatCompletions -> Responses policy: %w", err)
+	}
+	if policy == nil {
+		return fmt.Errorf("ChatCompletions -> Responses policy must be a JSON object")
+	}
+	for _, pattern := range policy.ModelPatterns {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("invalid model pattern %q: %w", pattern, err)
+		}
+	}
+	return nil
+}
+
 type GlobalSettings struct {
 	PassThroughRequestEnabled bool     `json:"pass_through_request_enabled"`
 	ThinkingModelBlacklist    []string `json:"thinking_model_blacklist"`

@@ -61,6 +61,9 @@ const CONFIGURATION_BLOCKS = {
       'thinking_to_content',
       'pass_through_body_enabled',
       'responses_websocket_enabled',
+      'deny_cross_protocol',
+      'non_stream_upstream_stream',
+      'chat_completions_to_responses',
       'ollama_openai_chat',
       'system_prompt',
       'system_prompt_override',
@@ -152,6 +155,10 @@ export function getChannelConfigurationState(
     requestProcessing: Boolean(
       (values.type === 1 && values.force_format) ||
       values.thinking_to_content ||
+      values.deny_cross_protocol ||
+      values.non_stream_upstream_stream ||
+      (values.chat_completions_to_responses !== undefined &&
+        values.chat_completions_to_responses !== 'inherit') ||
       (values.type !== CHANNEL_TYPE_ADVANCED_CUSTOM &&
         values.pass_through_body_enabled) ||
       (supportsResponsesWebSocket(values.type) &&

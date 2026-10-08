@@ -21,12 +21,10 @@ import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import * as z from 'zod'
 
 import { JsonCodeEditor } from '@/components/json-code-editor'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
 import {
   Form,
   FormControl,
@@ -48,6 +46,15 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { ChatResponsesPolicyFields } from './chat-responses-policy-fields'
+import {
+  globalSettingsSchema,
+  toGlobalSettingsForm,
+  flattenGlobalValues,
+  type GlobalSettingsDefaults,
+  type GlobalModelSettingsFormInput,
+  type GlobalModelSettingsFormValues,
+} from './global-settings-form'
 
 const thinkingBlacklistExample = JSON.stringify(
   ['moonshotai/kimi-k2-thinking', 'kimi-k2-thinking', 're:.*@sha256:.*'],
@@ -55,87 +62,8 @@ const thinkingBlacklistExample = JSON.stringify(
   2
 )
 
-const chatToResponsesPolicyExample = JSON.stringify(
-  {
-    enabled: true,
-    all_channels: false,
-    channel_ids: [1, 2],
-    model_patterns: ['^gpt-4o.*$', '^gpt-5.*$'],
-  },
-  null,
-  2
-)
-
-const chatToResponsesPolicyAllChannelsExample = JSON.stringify(
-  {
-    enabled: true,
-    all_channels: true,
-    model_patterns: ['^gpt-4o.*$', '^gpt-5.*$'],
-  },
-  null,
-  2
-)
-
-const jsonString = z.string().refine((value) => {
-  const trimmed = value.trim()
-  if (!trimmed) return true
-  try {
-    JSON.parse(trimmed)
-    return true
-  } catch {
-    return false
-  }
-}, 'Invalid JSON format')
-
-const schema = z.object({
-  global: z.object({
-    pass_through_request_enabled: z.boolean(),
-    thinking_model_blacklist: jsonString,
-    chat_completions_to_responses_policy: jsonString,
-  }),
-  general_setting: z.object({
-    ping_interval_enabled: z.boolean(),
-    ping_interval_seconds: z.coerce.number().min(1),
-  }),
-})
-
-type GlobalModelSettingsFormValues = z.output<typeof schema>
-type GlobalModelSettingsFormInput = z.input<typeof schema>
-
-type FlatGlobalModelSettings = {
-  'global.pass_through_request_enabled': boolean
-  'global.thinking_model_blacklist': string
-  'global.chat_completions_to_responses_policy': string
-  'general_setting.ping_interval_enabled': boolean
-  'general_setting.ping_interval_seconds': number
-}
-
-const flattenGlobalValues = (
-  values: GlobalModelSettingsFormValues
-): FlatGlobalModelSettings => ({
-  'global.pass_through_request_enabled':
-    values.global.pass_through_request_enabled,
-  'global.thinking_model_blacklist': normalizeJsonText(
-    values.global.thinking_model_blacklist,
-    '[]'
-  ),
-  'global.chat_completions_to_responses_policy': normalizeJsonText(
-    values.global.chat_completions_to_responses_policy,
-    '{}'
-  ),
-  'general_setting.ping_interval_enabled':
-    values.general_setting.ping_interval_enabled,
-  'general_setting.ping_interval_seconds':
-    values.general_setting.ping_interval_seconds,
-})
-
-function normalizeJsonText(value: string, fallback: string) {
-  const trimmed = (value ?? '').toString().trim()
-  return trimmed ? trimmed : fallback
-}
-
 type GlobalSettingsCardProps = {
-  defaultValues: GlobalModelSettingsFormValues
+  defaultValues: GlobalSettingsDefaults
 }
 
 export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
@@ -147,22 +75,24 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
     unknown,
     GlobalModelSettingsFormValues
   >({
-    resolver: zodResolver(schema),
-    defaultValues: defaultValues as GlobalModelSettingsFormInput,
+    resolver: zodResolver(globalSettingsSchema),
+    defaultValues: toGlobalSettingsForm(defaultValues),
   })
 
   useEffect(() => {
-    form.reset(defaultValues as GlobalModelSettingsFormInput)
+    form.reset(toGlobalSettingsForm(defaultValues))
   }, [defaultValues, form])
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
 
   const onSubmit = async (values: GlobalModelSettingsFormValues) => {
-    const flattenedDefaults = flattenGlobalValues(defaultValues)
+    const flattenedDefaults = flattenGlobalValues(
+      toGlobalSettingsForm(defaultValues)
+    )
     const flattenedValues = flattenGlobalValues(values)
     const updates = Object.entries(flattenedValues).filter(
       ([key, value]) =>
-        value !== flattenedDefaults[key as keyof FlatGlobalModelSettings]
+        value !== flattenedDefaults[key as keyof typeof flattenedDefaults]
     )
 
     if (updates.length === 0) {
@@ -170,11 +100,12 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
       return
     }
 
-    for (const [key, value] of updates) {
-      await updateOption.mutateAsync({
-        key,
-        value,
-      })
+    try {
+      for (const [key, value] of updates) {
+        await updateOption.mutateAsync({ key, value })
+      }
+    } catch {
+      // The mutation reports the server error. Keep the draft for correction.
     }
   }
 
@@ -261,59 +192,7 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               </AlertDescription>
             </Alert>
 
-            <FormField
-              control={form.control}
-              name='global.chat_completions_to_responses_policy'
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>{t('Policy JSON')}</FormLabel>
-                  <FormControl>
-                    <JsonCodeEditor
-                      value={field.value}
-                      onChange={(value) => field.onChange(value)}
-                      name={field.name}
-                      onBlur={field.onBlur}
-                      textareaRef={field.ref}
-                      placeholder={`${t('Example (specific channels):')}\n${chatToResponsesPolicyExample}\n\n${t('Example (all channels):')}\n${chatToResponsesPolicyAllChannelsExample}`}
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    {t('Empty value will be saved as {}.')}
-                  </FormDescription>
-                  <div className='flex flex-wrap gap-2'>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() =>
-                        form.setValue(
-                          'global.chat_completions_to_responses_policy',
-                          chatToResponsesPolicyExample,
-                          { shouldDirty: true }
-                        )
-                      }
-                    >
-                      {t('Fill example (specific channels)')}
-                    </Button>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() =>
-                        form.setValue(
-                          'global.chat_completions_to_responses_policy',
-                          chatToResponsesPolicyAllChannelsExample,
-                          { shouldDirty: true }
-                        )
-                      }
-                    >
-                      {t('Fill example (all channels)')}
-                    </Button>
-                  </div>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            <ChatResponsesPolicyFields disabled={updateOption.isPending} />
           </div>
 
           <Separator />
