@@ -36,6 +36,10 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Session rule matched')
     case 'channel_selected':
       return t('Channel selected')
+    case 'codex_compact_web_search_declared':
+      return t('Codex compaction: added cached web search declaration')
+    case 'codex_compact_web_search_declared_lite':
+      return t('Codex compaction: added cached web search declaration (Lite)')
     case 'request_completed':
       return t('Request completed')
     case 'stream_not_successful':

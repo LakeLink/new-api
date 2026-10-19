@@ -61,6 +61,7 @@ const CONFIGURATION_BLOCKS = {
       'thinking_to_content',
       'pass_through_body_enabled',
       'responses_websocket_enabled',
+      'codex_compact_web_search',
       'deny_cross_protocol',
       'non_stream_upstream_stream',
       'chat_completions_to_responses',
@@ -157,6 +158,7 @@ export function getChannelConfigurationState(
       values.thinking_to_content ||
       values.deny_cross_protocol ||
       values.non_stream_upstream_stream ||
+      (values.type === 57 && values.codex_compact_web_search) ||
       (values.chat_completions_to_responses !== undefined &&
         values.chat_completions_to_responses !== 'inherit') ||
       (values.type !== CHANNEL_TYPE_ADVANCED_CUSTOM &&

@@ -23,6 +23,7 @@ type ChannelSettings struct {
 	Proxy                      string `json:"proxy"`
 	PassThroughBodyEnabled     bool   `json:"pass_through_body_enabled,omitempty"`
 	ResponsesWebSocketEnabled  bool   `json:"responses_websocket_enabled,omitempty"`
+	CodexCompactWebSearch      bool   `json:"codex_compact_web_search,omitempty"`
 	SystemPrompt               string `json:"system_prompt,omitempty"`
 	SystemPromptOverride       bool   `json:"system_prompt_override,omitempty"`
 	// TaskExtendPluginKeys lists the task plugins a New API channel (type 60)

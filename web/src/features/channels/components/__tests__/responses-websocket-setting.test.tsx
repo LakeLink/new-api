@@ -207,3 +207,38 @@ test.each(['deny_cross_protocol', 'non_stream_upstream_stream'] as const)(
     }
   }
 )
+
+test.each([false, true])(
+  'Codex compact search switch survives create, update and reload: %s',
+  (enabled) => {
+    const channel = channelSchema.parse({
+      id: 79,
+      name: 'Codex',
+      type: 57,
+      key: '',
+      status: 1,
+      created_time: 0,
+      test_time: 0,
+      response_time: 0,
+      balance_updated_time: 0,
+      setting: JSON.stringify({ codex_compact_web_search: enabled }),
+    })
+    const values = transformChannelToFormDefaults(channel)
+    expect(values.codex_compact_web_search).toBe(enabled)
+    for (const payload of [
+      transformFormDataToCreatePayload(values).channel,
+      transformFormDataToUpdatePayload(values, channel.id),
+    ]) {
+      assert(typeof payload.setting === 'string')
+      expect(JSON.parse(payload.setting).codex_compact_web_search).toBe(enabled)
+      expect(
+        transformChannelToFormDefaults({ ...channel, setting: payload.setting })
+          .codex_compact_web_search
+      ).toBe(enabled)
+    }
+    expect(
+      JSON.parse(buildSettingJSON({ ...values, type: 1 }))
+        .codex_compact_web_search
+    ).toBe(false)
+  }
+)

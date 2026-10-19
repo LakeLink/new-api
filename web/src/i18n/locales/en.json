@@ -6961,5 +6961,9 @@
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom"
-  }
+  },
+  "Restore web search declaration for Codex compaction": "Restore web search declaration for Codex compaction",
+  "Only for compaction with web search history and no search declaration. Adds cached search and records the rewrite in the request decision flow. Body passthrough bypasses this option.": "Only for compaction with web search history and no search declaration. Adds cached search and records the rewrite in the request decision flow. Body passthrough bypasses this option.",
+  "Codex compaction: added cached web search declaration": "Codex compaction: added cached web search declaration",
+  "Codex compaction: added cached web search declaration (Lite)": "Codex compaction: added cached web search declaration (Lite)"
 }

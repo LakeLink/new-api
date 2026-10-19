@@ -305,6 +305,7 @@ const SENSITIVE_FORM_FIELDS = [
   'http2_connection_shards',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
+  'codex_compact_web_search',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -1956,6 +1957,15 @@ export function ChannelMutateDrawer({
     <>
       {(
         [
+          ...(currentType === 57
+            ? [
+                [
+                  'codex_compact_web_search',
+                  'Restore web search declaration for Codex compaction',
+                  'Only for compaction with web search history and no search declaration. Adds cached search and records the rewrite in the request decision flow. Body passthrough bypasses this option.',
+                ] as const,
+              ]
+            : []),
           [
             'deny_cross_protocol',
             'Deny cross-protocol requests',

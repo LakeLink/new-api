@@ -271,6 +271,7 @@ export const channelFormSchema = z
     http2_connection_shards: z.number().int().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_websocket_enabled: z.boolean().optional(),
+    codex_compact_web_search: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     deny_cross_protocol: z.boolean().optional(),
@@ -467,6 +468,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   http2_connection_shards: 1,
   pass_through_body_enabled: false,
   responses_websocket_enabled: false,
+  codex_compact_web_search: false,
   system_prompt: '',
   system_prompt_override: false,
   deny_cross_protocol: false,
@@ -514,6 +516,7 @@ export function transformChannelToFormDefaults(
     http2_connection_shards: 1,
     pass_through_body_enabled: false,
     responses_websocket_enabled: false,
+    codex_compact_web_search: false,
     system_prompt: '',
     system_prompt_override: false,
     deny_cross_protocol: false,
@@ -549,6 +552,7 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
+        codex_compact_web_search: parsed.codex_compact_web_search === true,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
         deny_cross_protocol: parsed.deny_cross_protocol || false,
@@ -686,6 +690,8 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     responses_websocket_enabled:
       supportsResponsesWebSocket(formData.type) &&
       formData.responses_websocket_enabled === true,
+    codex_compact_web_search:
+      formData.type === 57 && formData.codex_compact_web_search === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
     deny_cross_protocol: formData.deny_cross_protocol || false,

@@ -6961,5 +6961,9 @@
     "Zhipu GLM": "智谱GLM",
     "Zhipu V4": "智谱 V4",
     "Zoom": "缩放"
-  }
+  },
+  "Restore web search declaration for Codex compaction": "修复 Codex 压缩的网页搜索声明",
+  "Only for compaction with web search history and no search declaration. Adds cached search and records the rewrite in the request decision flow. Body passthrough bypasses this option.": "仅当压缩历史含网页搜索且缺少声明时，补充缓存搜索声明，并在请求决策链中记录改写。请求体透传时不生效。",
+  "Codex compaction: added cached web search declaration": "Codex 压缩：已补充缓存网页搜索声明",
+  "Codex compaction: added cached web search declaration (Lite)": "Codex 压缩：已补充缓存网页搜索声明（Lite）"
 }
